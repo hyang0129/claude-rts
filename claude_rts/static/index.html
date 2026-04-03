@@ -288,13 +288,6 @@
           <option value="30">30</option>
         </select>
       </div>
-      <div class="setting-row">
-        <label>Scroll wheel behavior</label>
-        <select id="setting-scrollMode">
-          <option value="auto">Scroll terminal, Ctrl to zoom</option>
-          <option value="zoom-only">Zoom canvas, Ctrl to scroll</option>
-        </select>
-      </div>
     </div>
     <div class="settings-footer">
       <button class="btn-reset" id="btn-reset-settings">Reset defaults</button>
@@ -404,15 +397,10 @@ viewport.addEventListener('pointerup', () => {
 // Zoom (wheel, cursor-centered)
 // ════════════════════════════════════════════
 viewport.addEventListener('wheel', (e) => {
+  // Scroll over terminal = scroll terminal; Ctrl+scroll = zoom canvas
   const overTerminal = e.target.closest('.terminal-card');
-  const ctrlHeld = e.ctrlKey;
-
-  // Ctrl acts as a modifier to flip behavior:
-  //   auto mode:      scroll=terminal, Ctrl+scroll=zoom
-  //   zoom-only mode: scroll=zoom,     Ctrl+scroll=terminal (when over card)
-  if (overTerminal) {
-    const scrollTerminal = settings.scrollMode === 'zoom-only' ? ctrlHeld : !ctrlHeld;
-    if (scrollTerminal) return; // let xterm.js handle the scroll event
+  if (overTerminal && !e.ctrlKey) {
+    return; // let xterm.js handle the scroll event
   }
 
   e.preventDefault();
@@ -941,7 +929,6 @@ const DEFAULT_SETTINGS = {
   paste: 'ctrl-shift-v',
   rightclick: 'paste',
   idle: 5,
-  scrollMode: 'auto',
 };
 let settings = { ...DEFAULT_SETTINGS };
 
@@ -964,7 +951,6 @@ function applySettingsToUI() {
   document.getElementById('setting-paste').value = settings.paste;
   document.getElementById('setting-rightclick').value = settings.rightclick;
   document.getElementById('setting-idle').value = String(settings.idle);
-  document.getElementById('setting-scrollMode').value = settings.scrollMode;
 }
 
 function applySettingsToState() {
@@ -991,7 +977,7 @@ settingsOverlay.addEventListener('click', (e) => {
 });
 
 // Live-update settings on change
-for (const sel of ['setting-copy', 'setting-paste', 'setting-rightclick', 'setting-idle', 'setting-scrollMode']) {
+for (const sel of ['setting-copy', 'setting-paste', 'setting-rightclick', 'setting-idle']) {
   document.getElementById(sel).addEventListener('change', (e) => {
     const key = sel.replace('setting-', '');
     settings[key] = key === 'idle' ? parseInt(e.target.value) : e.target.value;
