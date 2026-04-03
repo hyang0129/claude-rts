@@ -22,6 +22,7 @@ DEFAULT_CONFIG = {
     "idle_threshold": 5,
     "default_canvas": "main",
     "theme": "catppuccin-mocha",
+    "startup_script": "discover-devcontainers",
 }
 
 # Allowed canvas name pattern: alphanumeric, hyphens, underscores

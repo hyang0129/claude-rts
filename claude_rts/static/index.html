@@ -316,6 +316,60 @@
   }
   .canvas-dropdown-action:hover { background: #313244; color: #cdd6f4; }
 
+  /* ── Loader card ── */
+  .loader-card {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid #45475a;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #1e1e2e;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    min-width: 300px;
+    min-height: 120px;
+  }
+  .loader-card .loader-titlebar {
+    height: 32px;
+    background: #313244;
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #cba6f7;
+    user-select: none;
+  }
+  .loader-card .loader-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    gap: 12px;
+  }
+  .loader-card .loader-spinner {
+    width: 24px; height: 24px;
+    border: 3px solid #313244;
+    border-top-color: #cba6f7;
+    border-radius: 50%;
+    animation: loaderSpin 0.8s linear infinite;
+  }
+  @keyframes loaderSpin {
+    to { transform: rotate(360deg); }
+  }
+  .loader-card .loader-status {
+    font-size: 12px;
+    color: #a6adc8;
+  }
+  .loader-card.error { border-color: #f38ba8; }
+  .loader-card.error .loader-titlebar { color: #f38ba8; }
+  .loader-card.error .loader-spinner {
+    border-top-color: #f38ba8;
+    animation: none;
+  }
+
   /* ── Control group badge ── */
   .control-group-badge {
     font-size: 10px;
@@ -664,9 +718,10 @@ function showContextMenu(sx, sy) {
   let html = '<div class="ctx-header">Spawn terminal</div>';
   hubs.forEach((h, i) => {
     const sym = hubSymbolMap[h.hub] || '?';
+    const detail = h.container ? ` <span style="color:#585b70;font-size:11px">(${h.container})</span>` : '';
     html += `<div class="ctx-item" data-hub="${h.hub}">
       <span class="symbol-preview">${sym}</span>
-      ${h.hub} <span style="color:#585b70;font-size:11px">(${h.container})</span>
+      ${h.hub}${detail}
     </div>`;
   });
   ctxMenu.innerHTML = html;
@@ -728,6 +783,7 @@ class Card {
     this.w = w || CARD_W;
     this.h = h || CARD_H;
     this.symbol = symbol;
+    this.execCmd = null; // overridden by subclasses if needed
     this.state = 'connecting';
     this.lastOutput = 0;
     this.controlGroupNums = []; // array of group numbers (1-9)
@@ -921,7 +977,9 @@ class Card {
   }
 
   serialize() {
-    return { hub: this.hub, x: this.x, y: this.y, w: this.w, h: this.h, type: this.type, controlGroups: this.controlGroupNums.length > 0 ? [...this.controlGroupNums] : undefined };
+    const data = { hub: this.hub, x: this.x, y: this.y, w: this.w, h: this.h, type: this.type, controlGroups: this.controlGroupNums.length > 0 ? [...this.controlGroupNums] : undefined };
+    if (this.execCmd) data.exec = this.execCmd;
+    return data;
   }
 
   destroy() {
@@ -940,6 +998,7 @@ class Card {
 class TerminalCard extends Card {
   constructor(opts) {
     super({ ...opts, type: 'terminal' });
+    this.execCmd = opts.exec || null; // custom exec command (for /ws/exec)
     this.term = null;
     this.fitAddon = null;
     this.ws = null;
@@ -989,7 +1048,10 @@ class TerminalCard extends Card {
 
   connectWs() {
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    this.ws = new WebSocket(`${wsProto}//${location.host}/ws/${this.hub}`);
+    const wsUrl = this.execCmd
+      ? `${wsProto}//${location.host}/ws/exec?cmd=${encodeURIComponent(this.execCmd)}`
+      : `${wsProto}//${location.host}/ws/${this.hub}`;
+    this.ws = new WebSocket(wsUrl);
     this.ws.binaryType = 'arraybuffer';
 
     this.ws.addEventListener('open', () => {
@@ -1096,6 +1158,68 @@ class TerminalCard extends Card {
 }
 
 // ════════════════════════════════════════════
+// LoaderCard subclass
+// ════════════════════════════════════════════
+class LoaderCard {
+  constructor({ scriptName, x, y }) {
+    this.scriptName = scriptName;
+    this.x = x;
+    this.y = y;
+    this.el = null;
+    this.statusEl = null;
+    this.error = false;
+  }
+
+  createElement() {
+    const el = document.createElement('div');
+    el.className = 'loader-card';
+    el.style.left = this.x + 'px';
+    el.style.top = this.y + 'px';
+    el.style.width = '360px';
+    el.style.height = '140px';
+    el.style.zIndex = 999;
+
+    const titlebar = document.createElement('div');
+    titlebar.className = 'loader-titlebar';
+    titlebar.textContent = 'Startup';
+    el.appendChild(titlebar);
+
+    const body = document.createElement('div');
+    body.className = 'loader-body';
+
+    const spinner = document.createElement('div');
+    spinner.className = 'loader-spinner';
+    body.appendChild(spinner);
+
+    const status = document.createElement('div');
+    status.className = 'loader-status';
+    status.textContent = `Running: ${this.scriptName}`;
+    body.appendChild(status);
+    this.statusEl = status;
+
+    el.appendChild(body);
+    this.el = el;
+    return el;
+  }
+
+  setStatus(text) {
+    if (this.statusEl) this.statusEl.textContent = text;
+  }
+
+  setError(msg) {
+    this.error = true;
+    if (this.el) this.el.classList.add('error');
+    this.setStatus(msg);
+  }
+
+  destroy() {
+    if (this.el && this.el.parentNode) {
+      this.el.parentNode.removeChild(this.el);
+    }
+  }
+}
+
+// ════════════════════════════════════════════
 // Terminal state management
 // ════════════════════════════════════════════
 function updateCardState(id, state) {
@@ -1117,9 +1241,9 @@ setInterval(() => {
 // ════════════════════════════════════════════
 // Spawn a terminal card
 // ════════════════════════════════════════════
-function spawnCard(hub, x, y, w, h, savedControlGroups) {
+function spawnCard(hub, x, y, w, h, savedControlGroups, execCmd) {
   const symbol = hubSymbolMap[hub.hub] || '?';
-  const card = new TerminalCard({ hub: hub.hub, container: hub.container, x, y, w, h, symbol });
+  const card = new TerminalCard({ hub: hub.hub, container: hub.container, x, y, w, h, symbol, exec: execCmd || hub.exec || null });
   if (savedControlGroups && Array.isArray(savedControlGroups)) {
     card.controlGroupNums = [...savedControlGroups];
   }
@@ -1716,7 +1840,7 @@ async function switchCanvas(name) {
   if (saved && saved.length > 0) {
     for (const s of saved) {
       const hub = hubs.find(h => h.hub === s.hub);
-      if (hub) spawnCard(hub, s.x, s.y, s.w, s.h, s.controlGroups);
+      if (hub) spawnCard(hub, s.x, s.y, s.w, s.h, s.controlGroups, s.exec);
     }
     rebuildControlGroupsFromCards();
   }
@@ -1742,8 +1866,65 @@ async function switchCanvas(name) {
   // Load canvas list
   await refreshCanvasList();
 
-  const resp = await fetch('/api/hubs');
-  hubs = await resp.json();
+  // Show a LoaderCard during startup
+  const loaderX = (CANVAS_W - 360) / 2;
+  const loaderY = (CANVAS_H - 140) / 2;
+  const scriptName = settings.startup_script || 'discover-devcontainers';
+  const loader = new LoaderCard({ scriptName, x: loaderX, y: loaderY });
+  loader.createElement();
+  canvas.appendChild(loader.el);
+
+  // Center on loader
+  const vw = viewport.clientWidth;
+  const vh = viewport.clientHeight;
+  pan.x = (vw - 360) / 2 - loaderX;
+  pan.y = (vh - 140) / 2 - loaderY;
+  applyTransform();
+
+  let startupCards = [];
+  let startupError = false;
+
+  try {
+    const resp = await fetch('/api/startup');
+    const data = await resp.json();
+    if (data.status === 'error') {
+      loader.setError(`Startup failed: ${data.error}`);
+      startupError = true;
+      // Wait a moment so user sees the error, then fall back to /api/hubs
+      await new Promise(r => setTimeout(r, 2000));
+    } else {
+      startupCards = data.cards || [];
+    }
+  } catch (err) {
+    loader.setError(`Startup failed: ${err.message}`);
+    startupError = true;
+    await new Promise(r => setTimeout(r, 2000));
+  }
+
+  // If startup returned cards, convert them to hub format
+  if (startupCards.length > 0) {
+    hubs = startupCards.map(c => ({
+      hub: c.name,
+      container: c.container || '',
+      exec: c.exec || null,
+    }));
+  } else if (startupError || startupCards.length === 0) {
+    // Fallback: try legacy /api/hubs discovery
+    loader.setStatus('Falling back to hub discovery...');
+    try {
+      const resp = await fetch('/api/hubs');
+      const hubData = await resp.json();
+      hubs = hubData.map(h => ({
+        ...h,
+        exec: `docker.exe exec -it -u vscode ${h.container} bash -l`,
+      }));
+    } catch {
+      hubs = [];
+    }
+  }
+
+  // Remove loader card
+  loader.destroy();
 
   if (hubs.length === 0) {
     document.getElementById('hub-count').textContent = 'No containers running';
@@ -1761,7 +1942,7 @@ async function switchCanvas(name) {
     // Spawn cards from saved layout
     for (const s of saved) {
       const hub = hubs.find(h => h.hub === s.hub);
-      if (hub) spawnCard(hub, s.x, s.y, s.w, s.h, s.controlGroups);
+      if (hub) spawnCard(hub, s.x, s.y, s.w, s.h, s.controlGroups, s.exec);
     }
     // Spawn any new hubs not in saved layout
     for (const hub of hubs) {

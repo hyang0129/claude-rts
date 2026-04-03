@@ -10,6 +10,7 @@ from winpty import PtyProcess
 
 from .config import read_config, write_config, list_canvases, read_canvas, write_canvas, delete_canvas
 from .discovery import discover_hubs
+from .startup import run_startup
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
@@ -24,6 +25,22 @@ async def hubs_handler(request: web.Request) -> web.Response:
     hubs = await discover_hubs()
     logger.info("Discovered {} hub(s): {}", len(hubs), [h["hub"] for h in hubs])
     return web.json_response(hubs)
+
+
+async def startup_handler(request: web.Request) -> web.Response:
+    logger.info("Startup requested by {}", request.remote)
+    config = read_config()
+    script_name = config.get("startup_script", "discover-devcontainers")
+    try:
+        result = await run_startup(script_name)
+        logger.info("Startup script '{}' returned {} card(s)", script_name, len(result))
+        return web.json_response({"status": "ok", "script": script_name, "cards": result})
+    except Exception as exc:
+        logger.exception("Startup script '{}' failed", script_name)
+        return web.json_response(
+            {"status": "error", "script": script_name, "error": str(exc), "cards": []},
+            status=500,
+        )
 
 
 async def config_get_handler(request: web.Request) -> web.Response:
@@ -166,16 +183,93 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+async def exec_websocket_handler(request: web.Request) -> web.WebSocketResponse:
+    """WebSocket handler that spawns a PTY for an arbitrary command."""
+    cmd = request.query.get("cmd", "").strip()
+    if not cmd:
+        logger.warning("exec WebSocket: missing 'cmd' query parameter")
+        raise web.HTTPBadRequest(text="Missing 'cmd' query parameter")
+
+    logger.info("exec WebSocket request: cmd={!r}", cmd)
+
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    logger.info("exec WebSocket established for cmd={!r}", cmd)
+
+    logger.info("Spawning PTY process: {}", cmd)
+
+    try:
+        pty = PtyProcess.spawn(cmd, dimensions=(24, 80))
+    except Exception:
+        logger.exception("Failed to spawn PTY for cmd={!r}", cmd)
+        await ws.close(code=1011, message=b"Failed to spawn terminal")
+        return ws
+
+    logger.info("PTY spawned successfully for cmd={!r}", cmd)
+
+    async def pty_read_loop():
+        """Read from PTY and forward to WebSocket."""
+        loop = asyncio.get_event_loop()
+        try:
+            while pty.isalive():
+                try:
+                    data = await loop.run_in_executor(None, pty.read)
+                    if data:
+                        await ws.send_bytes(data.encode("utf-8", errors="replace"))
+                except EOFError:
+                    logger.info("PTY EOF for cmd={!r}", cmd)
+                    break
+                except Exception:
+                    logger.exception("PTY read error for cmd={!r}", cmd)
+                    break
+        finally:
+            if not ws.closed:
+                await ws.close()
+
+    read_task = asyncio.create_task(pty_read_loop())
+
+    try:
+        async for msg in ws:
+            if msg.type == web.WSMsgType.BINARY:
+                text = msg.data.decode("utf-8", errors="replace")
+                pty.write(text)
+            elif msg.type == web.WSMsgType.TEXT:
+                try:
+                    control = json.loads(msg.data)
+                    if control.get("type") == "resize":
+                        cols = control.get("cols", 80)
+                        rows = control.get("rows", 24)
+                        logger.info("Resize exec cmd={!r}: {}x{}", cmd, cols, rows)
+                        pty.setwinsize(rows, cols)
+                except json.JSONDecodeError:
+                    logger.warning("Invalid JSON control message for exec cmd={!r}", cmd)
+            elif msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
+                break
+    except Exception:
+        logger.exception("exec WebSocket handler error for cmd={!r}", cmd)
+    finally:
+        logger.info("Cleaning up exec session cmd={!r}", cmd)
+        read_task.cancel()
+        try:
+            pty.terminate(force=True)
+        except Exception:
+            pass
+
+    return ws
+
+
 def create_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index_handler)
     app.router.add_get("/api/hubs", hubs_handler)
+    app.router.add_get("/api/startup", startup_handler)
     app.router.add_get("/api/config", config_get_handler)
     app.router.add_put("/api/config", config_put_handler)
     app.router.add_get("/api/canvases", canvases_list_handler)
     app.router.add_get("/api/canvases/{name}", canvas_get_handler)
     app.router.add_put("/api/canvases/{name}", canvas_put_handler)
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
+    app.router.add_get("/ws/exec", exec_websocket_handler)
     app.router.add_get("/ws/{hub}", websocket_handler)
     logger.info("Application routes registered")
     return app

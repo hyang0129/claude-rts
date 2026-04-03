@@ -70,4 +70,6 @@ async def test_app_has_all_routes(app):
     assert "/api/config" in routes
     assert "/api/canvases" in routes
     assert "/api/canvases/{name}" in routes
+    assert "/api/startup" in routes
+    assert "/ws/exec" in routes
     assert "/ws/{hub}" in routes
