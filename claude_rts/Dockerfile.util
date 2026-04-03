@@ -1,0 +1,29 @@
+# claude-rts utility container
+# Purpose: background tasks, monitoring, status probing (NOT coding or LLM calls)
+# Stays alive via sleep infinity, commands executed via docker exec
+
+FROM python:3.11-slim
+
+# Install Node.js (needed for claude CLI, which claude-usage-plz spawns)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install claude CLI (required by claude-usage-plz)
+RUN npm install -g @anthropic-ai/claude-code
+
+# Install claude-usage-plz
+RUN pip install --no-cache-dir claude-usage-plz
+
+# Create profiles mount point
+RUN mkdir -p /profiles
+
+# Non-root user for safety
+RUN useradd -m -s /bin/bash util
+USER util
+WORKDIR /home/util
+
+# Stay alive, awaiting exec commands
+CMD ["sleep", "infinity"]
