@@ -315,6 +315,24 @@
     gap: 8px;
   }
   .canvas-dropdown-action:hover { background: #313244; color: #cdd6f4; }
+
+  /* ── Control group badge ── */
+  .control-group-badge {
+    font-size: 10px;
+    font-family: monospace;
+    background: rgba(203, 166, 247, 0.3);
+    color: #cba6f7;
+    padding: 0 4px;
+    border-radius: 3px;
+    margin-left: 2px;
+  }
+  .control-group-badge.flash {
+    animation: cgFlash 0.4s ease-out;
+  }
+  @keyframes cgFlash {
+    0% { background: rgba(203, 166, 247, 0.8); color: #1e1e2e; }
+    100% { background: rgba(203, 166, 247, 0.3); color: #cba6f7; }
+  }
 </style>
 </head>
 <body>
@@ -449,6 +467,11 @@ let rightClickStart = null; // {x, y} — tracks right-click origin for drag thr
 let focusedCardId = null;
 let canvasMode = 'rts'; // 'rts' or 'terminal'
 let focusedTerminalCard = null; // reference to the TerminalCard in terminal mode
+
+// Control groups (1-9): maps group number to array of card IDs
+const controlGroups = {};
+let lastRecallKey = null;
+let lastRecallTime = 0;
 
 const viewport = document.getElementById('viewport');
 const canvas = document.getElementById('canvas');
@@ -707,7 +730,7 @@ class Card {
     this.symbol = symbol;
     this.state = 'connecting';
     this.lastOutput = 0;
-    this.controlGroup = null;
+    this.controlGroupNums = []; // array of group numbers (1-9)
     this.el = null;
     this._cancelDrag = null;
     this._cancelResize = null;
@@ -736,6 +759,12 @@ class Card {
     symbolSpan.style.color = STATE_COLORS.connecting;
     symbolSpan.textContent = this.symbol;
     titlebar.appendChild(symbolSpan);
+
+    // Control group badges container
+    const badgeContainer = document.createElement('span');
+    badgeContainer.className = 'control-group-badges';
+    badgeContainer.dataset.cgBadges = this.id;
+    titlebar.appendChild(badgeContainer);
 
     const nameSpan = document.createElement('span');
     nameSpan.className = 'hub-name';
@@ -892,7 +921,7 @@ class Card {
   }
 
   serialize() {
-    return { hub: this.hub, x: this.x, y: this.y, w: this.w, h: this.h, type: this.type };
+    return { hub: this.hub, x: this.x, y: this.y, w: this.w, h: this.h, type: this.type, controlGroups: this.controlGroupNums.length > 0 ? [...this.controlGroupNums] : undefined };
   }
 
   destroy() {
@@ -1088,15 +1117,21 @@ setInterval(() => {
 // ════════════════════════════════════════════
 // Spawn a terminal card
 // ════════════════════════════════════════════
-function spawnCard(hub, x, y, w, h) {
+function spawnCard(hub, x, y, w, h, savedControlGroups) {
   const symbol = hubSymbolMap[hub.hub] || '?';
   const card = new TerminalCard({ hub: hub.hub, container: hub.container, x, y, w, h, symbol });
+  if (savedControlGroups && Array.isArray(savedControlGroups)) {
+    card.controlGroupNums = [...savedControlGroups];
+  }
   card.createElement();
   canvas.appendChild(card.el);
   cards.push(card);
   card.setupDrag();
   card.setupResize();
   card.onInit();
+  if (card.controlGroupNums.length > 0) {
+    updateControlGroupBadges(card);
+  }
   drawMinimap();
   updateHubCount();
   return card;
@@ -1136,6 +1171,104 @@ function zoomToCard(card) {
   pan.y = (vh - card.h * zoom) / 2 - card.y * zoom;
   applyTransform();
   setTimeout(() => { if (card.fitAddon) card.fitAddon.fit(); }, 100);
+}
+
+// ════════════════════════════════════════════
+// Control groups
+// ════════════════════════════════════════════
+function updateControlGroupBadges(card) {
+  const container = card.el.querySelector(`[data-cg-badges="${card.id}"]`);
+  if (!container) return;
+  container.innerHTML = '';
+  for (const num of card.controlGroupNums.sort((a, b) => a - b)) {
+    const badge = document.createElement('span');
+    badge.className = 'control-group-badge';
+    badge.textContent = num;
+    container.appendChild(badge);
+  }
+}
+
+function flashControlGroupBadges(card) {
+  const container = card.el.querySelector(`[data-cg-badges="${card.id}"]`);
+  if (!container) return;
+  container.querySelectorAll('.control-group-badge').forEach(badge => {
+    badge.classList.remove('flash');
+    // Force reflow to restart animation
+    void badge.offsetWidth;
+    badge.classList.add('flash');
+  });
+}
+
+function assignControlGroup(groupNum) {
+  const selected = cards.filter(c => c.el.classList.contains('focused'));
+  if (selected.length === 0) return;
+
+  // Remove previous members of this group
+  const prevIds = controlGroups[groupNum] || [];
+  for (const id of prevIds) {
+    const card = cards.find(c => c.id === id);
+    if (card) {
+      card.controlGroupNums = card.controlGroupNums.filter(n => n !== groupNum);
+      updateControlGroupBadges(card);
+    }
+  }
+
+  // Assign selected cards to this group
+  const newIds = selected.map(c => c.id);
+  controlGroups[groupNum] = newIds;
+  for (const card of selected) {
+    if (!card.controlGroupNums.includes(groupNum)) {
+      card.controlGroupNums.push(groupNum);
+    }
+    updateControlGroupBadges(card);
+    flashControlGroupBadges(card);
+  }
+  saveLayout();
+}
+
+function recallControlGroup(groupNum, doubleTap) {
+  const ids = controlGroups[groupNum];
+  if (!ids || ids.length === 0) return;
+
+  const groupCards = ids.map(id => cards.find(c => c.id === id)).filter(Boolean);
+  if (groupCards.length === 0) return;
+
+  // Select those cards, deselect others
+  cards.forEach(c => c.onBlur());
+  groupCards.forEach(c => c.onFocus());
+  if (groupCards.length > 0) focusedCardId = groupCards[groupCards.length - 1].id;
+
+  // Zoom to fit the group
+  const vw = viewport.clientWidth;
+  const vh = viewport.clientHeight;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const c of groupCards) {
+    minX = Math.min(minX, c.x);
+    minY = Math.min(minY, c.y);
+    maxX = Math.max(maxX, c.x + c.w);
+    maxY = Math.max(maxY, c.y + c.h);
+  }
+  const cw = maxX - minX;
+  const ch = maxY - minY;
+  const pad = doubleTap ? 20 : 60;
+  const maxZoom = doubleTap ? 2 : 1.5;
+  zoom = Math.min((vw - pad * 2) / cw, (vh - pad * 2) / ch, maxZoom);
+  pan.x = (vw - cw * zoom) / 2 - minX * zoom;
+  pan.y = (vh - ch * zoom) / 2 - minY * zoom;
+  applyTransform();
+  setTimeout(() => groupCards.forEach(c => { if (c.fitAddon) c.fitAddon.fit(); }), 100);
+}
+
+function rebuildControlGroupsFromCards() {
+  // Clear existing
+  for (const key of Object.keys(controlGroups)) delete controlGroups[key];
+  for (const card of cards) {
+    for (const num of card.controlGroupNums) {
+      if (!controlGroups[num]) controlGroups[num] = [];
+      controlGroups[num].push(card.id);
+    }
+    updateControlGroupBadges(card);
+  }
 }
 
 // ════════════════════════════════════════════
@@ -1322,8 +1455,28 @@ document.addEventListener('keydown', (e) => {
   if (canvasMode !== 'rts') return;
   // Ignore if typing in an input/textarea
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+
+  // Ctrl+1-9: assign control group (before the modifier bail-out)
+  if (e.ctrlKey && !e.metaKey && !e.altKey && e.key >= '1' && e.key <= '9') {
+    e.preventDefault();
+    assignControlGroup(parseInt(e.key));
+    return;
+  }
+
   // Ignore if modifier keys are held (let browser/OS shortcuts work)
   if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+  // 1-9: recall control group
+  if (e.key >= '1' && e.key <= '9') {
+    e.preventDefault();
+    const groupNum = parseInt(e.key);
+    const now = Date.now();
+    const doubleTap = (lastRecallKey === e.key && (now - lastRecallTime) < 300);
+    lastRecallKey = e.key;
+    lastRecallTime = now;
+    recallControlGroup(groupNum, doubleTap);
+    return;
+  }
 
   if (e.key === 'a' || e.key === 'A') {
     // Select all cards
@@ -1563,8 +1716,9 @@ async function switchCanvas(name) {
   if (saved && saved.length > 0) {
     for (const s of saved) {
       const hub = hubs.find(h => h.hub === s.hub);
-      if (hub) spawnCard(hub, s.x, s.y, s.w, s.h);
+      if (hub) spawnCard(hub, s.x, s.y, s.w, s.h, s.controlGroups);
     }
+    rebuildControlGroupsFromCards();
   }
 
   // 5. Fit view
@@ -1607,7 +1761,7 @@ async function switchCanvas(name) {
     // Spawn cards from saved layout
     for (const s of saved) {
       const hub = hubs.find(h => h.hub === s.hub);
-      if (hub) spawnCard(hub, s.x, s.y, s.w, s.h);
+      if (hub) spawnCard(hub, s.x, s.y, s.w, s.h, s.controlGroups);
     }
     // Spawn any new hubs not in saved layout
     for (const hub of hubs) {
@@ -1615,6 +1769,7 @@ async function switchCanvas(name) {
         spawnCard(hub, 100 + Math.random() * 200, 100 + Math.random() * 200);
       }
     }
+    rebuildControlGroupsFromCards();
   } else {
     layoutGrid(hubs);
   }
