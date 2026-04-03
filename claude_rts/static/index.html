@@ -345,8 +345,7 @@ let IDLE_THRESHOLD_MS = 5000; // updated by settings
 // ════════════════════════════════════════════
 // State
 // ════════════════════════════════════════════
-let cards = [];         // {id, hub, container, el, term, fitAddon, ws, x, y, w, h, symbol, state, lastOutput}
-let nextCardId = 0;
+let cards = [];         // Card instances
 let hubs = [];          // from /api/hubs
 let hubSymbolMap = {};  // hub name -> symbol
 let pan = { x: 0, y: 0 };
@@ -355,7 +354,6 @@ let isPanning = false;
 let panStart = { x: 0, y: 0, panX: 0, panY: 0 };
 let rightClickStart = null; // {x, y} — tracks right-click origin for drag threshold
 let focusedCardId = null;
-let maxZ = 10;
 
 const viewport = document.getElementById('viewport');
 const canvas = document.getElementById('canvas');
@@ -455,7 +453,7 @@ function fitAll() {
   pan.y = (vh - ch * zoom) / 2 - minY * zoom;
   applyTransform();
   // Refit all terminals after zoom settles
-  setTimeout(() => cards.forEach(c => c.fitAddon.fit()), 100);
+  setTimeout(() => cards.forEach(c => { if (c.fitAddon) c.fitAddon.fit(); }), 100);
 }
 
 // ════════════════════════════════════════════
@@ -596,16 +594,387 @@ const TERM_THEME = {
 };
 
 // ════════════════════════════════════════════
+// Card base class
+// ════════════════════════════════════════════
+class Card {
+  static nextId = 0;
+  static maxZ = 10;
+
+  constructor({ hub, container, x, y, w, h, symbol, type }) {
+    this.id = Card.nextId++;
+    this.type = type || 'base';
+    this.hub = hub;
+    this.container = container;
+    this.x = x;
+    this.y = y;
+    this.w = w || CARD_W;
+    this.h = h || CARD_H;
+    this.symbol = symbol;
+    this.state = 'connecting';
+    this.lastOutput = 0;
+    this.controlGroup = null;
+    this.el = null;
+    this._cancelDrag = null;
+    this._cancelResize = null;
+  }
+
+  createElement() {
+    const el = document.createElement('div');
+    el.className = 'terminal-card';
+    el.style.left = this.x + 'px';
+    el.style.top = this.y + 'px';
+    el.style.width = this.w + 'px';
+    el.style.height = this.h + 'px';
+    el.style.zIndex = ++Card.maxZ;
+    el.dataset.cardId = this.id;
+
+    const copyLabel = cards.filter(c => c.hub === this.hub).length;
+
+    // Titlebar
+    const titlebar = document.createElement('div');
+    titlebar.className = 'terminal-titlebar';
+    titlebar.dataset.drag = this.id;
+
+    const symbolSpan = document.createElement('span');
+    symbolSpan.className = 'hub-symbol';
+    symbolSpan.dataset.symbol = this.id;
+    symbolSpan.style.color = STATE_COLORS.connecting;
+    symbolSpan.textContent = this.symbol;
+    titlebar.appendChild(symbolSpan);
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'hub-name';
+    nameSpan.textContent = this.hub;
+    titlebar.appendChild(nameSpan);
+
+    if (copyLabel > 0) {
+      const copySpan = document.createElement('span');
+      copySpan.style.cssText = 'color:#585b70;font-size:11px';
+      copySpan.textContent = '#' + (copyLabel + 1);
+      titlebar.appendChild(copySpan);
+    }
+
+    const containerSpan = document.createElement('span');
+    containerSpan.className = 'container-name';
+    containerSpan.textContent = this.container;
+    titlebar.appendChild(containerSpan);
+
+    const spacer = document.createElement('span');
+    spacer.className = 'spacer';
+    titlebar.appendChild(spacer);
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'close-btn';
+    closeBtn.dataset.close = this.id;
+    closeBtn.innerHTML = '&times;';
+    titlebar.appendChild(closeBtn);
+
+    el.appendChild(titlebar);
+
+    // Body (subclass hook)
+    const body = this.createBody();
+    body.dataset.body = this.id;
+    el.appendChild(body);
+
+    // Resize handle
+    const resizeHandle = document.createElement('div');
+    resizeHandle.className = 'resize-handle';
+    resizeHandle.dataset.resize = this.id;
+    el.appendChild(resizeHandle);
+
+    this.el = el;
+
+    // Focus on click
+    el.addEventListener('pointerdown', () => {
+      focusCard(this.id);
+      el.style.zIndex = ++Card.maxZ;
+    });
+
+    // Double-click anywhere on card to zoom-to-fill
+    el.addEventListener('dblclick', (e) => {
+      if (e.target.closest('.close-btn')) return;
+      zoomToCard(this);
+    });
+
+    // Close button
+    closeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      destroyCard(this.id);
+    });
+
+    return el;
+  }
+
+  createBody() {
+    const body = document.createElement('div');
+    body.className = 'terminal-body';
+    return body;
+  }
+
+  onInit() {}
+
+  onDestroy() {}
+
+  onFocus() { this.el.classList.add('focused'); }
+
+  onBlur() { this.el.classList.remove('focused'); }
+
+  setupDrag() {
+    const titlebar = this.el.querySelector(`[data-drag="${this.id}"]`);
+    let startX, startY, origX, origY;
+
+    const onMove = (e) => {
+      this.x = origX + (e.clientX - startX) / zoom;
+      this.y = origY + (e.clientY - startY) / zoom;
+      this.el.style.left = this.x + 'px';
+      this.el.style.top = this.y + 'px';
+      drawMinimap();
+    };
+    const onUp = () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      saveLayout();
+    };
+
+    titlebar.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('.close-btn')) return;
+      startX = e.clientX;
+      startY = e.clientY;
+      origX = this.x;
+      origY = this.y;
+      document.addEventListener('pointermove', onMove);
+      document.addEventListener('pointerup', onUp);
+      e.preventDefault();
+      e.stopPropagation();
+    });
+
+    this._cancelDrag = () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+    };
+  }
+
+  setupResize() {
+    const handle = this.el.querySelector(`[data-resize="${this.id}"]`);
+    let startX, startY, origW, origH;
+
+    const onMove = (e) => {
+      this.w = Math.max(300, origW + (e.clientX - startX) / zoom);
+      this.h = Math.max(200, origH + (e.clientY - startY) / zoom);
+      this.el.style.width = this.w + 'px';
+      this.el.style.height = this.h + 'px';
+      drawMinimap();
+    };
+    const onUp = () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      saveLayout();
+    };
+
+    handle.addEventListener('pointerdown', (e) => {
+      startX = e.clientX;
+      startY = e.clientY;
+      origW = this.w;
+      origH = this.h;
+      document.addEventListener('pointermove', onMove);
+      document.addEventListener('pointerup', onUp);
+      e.preventDefault();
+      e.stopPropagation();
+    });
+
+    this._cancelResize = () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+    };
+  }
+
+  updateState(newState) {
+    this.state = newState;
+    if (newState === 'working') this.lastOutput = Date.now();
+    const symbolEl = this.el.querySelector(`[data-symbol="${this.id}"]`);
+    if (symbolEl) symbolEl.style.color = STATE_COLORS[newState] || STATE_COLORS.connecting;
+    drawMinimap();
+  }
+
+  serialize() {
+    return { hub: this.hub, x: this.x, y: this.y, w: this.w, h: this.h, type: this.type };
+  }
+
+  destroy() {
+    this.onDestroy();
+    if (this._cancelDrag) this._cancelDrag();
+    if (this._cancelResize) this._cancelResize();
+    if (this.el && this.el.parentNode) {
+      this.el.parentNode.removeChild(this.el);
+    }
+  }
+}
+
+// ════════════════════════════════════════════
+// TerminalCard subclass
+// ════════════════════════════════════════════
+class TerminalCard extends Card {
+  constructor(opts) {
+    super({ ...opts, type: 'terminal' });
+    this.term = null;
+    this.fitAddon = null;
+    this.ws = null;
+    this.ro = null;
+    this._cleanup = null;
+    this._reconnectDelay = 1000;
+    this._reconnectTimer = null;
+    this._intentionalClose = false;
+  }
+
+  createBody() {
+    const body = document.createElement('div');
+    body.className = 'terminal-body';
+    return body;
+  }
+
+  onInit() {
+    this.initTerminal();
+    this.connectWs();
+    this.setupInput();
+    this.setupResizeObserver();
+  }
+
+  onDestroy() {
+    if (this.ro) this.ro.disconnect();
+    this._intentionalClose = true;
+    if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.close();
+    if (this.term) this.term.dispose();
+  }
+
+  initTerminal() {
+    this.term = new window.Terminal({
+      cursorBlink: true,
+      fontSize: 13,
+      fontFamily: '"JetBrains Mono","Cascadia Code","Consolas",monospace',
+      theme: TERM_THEME,
+    });
+    this.fitAddon = new window.FitAddon.FitAddon();
+    this.term.loadAddon(this.fitAddon);
+    if (window.WebLinksAddon) this.term.loadAddon(new window.WebLinksAddon.WebLinksAddon());
+
+    const body = this.el.querySelector(`[data-body="${this.id}"]`);
+    this.term.open(body);
+    this.fitAddon.fit();
+  }
+
+  connectWs() {
+    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    this.ws = new WebSocket(`${wsProto}//${location.host}/ws/${this.hub}`);
+    this.ws.binaryType = 'arraybuffer';
+
+    this.ws.addEventListener('open', () => {
+      this._reconnectDelay = 1000; // reset backoff
+      this.updateState('idle');
+      this.ws.send(JSON.stringify({ type: 'resize', cols: this.term.cols, rows: this.term.rows }));
+    });
+    this.ws.addEventListener('message', (ev) => {
+      if (ev.data instanceof ArrayBuffer) {
+        this.term.write(new Uint8Array(ev.data));
+        this.updateState('working');
+      }
+    });
+    this.ws.addEventListener('close', () => {
+      this.updateState('dead');
+      if (!this._intentionalClose) {
+        this.term.write('\r\n\x1b[33m[reconnecting...]\x1b[0m\r\n');
+        this._reconnectTimer = setTimeout(() => {
+          this._reconnectDelay = Math.min(this._reconnectDelay * 2, 30000);
+          this.connectWs();
+        }, this._reconnectDelay);
+      } else {
+        this.term.write('\r\n\x1b[31m[disconnected]\x1b[0m\r\n');
+      }
+    });
+    this.ws.addEventListener('error', () => { this.updateState('dead'); });
+  }
+
+  setupInput() {
+    const doPaste = () => {
+      navigator.clipboard.readText().then(text => {
+        if (text && this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(new TextEncoder().encode(text));
+      });
+    };
+
+    this.term.onData((data) => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(new TextEncoder().encode(data));
+    });
+
+    this.term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type !== 'keydown') return true;
+
+      // Copy
+      if (ev.ctrlKey && ev.shiftKey && ev.key === 'C') {
+        const sel = this.term.getSelection();
+        if (sel) navigator.clipboard.writeText(sel);
+        return false;
+      }
+      if (settings.copy === 'ctrl-c-sel' && ev.ctrlKey && !ev.shiftKey && ev.key === 'c') {
+        const sel = this.term.getSelection();
+        if (sel && sel.length > 0) {
+          navigator.clipboard.writeText(sel);
+          return false; // intercept Ctrl+C only when there's a selection
+        }
+      }
+
+      // Paste
+      if (ev.ctrlKey && ev.shiftKey && ev.key === 'V') {
+        if (settings.paste === 'ctrl-shift-v' || settings.paste === 'both') { doPaste(); return false; }
+      }
+      if (ev.ctrlKey && !ev.shiftKey && ev.key === 'v') {
+        if (settings.paste === 'ctrl-v' || settings.paste === 'both') { doPaste(); return false; }
+      }
+
+      return true;
+    });
+
+    // Auto-copy on select
+    this.term.onSelectionChange(() => {
+      if (settings.copy === 'auto-select') {
+        const sel = this.term.getSelection();
+        if (sel) navigator.clipboard.writeText(sel);
+      }
+    });
+
+    // Right-click on terminal body
+    const body = this.el.querySelector(`[data-body="${this.id}"]`);
+    body.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      // Only paste on stationary right-click, not after a right-click-drag pan
+      if (rightClickStart) {
+        const dx = ev.clientX - rightClickStart.x;
+        const dy = ev.clientY - rightClickStart.y;
+        rightClickStart = null;
+        if (Math.sqrt(dx * dx + dy * dy) > 5) return;
+      }
+      if (settings.rightclick === 'paste') doPaste();
+    });
+  }
+
+  setupResizeObserver() {
+    const body = this.el.querySelector(`[data-body="${this.id}"]`);
+    this.ro = new ResizeObserver(() => {
+      this.fitAddon.fit();
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: 'resize', cols: this.term.cols, rows: this.term.rows }));
+      }
+    });
+    this.ro.observe(body);
+  }
+}
+
+// ════════════════════════════════════════════
 // Terminal state management
 // ════════════════════════════════════════════
 function updateCardState(id, state) {
   const card = cards.find(c => c.id === id);
   if (!card) return;
-  card.state = state;
-  if (state === 'working') card.lastOutput = Date.now();
-  const symbolEl = card.el.querySelector(`[data-symbol="${id}"]`);
-  if (symbolEl) symbolEl.style.color = STATE_COLORS[state] || STATE_COLORS.connecting;
-  drawMinimap();
+  card.updateState(state);
 }
 
 // Periodic check: transition "working" → "idle" after IDLE_THRESHOLD_MS of no output
@@ -613,7 +982,7 @@ setInterval(() => {
   const now = Date.now();
   for (const c of cards) {
     if (c.state === 'working' && (now - c.lastOutput) > IDLE_THRESHOLD_MS) {
-      updateCardState(c.id, 'idle');
+      c.updateState('idle');
     }
   }
 }, 1000);
@@ -622,187 +991,14 @@ setInterval(() => {
 // Spawn a terminal card
 // ════════════════════════════════════════════
 function spawnCard(hub, x, y, w, h) {
-  w = w || CARD_W;
-  h = h || CARD_H;
-  const id = nextCardId++;
   const symbol = hubSymbolMap[hub.hub] || '?';
-
-  const el = document.createElement('div');
-  el.className = 'terminal-card';
-  el.style.left = x + 'px';
-  el.style.top = y + 'px';
-  el.style.width = w + 'px';
-  el.style.height = h + 'px';
-  el.style.zIndex = ++maxZ;
-  el.dataset.cardId = id;
-
-  const copyLabel = cards.filter(c => c.hub === hub.hub).length;
-  el.innerHTML = `
-    <div class="terminal-titlebar" data-drag="${id}">
-      <span class="hub-symbol" data-symbol="${id}" style="color:${STATE_COLORS.connecting}">${symbol}</span>
-      <span class="hub-name">${hub.hub}</span>
-      ${copyLabel > 0 ? `<span style="color:#585b70;font-size:11px">#${copyLabel + 1}</span>` : ''}
-      <span class="container-name">${hub.container}</span>
-      <span class="spacer"></span>
-      <button class="close-btn" data-close="${id}">&times;</button>
-    </div>
-    <div class="terminal-body" data-body="${id}"></div>
-    <div class="resize-handle" data-resize="${id}"></div>
-  `;
-  canvas.appendChild(el);
-
-  // Focus on click
-  el.addEventListener('pointerdown', (e) => {
-    focusCard(id);
-    el.style.zIndex = ++maxZ;
-  });
-
-  // Double-click anywhere on card to zoom-to-fill
-  el.addEventListener('dblclick', (e) => {
-    if (e.target.closest('.close-btn')) return;
-    const card = cards.find(c => c.id === id);
-    if (card) zoomToCard(card);
-  });
-
-  // Close button
-  el.querySelector(`[data-close="${id}"]`).addEventListener('click', (e) => {
-    e.stopPropagation();
-    destroyCard(id);
-  });
-
-  // xterm.js
-  const term = new window.Terminal({
-    cursorBlink: true,
-    fontSize: 13,
-    fontFamily: '"JetBrains Mono","Cascadia Code","Consolas",monospace',
-    theme: TERM_THEME,
-  });
-  const fitAddon = new window.FitAddon.FitAddon();
-  term.loadAddon(fitAddon);
-  if (window.WebLinksAddon) term.loadAddon(new window.WebLinksAddon.WebLinksAddon());
-
-  const body = el.querySelector(`[data-body="${id}"]`);
-  term.open(body);
-  fitAddon.fit();
-
-  // WebSocket with auto-reconnect
-  let ws = null;
-  let reconnectDelay = 1000;
-  let reconnectTimer = null;
-  let intentionalClose = false;
-
-  function connectWs() {
-    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${wsProto}//${location.host}/ws/${hub.hub}`);
-    ws.binaryType = 'arraybuffer';
-    // Update card ref
-    const card = cards.find(c => c.id === id);
-    if (card) card.ws = ws;
-
-    ws.addEventListener('open', () => {
-      reconnectDelay = 1000; // reset backoff
-      updateCardState(id, 'idle');
-      ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-    });
-    ws.addEventListener('message', (ev) => {
-      if (ev.data instanceof ArrayBuffer) {
-        term.write(new Uint8Array(ev.data));
-        updateCardState(id, 'working');
-      }
-    });
-    ws.addEventListener('close', () => {
-      updateCardState(id, 'dead');
-      if (!intentionalClose) {
-        term.write('\r\n\x1b[33m[reconnecting...]\x1b[0m\r\n');
-        reconnectTimer = setTimeout(() => {
-          reconnectDelay = Math.min(reconnectDelay * 2, 30000);
-          connectWs();
-        }, reconnectDelay);
-      } else {
-        term.write('\r\n\x1b[31m[disconnected]\x1b[0m\r\n');
-      }
-    });
-    ws.addEventListener('error', () => { updateCardState(id, 'dead'); });
-  }
-  connectWs();
-
-  term.onData((data) => {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(new TextEncoder().encode(data));
-  });
-
-  // Copy/paste (respects settings)
-  function doPaste() {
-    navigator.clipboard.readText().then(text => {
-      if (text && ws && ws.readyState === WebSocket.OPEN) ws.send(new TextEncoder().encode(text));
-    });
-  }
-
-  term.attachCustomKeyEventHandler((ev) => {
-    if (ev.type !== 'keydown') return true;
-
-    // Copy
-    if (ev.ctrlKey && ev.shiftKey && ev.key === 'C') {
-      const sel = term.getSelection();
-      if (sel) navigator.clipboard.writeText(sel);
-      return false;
-    }
-    if (settings.copy === 'ctrl-c-sel' && ev.ctrlKey && !ev.shiftKey && ev.key === 'c') {
-      const sel = term.getSelection();
-      if (sel && sel.length > 0) {
-        navigator.clipboard.writeText(sel);
-        return false; // intercept Ctrl+C only when there's a selection
-      }
-    }
-
-    // Paste
-    if (ev.ctrlKey && ev.shiftKey && ev.key === 'V') {
-      if (settings.paste === 'ctrl-shift-v' || settings.paste === 'both') { doPaste(); return false; }
-    }
-    if (ev.ctrlKey && !ev.shiftKey && ev.key === 'v') {
-      if (settings.paste === 'ctrl-v' || settings.paste === 'both') { doPaste(); return false; }
-    }
-
-    return true;
-  });
-
-  // Auto-copy on select
-  term.onSelectionChange(() => {
-    if (settings.copy === 'auto-select') {
-      const sel = term.getSelection();
-      if (sel) navigator.clipboard.writeText(sel);
-    }
-  });
-
-  // Right-click on terminal body
-  body.addEventListener('contextmenu', (ev) => {
-    ev.preventDefault();
-    // Only paste on stationary right-click, not after a right-click-drag pan
-    if (rightClickStart) {
-      const dx = ev.clientX - rightClickStart.x;
-      const dy = ev.clientY - rightClickStart.y;
-      rightClickStart = null;
-      if (Math.sqrt(dx * dx + dy * dy) > 5) return;
-    }
-    if (settings.rightclick === 'paste') doPaste();
-  });
-
-  // Resize observer for xterm fit
-  const ro = new ResizeObserver(() => {
-    fitAddon.fit();
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-    }
-  });
-  ro.observe(body);
-
-  const card = { id, hub: hub.hub, container: hub.container, el, term, fitAddon, ws, x, y, w, h, symbol, state: 'connecting', lastOutput: 0, ro, _cleanup: () => { intentionalClose = true; if (reconnectTimer) clearTimeout(reconnectTimer); } };
+  const card = new TerminalCard({ hub: hub.hub, container: hub.container, x, y, w, h, symbol });
+  card.createElement();
+  canvas.appendChild(card.el);
   cards.push(card);
-
-  // ── Drag (title bar) ──
-  setupDrag(card);
-  // ── Resize (handle) ──
-  setupResize(card);
-
+  card.setupDrag();
+  card.setupResize();
+  card.onInit();
   drawMinimap();
   updateHubCount();
   return card;
@@ -812,13 +1008,7 @@ function destroyCard(id) {
   const idx = cards.findIndex(c => c.id === id);
   if (idx === -1) return;
   const card = cards[idx];
-  card.ro.disconnect();
-  if (card._cancelDrag) card._cancelDrag();
-  if (card._cancelResize) card._cancelResize();
-  if (card._cleanup) card._cleanup();
-  if (card.ws && card.ws.readyState === WebSocket.OPEN) card.ws.close();
-  card.term.dispose();
-  card.el.remove();
+  card.destroy();
   cards.splice(idx, 1);
   saveLayout();
   drawMinimap();
@@ -827,7 +1017,9 @@ function destroyCard(id) {
 
 function focusCard(id) {
   focusedCardId = id;
-  cards.forEach(c => c.el.classList.toggle('focused', c.id === id));
+  cards.forEach(c => {
+    if (c.id === id) { c.onFocus(); } else { c.onBlur(); }
+  });
 }
 
 function updateHubCount() {
@@ -835,7 +1027,7 @@ function updateHubCount() {
 }
 
 // ════════════════════════════════════════════
-// Drag
+// Zoom to card
 // ════════════════════════════════════════════
 function zoomToCard(card) {
   const vw = viewport.clientWidth;
@@ -845,79 +1037,7 @@ function zoomToCard(card) {
   pan.x = (vw - card.w * zoom) / 2 - card.x * zoom;
   pan.y = (vh - card.h * zoom) / 2 - card.y * zoom;
   applyTransform();
-  setTimeout(() => card.fitAddon.fit(), 100);
-}
-
-function setupDrag(card) {
-  const titlebar = card.el.querySelector(`[data-drag="${card.id}"]`);
-  let startX, startY, origX, origY;
-
-  function onMove(e) {
-    card.x = origX + (e.clientX - startX) / zoom;
-    card.y = origY + (e.clientY - startY) / zoom;
-    card.el.style.left = card.x + 'px';
-    card.el.style.top = card.y + 'px';
-    drawMinimap();
-  }
-  function onUp() {
-    document.removeEventListener('pointermove', onMove);
-    document.removeEventListener('pointerup', onUp);
-    saveLayout();
-  }
-
-  titlebar.addEventListener('pointerdown', (e) => {
-    if (e.target.closest('.close-btn')) return;
-    startX = e.clientX;
-    startY = e.clientY;
-    origX = card.x;
-    origY = card.y;
-    document.addEventListener('pointermove', onMove);
-    document.addEventListener('pointerup', onUp);
-    e.preventDefault();
-    e.stopPropagation();
-  });
-
-  card._cancelDrag = () => {
-    document.removeEventListener('pointermove', onMove);
-    document.removeEventListener('pointerup', onUp);
-  };
-}
-
-// ════════════════════════════════════════════
-// Resize
-// ════════════════════════════════════════════
-function setupResize(card) {
-  const handle = card.el.querySelector(`[data-resize="${card.id}"]`);
-  let startX, startY, origW, origH;
-
-  function onMove(e) {
-    card.w = Math.max(300, origW + (e.clientX - startX) / zoom);
-    card.h = Math.max(200, origH + (e.clientY - startY) / zoom);
-    card.el.style.width = card.w + 'px';
-    card.el.style.height = card.h + 'px';
-    drawMinimap();
-  }
-  function onUp() {
-    document.removeEventListener('pointermove', onMove);
-    document.removeEventListener('pointerup', onUp);
-    saveLayout();
-  }
-
-  handle.addEventListener('pointerdown', (e) => {
-    startX = e.clientX;
-    startY = e.clientY;
-    origW = card.w;
-    origH = card.h;
-    document.addEventListener('pointermove', onMove);
-    document.addEventListener('pointerup', onUp);
-    e.preventDefault();
-    e.stopPropagation();
-  });
-
-  card._cancelResize = () => {
-    document.removeEventListener('pointermove', onMove);
-    document.removeEventListener('pointerup', onUp);
-  };
+  setTimeout(() => { if (card.fitAddon) card.fitAddon.fit(); }, 100);
 }
 
 // ════════════════════════════════════════════
@@ -1020,7 +1140,7 @@ document.addEventListener('keydown', (e) => {
   // Escape: deselect focused card
   if (e.key === 'Escape') {
     focusedCardId = null;
-    cards.forEach(c => c.el.classList.remove('focused'));
+    cards.forEach(c => c.onBlur());
     return;
   }
 });
@@ -1031,7 +1151,7 @@ document.addEventListener('keydown', (e) => {
 const LAYOUT_KEY = 'claude-rts-layout';
 
 function saveLayout() {
-  const data = cards.map(c => ({ hub: c.hub, x: c.x, y: c.y, w: c.w, h: c.h }));
+  const data = cards.map(c => c.serialize());
   localStorage.setItem(LAYOUT_KEY, JSON.stringify(data));
 }
 
