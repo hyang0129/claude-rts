@@ -76,52 +76,64 @@ Python server (aiohttp, localhost:3000)          │
 - [x] Close button (X) on cards: kills PTY, removes card
 - [x] Fit-all button in status bar
 
-### M2 — Symbol coding and terminal state ([#1](https://github.com/hyang0129/claude-rts/issues/1))
-- [ ] Assign each hub a unique symbol (A, B, C... or hub number)
-- [ ] Replace colored dot in title bar with hub symbol
-- [ ] Symbol color reflects terminal state, not hub identity:
+### M2 — Symbol coding and terminal state ✅ ([#1](https://github.com/hyang0129/claude-rts/issues/1))
+- [x] Assign each hub a unique symbol (A, B, C...)
+- [x] Replace colored dot in title bar with hub symbol
+- [x] Symbol color reflects terminal state, not hub identity:
   - **Green** = doing work (stdout activity in last N seconds)
   - **Yellow** = idle / needs user input (no recent output, process alive)
   - **Red** = dead terminal / major issue (WebSocket closed, process exited)
-- [ ] Minimap renders hub symbols instead of colored dots, colored by state
-- [ ] State detection: track last stdout timestamp per card, periodic check
-- **Exit criteria**: Can identify hubs by symbol and terminal health by color at a glance
+- [x] Minimap renders hub symbols instead of colored dots, colored by state
+- [x] State detection: track last stdout timestamp per card, periodic idle check
 
-### M3 — Polish
-- [ ] Auto-reconnect on WebSocket drop (exponential backoff)
-- [ ] Double-click title bar to zoom-to-fill (card takes full viewport)
-- [ ] Keyboard shortcuts: Ctrl+0 zoom-to-fit, Escape to deselect
-- [ ] Save card positions/sizes to localStorage, restore on reload
-- **Exit criteria**: Feels like a real tool
+### M3 — Polish ✅
+- [x] Auto-reconnect on WebSocket drop (exponential backoff, 1s → 30s)
+- [x] Double-click anywhere on card to zoom-to-fill
+- [x] Double-click empty canvas to fit all
+- [x] Keyboard shortcuts: Ctrl+0 zoom-to-fit, Escape to deselect
+- [x] Save card positions/sizes to localStorage, restore on reload
 
-### M4 — Settings menu
-- [ ] Accessible settings panel (gear icon in status bar, or keyboard shortcut)
-- [ ] Copy/paste configuration:
-  - [ ] Choose copy shortcut (Ctrl+Shift+C, Ctrl+C when selection exists, or auto-copy on select)
-  - [ ] Choose paste shortcut (Ctrl+Shift+V, Ctrl+V, right-click, or all)
-  - [ ] Toggle right-click behavior (paste vs context menu)
-- [ ] Settings persisted to localStorage
-- [ ] Settings applied immediately (no reload required)
-- **Exit criteria**: User can configure copy/paste to match their preferred workflow
+### M4 — Settings menu ✅
+- [x] Gear icon in status bar opens settings modal
+- [x] Copy shortcut: Ctrl+Shift+C, Ctrl+C when selection exists, or auto-copy on select
+- [x] Paste shortcut: Ctrl+Shift+V, Ctrl+V, or both
+- [x] Right-click on terminal: paste or do nothing
+- [x] Idle threshold: configurable (3/5/10/30s)
+- [x] Settings persisted to localStorage, applied immediately
+- [x] Reset defaults button
+- [x] Test suite: 15 tests covering discovery, server, and CLI
+
+## Known Bugs
+
+| Issue | Description | Status |
+|-------|-------------|--------|
+| [#2](https://github.com/hyang0129/claude-rts/issues/2) | Scroll wheel conflicts between terminal scroll and canvas zoom | Open |
+| [#3](https://github.com/hyang0129/claude-rts/issues/3) | Right-click context menu opens even when user intends to right-click-drag | Open |
+| [#4](https://github.com/hyang0129/claude-rts/issues/4) | Dragging terminal card quickly loses mouse tracking | Open |
+| [#5](https://github.com/hyang0129/claude-rts/issues/5) | Browser default context menu appears in some areas | Open |
+| [#6](https://github.com/hyang0129/claude-rts/issues/6) | Canvas needs a distinct texture to differentiate from terminal backgrounds | Open |
+
+## Future Work
+
+- **Named layout presets** — save/load arrangements ("3x2 grid", "single focus", "L-shape")
+- **Auto-refresh** — poll docker ps, add/remove cards for new/stopped containers
+- **Canvas size** — make configurable or auto-scale based on card count
+- **Container lifecycle** — start/stop containers from the UI
+- **Multiple shells per card** — split panes within a card
 
 ## Resolved Questions
 
-1. **PTY on Windows** — Resolved: pywinpty provides ConPTY. `asyncio.create_subprocess_exec` only gives pipes (no echo, no colors). pywinpty + `docker.exe exec -it` gives full terminal support. The PTY read loop runs in a thread executor.
+1. **PTY on Windows** — pywinpty provides ConPTY. `asyncio.create_subprocess_exec` only gives pipes (no echo, no colors). pywinpty + `docker.exe exec -it` gives full terminal support. The PTY read loop runs in a thread executor.
 
-2. **docker vs docker.exe** — Resolved: On Windows, `docker` (no extension) is a shell script that `CreateProcessW` can't execute. Always use `docker.exe` explicitly.
+2. **docker vs docker.exe** — On Windows, `docker` (no extension) is a shell script that `CreateProcessW` can't execute. Always use `docker.exe` explicitly.
 
-## Open Questions
-
-1. **Container lifecycle** — MVP is attach-only. Starting/stopping containers is out of scope.
-
-2. **Canvas size** — Fixed 4K for MVP. Could make configurable or auto-scale later.
-
-3. **State detection heuristics** — How long after last stdout before marking "idle"? Need to tune the threshold (M2).
+3. **State detection heuristics** — Idle threshold is configurable in settings (default 5s). Green = output in last N seconds, yellow = idle, red = disconnected.
 
 ## File Structure
 
 ```
 claude-rts/
+  README.md
   ROADMAP.md
   CLAUDE.md
   pyproject.toml
@@ -132,4 +144,8 @@ claude-rts/
     discovery.py         # docker.exe ps parsing → list of {hub, container}
     static/
       index.html         # single-page canvas UI (all JS/CSS inline)
+  tests/
+    test_discovery.py    # hub discovery parsing (6 tests)
+    test_server.py       # HTTP + WebSocket endpoints (5 tests)
+    test_main.py         # CLI argument handling (4 tests)
 ```
