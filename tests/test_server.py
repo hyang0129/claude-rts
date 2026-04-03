@@ -67,4 +67,7 @@ async def test_app_has_all_routes(app):
     routes = [r.resource.canonical for r in app.router.routes() if hasattr(r, 'resource')]
     assert "/" in routes
     assert "/api/hubs" in routes
+    assert "/api/config" in routes
+    assert "/api/canvases" in routes
+    assert "/api/canvases/{name}" in routes
     assert "/ws/{hub}" in routes

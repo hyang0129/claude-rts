@@ -8,6 +8,7 @@ from aiohttp import web
 from loguru import logger
 from winpty import PtyProcess
 
+from .config import read_config, write_config, list_canvases, read_canvas, write_canvas
 from .discovery import discover_hubs
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
@@ -23,6 +24,50 @@ async def hubs_handler(request: web.Request) -> web.Response:
     hubs = await discover_hubs()
     logger.info("Discovered {} hub(s): {}", len(hubs), [h["hub"] for h in hubs])
     return web.json_response(hubs)
+
+
+async def config_get_handler(request: web.Request) -> web.Response:
+    logger.debug("Config read requested by {}", request.remote)
+    data = read_config()
+    return web.json_response(data)
+
+
+async def config_put_handler(request: web.Request) -> web.Response:
+    logger.info("Config update requested by {}", request.remote)
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="Invalid JSON")
+    saved = write_config(body)
+    return web.json_response(saved)
+
+
+async def canvases_list_handler(request: web.Request) -> web.Response:
+    logger.debug("Canvas list requested by {}", request.remote)
+    names = list_canvases()
+    return web.json_response(names)
+
+
+async def canvas_get_handler(request: web.Request) -> web.Response:
+    name = request.match_info["name"]
+    logger.debug("Canvas '{}' read requested by {}", name, request.remote)
+    data = read_canvas(name)
+    if data is None:
+        raise web.HTTPNotFound(text=f"Canvas '{name}' not found")
+    return web.json_response(data)
+
+
+async def canvas_put_handler(request: web.Request) -> web.Response:
+    name = request.match_info["name"]
+    logger.info("Canvas '{}' save requested by {}", name, request.remote)
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="Invalid JSON")
+    ok = write_canvas(name, body)
+    if not ok:
+        raise web.HTTPBadRequest(text=f"Invalid canvas name '{name}'")
+    return web.json_response({"status": "ok", "name": name})
 
 
 async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
@@ -114,6 +159,11 @@ def create_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index_handler)
     app.router.add_get("/api/hubs", hubs_handler)
+    app.router.add_get("/api/config", config_get_handler)
+    app.router.add_put("/api/config", config_put_handler)
+    app.router.add_get("/api/canvases", canvases_list_handler)
+    app.router.add_get("/api/canvases/{name}", canvas_get_handler)
+    app.router.add_put("/api/canvases/{name}", canvas_put_handler)
     app.router.add_get("/ws/{hub}", websocket_handler)
-    logger.info("Application routes registered: /, /api/hubs, /ws/{{hub}}")
+    logger.info("Application routes registered")
     return app

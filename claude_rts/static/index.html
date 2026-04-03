@@ -1063,26 +1063,46 @@ function layoutGrid(hubList) {
 // ════════════════════════════════════════════
 // Settings
 // ════════════════════════════════════════════
-const SETTINGS_KEY = 'claude-rts-settings';
 const DEFAULT_SETTINGS = {
   copy: 'ctrl-shift-c',
   paste: 'ctrl-shift-v',
   rightclick: 'paste',
-  idle: 5,
+  idle_threshold: 5,
+  default_canvas: 'main',
+  theme: 'catppuccin-mocha',
 };
 let settings = { ...DEFAULT_SETTINGS };
 
-function loadSettings() {
+async function loadSettings() {
   try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) Object.assign(settings, JSON.parse(raw));
-  } catch {}
+    const resp = await fetch('/api/config');
+    if (resp.ok) {
+      const data = await resp.json();
+      // Map server keys to UI: idle_threshold -> idle for backward compat
+      settings.copy = data.copy || DEFAULT_SETTINGS.copy;
+      settings.paste = data.paste || DEFAULT_SETTINGS.paste;
+      settings.rightclick = data.rightclick || DEFAULT_SETTINGS.rightclick;
+      settings.idle_threshold = data.idle_threshold ?? DEFAULT_SETTINGS.idle_threshold;
+      settings.default_canvas = data.default_canvas || DEFAULT_SETTINGS.default_canvas;
+      settings.theme = data.theme || DEFAULT_SETTINGS.theme;
+    }
+  } catch (err) {
+    console.warn('Failed to load settings from server, using defaults:', err);
+  }
   applySettingsToUI();
   applySettingsToState();
 }
 
-function saveSettings() {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+async function saveSettings() {
+  try {
+    await fetch('/api/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings),
+    });
+  } catch (err) {
+    console.warn('Failed to save settings to server:', err);
+  }
   applySettingsToState();
 }
 
@@ -1090,11 +1110,11 @@ function applySettingsToUI() {
   document.getElementById('setting-copy').value = settings.copy;
   document.getElementById('setting-paste').value = settings.paste;
   document.getElementById('setting-rightclick').value = settings.rightclick;
-  document.getElementById('setting-idle').value = String(settings.idle);
+  document.getElementById('setting-idle').value = String(settings.idle_threshold);
 }
 
 function applySettingsToState() {
-  IDLE_THRESHOLD_MS = settings.idle * 1000;
+  IDLE_THRESHOLD_MS = settings.idle_threshold * 1000;
 }
 
 function resetSettings() {
@@ -1120,12 +1140,16 @@ settingsOverlay.addEventListener('click', (e) => {
 for (const sel of ['setting-copy', 'setting-paste', 'setting-rightclick', 'setting-idle']) {
   document.getElementById(sel).addEventListener('change', (e) => {
     const key = sel.replace('setting-', '');
-    settings[key] = key === 'idle' ? parseInt(e.target.value) : e.target.value;
+    if (key === 'idle') {
+      settings.idle_threshold = parseInt(e.target.value);
+    } else {
+      settings[key] = e.target.value;
+    }
     saveSettings();
   });
 }
 
-loadSettings();
+// loadSettings() is called in boot sequence below
 
 // ════════════════════════════════════════════
 // Keyboard shortcuts
@@ -1146,27 +1170,42 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ════════════════════════════════════════════
-// Layout persistence (localStorage)
+// Layout persistence (server-side canvases)
 // ════════════════════════════════════════════
-const LAYOUT_KEY = 'claude-rts-layout';
+let currentCanvasName = 'main';
 
 function saveLayout() {
-  const data = cards.map(c => c.serialize());
-  localStorage.setItem(LAYOUT_KEY, JSON.stringify(data));
+  const data = {
+    name: currentCanvasName,
+    canvas_size: [CANVAS_W, CANVAS_H],
+    cards: cards.map(c => c.serialize()),
+  };
+  fetch(`/api/canvases/${encodeURIComponent(currentCanvasName)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  }).catch(err => console.warn('Failed to save layout:', err));
 }
 
-function loadLayout() {
+async function loadLayout() {
   try {
-    const raw = localStorage.getItem(LAYOUT_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch { return null; }
+    const resp = await fetch(`/api/canvases/${encodeURIComponent(currentCanvasName)}`);
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return data.cards || null;
+  } catch {
+    return null;
+  }
 }
 
 // ════════════════════════════════════════════
 // Boot
 // ════════════════════════════════════════════
 (async function() {
+  // Load settings first (determines default_canvas)
+  await loadSettings();
+  currentCanvasName = settings.default_canvas || 'main';
+
   const resp = await fetch('/api/hubs');
   hubs = await resp.json();
 
@@ -1181,7 +1220,7 @@ function loadLayout() {
   });
 
   // Restore saved layout or use default grid
-  const saved = loadLayout();
+  const saved = await loadLayout();
   if (saved && saved.length > 0) {
     // Spawn cards from saved layout
     for (const s of saved) {
