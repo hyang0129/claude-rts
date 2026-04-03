@@ -142,6 +142,23 @@
     width: 100%; height: 100%;
   }
 
+  /* ── Mode indicator ── */
+  #mode-indicator {
+    position: fixed;
+    bottom: 12px;
+    right: 12px;
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 700;
+    font-family: monospace;
+    z-index: 1000;
+    pointer-events: none;
+    letter-spacing: 1px;
+  }
+  #mode-indicator.rts { background: rgba(203,166,247,0.15); color: #cba6f7; }
+  #mode-indicator.terminal { background: rgba(166,227,161,0.15); color: #a6e3a1; }
+
   /* ── Context menu ── */
   #context-menu {
     display: none;
@@ -386,6 +403,8 @@
 
 <div id="context-menu"></div>
 
+<div id="mode-indicator" class="rts">RTS</div>
+
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
@@ -428,6 +447,8 @@ let isPanning = false;
 let panStart = { x: 0, y: 0, panX: 0, panY: 0 };
 let rightClickStart = null; // {x, y} — tracks right-click origin for drag threshold
 let focusedCardId = null;
+let canvasMode = 'rts'; // 'rts' or 'terminal'
+let focusedTerminalCard = null; // reference to the TerminalCard in terminal mode
 
 const viewport = document.getElementById('viewport');
 const canvas = document.getElementById('canvas');
@@ -982,6 +1003,9 @@ class TerminalCard extends Card {
     this.term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== 'keydown') return true;
 
+      // Escape exits terminal mode — let it bubble to the document handler
+      if (ev.key === 'Escape') return false;
+
       // Copy
       if (ev.ctrlKey && ev.shiftKey && ev.key === 'C') {
         const sel = this.term.getSelection();
@@ -1226,16 +1250,55 @@ for (const sel of ['setting-copy', 'setting-paste', 'setting-rightclick', 'setti
 // loadSettings() is called in boot sequence below
 
 // ════════════════════════════════════════════
+// Mode switching (RTS / Terminal)
+// ════════════════════════════════════════════
+const modeIndicator = document.getElementById('mode-indicator');
+
+function setMode(mode, termCard) {
+  canvasMode = mode;
+  modeIndicator.textContent = mode === 'rts' ? 'RTS' : 'TERMINAL';
+  modeIndicator.className = mode;
+  if (mode === 'terminal' && termCard) {
+    focusedTerminalCard = termCard;
+    if (termCard.term) termCard.term.focus();
+  } else {
+    if (focusedTerminalCard && focusedTerminalCard.term) {
+      focusedTerminalCard.term.blur();
+    }
+    focusedTerminalCard = null;
+  }
+}
+
+// Click on terminal body -> enter Terminal mode
+viewport.addEventListener('pointerdown', (e) => {
+  // Only left-click enters terminal mode
+  if (e.button !== 0) return;
+  const termBody = e.target.closest('.terminal-body');
+  if (termBody) {
+    const cardId = parseInt(termBody.dataset.body);
+    const card = cards.find(c => c.id === cardId);
+    if (card && card.term) {
+      setMode('terminal', card);
+      return;
+    }
+  }
+  // Click on empty canvas -> enter RTS mode
+  if (e.target === viewport || e.target === canvas) {
+    setMode('rts');
+  }
+}, true); // capture phase so it fires before xterm's handlers
+
+// ════════════════════════════════════════════
 // Keyboard shortcuts
 // ════════════════════════════════════════════
 document.addEventListener('keydown', (e) => {
-  // Ctrl+0: fit all
+  // Ctrl+0: fit all (works in both modes)
   if (e.ctrlKey && e.key === '0') {
     e.preventDefault();
     fitAll();
     return;
   }
-  // Ctrl+Tab: cycle canvases
+  // Ctrl+Tab: cycle canvases (works in both modes)
   if (e.ctrlKey && e.key === 'Tab') {
     e.preventDefault();
     if (canvasList.length > 1) {
@@ -1247,10 +1310,58 @@ document.addEventListener('keydown', (e) => {
     }
     return;
   }
-  // Escape: deselect focused card
+  // Escape: switch to RTS mode and deselect
   if (e.key === 'Escape') {
+    setMode('rts');
     focusedCardId = null;
     cards.forEach(c => c.onBlur());
+    return;
+  }
+
+  // ── RTS-only keybindings ──
+  if (canvasMode !== 'rts') return;
+  // Ignore if typing in an input/textarea
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+  // Ignore if modifier keys are held (let browser/OS shortcuts work)
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+  if (e.key === 'a' || e.key === 'A') {
+    // Select all cards
+    e.preventDefault();
+    cards.forEach(c => c.onFocus());
+    if (cards.length > 0) focusedCardId = cards[cards.length - 1].id;
+    return;
+  }
+
+  if (e.key === 'f' || e.key === 'F') {
+    // Fit all
+    e.preventDefault();
+    fitAll();
+    return;
+  }
+
+  if (e.key === ' ') {
+    // Center on focused/selected card
+    e.preventDefault();
+    const focused = cards.find(c => c.id === focusedCardId);
+    if (focused) {
+      const vw = viewport.clientWidth;
+      const vh = viewport.clientHeight;
+      pan.x = (vw / 2) - (focused.x + focused.w / 2) * zoom;
+      pan.y = (vh / 2) - (focused.y + focused.h / 2) * zoom;
+      applyTransform();
+    }
+    return;
+  }
+
+  if (e.key === 'Delete') {
+    // Close selected/focused card(s)
+    e.preventDefault();
+    const selected = cards.filter(c => c.el.classList.contains('focused'));
+    if (selected.length > 0) {
+      // Destroy in reverse to avoid index issues
+      [...selected].reverse().forEach(c => destroyCard(c.id));
+    }
     return;
   }
 });
