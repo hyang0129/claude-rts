@@ -10,6 +10,7 @@ import asyncio
 import json
 import pathlib
 import shutil
+import time
 
 from loguru import logger
 
@@ -146,6 +147,66 @@ async def exec_in_util(cmd: str, timeout: float = 60) -> tuple[int, str]:
     return rc, stdout
 
 
+async def exec_in_util_pty(cmd: str, timeout: float = 60) -> tuple[int, str]:
+    """Execute a command in the utility container using a real PTY.
+
+    Required for commands that need a TTY (e.g., claude-usage-plz which uses pexpect).
+    Uses pywinpty to provide a ConPTY, same as terminal WebSocket connections.
+    """
+    from winpty import PtyProcess
+
+    cfg = _get_config()
+
+    if not await is_util_running():
+        raise RuntimeError(f"Utility container '{cfg['name']}' is not running")
+
+    full_cmd = f'docker.exe exec -it {cfg["name"]} {cmd}'
+    logger.debug("exec_in_util_pty: {}", cmd)
+
+    loop = asyncio.get_event_loop()
+
+    def _run_pty():
+        try:
+            pty = PtyProcess.spawn(full_cmd, dimensions=(24, 120))
+        except Exception as exc:
+            logger.error("Failed to spawn PTY for exec_in_util_pty: {}", exc)
+            return -1, ""
+
+        output = []
+        deadline = time.monotonic() + timeout
+        try:
+            while pty.isalive() and time.monotonic() < deadline:
+                try:
+                    data = pty.read()
+                    if data:
+                        output.append(data)
+                        # Early exit: if we see a complete JSON object, we're done
+                        combined = "".join(output)
+                        if '{\n' in combined and combined.rstrip().endswith('}'):
+                            logger.debug("exec_in_util_pty: detected complete JSON, exiting early")
+                            break
+                except EOFError:
+                    break
+                except Exception:
+                    break
+        finally:
+            try:
+                pty.terminate(force=True)
+            except Exception:
+                pass
+
+        if time.monotonic() >= deadline:
+            logger.warning("exec_in_util_pty timed out after {}s", timeout)
+            return -1, "".join(output)
+
+        return 0, "".join(output)
+
+    rc, stdout = await loop.run_in_executor(None, _run_pty)
+    if rc != 0:
+        logger.warning("exec_in_util_pty failed (rc={})", rc)
+    return rc, stdout
+
+
 async def ensure_util_container() -> bool:
     """Ensure the utility container is running. Start if needed.
 
@@ -166,12 +227,13 @@ async def list_profiles() -> list[str]:
     return [name.strip() for name in stdout.split("\n") if name.strip()]
 
 
-async def probe_usage(claude_dir: str, timeout: float = 45) -> dict | None:
+async def probe_usage(claude_dir: str, timeout: float = 60) -> dict | None:
     """Run claude-usage inside the utility container for a specific config dir.
 
+    Uses PTY exec because claude-usage-plz needs a real TTY (pexpect).
     Returns parsed JSON dict or None on failure.
     """
-    rc, stdout = await exec_in_util(
+    rc, stdout = await exec_in_util_pty(
         f"claude-usage --claude-dir {claude_dir} --json",
         timeout=timeout,
     )
@@ -179,7 +241,18 @@ async def probe_usage(claude_dir: str, timeout: float = 45) -> dict | None:
         logger.warning("claude-usage probe failed for {}: rc={}", claude_dir, rc)
         return None
     try:
-        return json.loads(stdout)
-    except json.JSONDecodeError as exc:
+        # PTY output may contain ANSI escapes and extra text — extract JSON object
+        import re
+        # Strip ANSI escape codes
+        clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', stdout)
+        clean = re.sub(r'\x1b\][^\x07]*\x07', '', clean)  # OSC sequences
+        clean = re.sub(r'\r', '', clean)
+        # Find the JSON object in the output
+        match = re.search(r'\{[^{}]*\}', clean, re.DOTALL)
+        if not match:
+            logger.warning("No JSON found in probe output for {}: {}", claude_dir, clean[:200])
+            return None
+        return json.loads(match.group(0))
+    except (json.JSONDecodeError, ValueError) as exc:
         logger.warning("claude-usage returned invalid JSON for {}: {}", claude_dir, exc)
         return None
