@@ -221,7 +221,12 @@ async def ensure_util_container() -> bool:
 
 async def list_profiles() -> list[str]:
     """List available claude profiles in the utility container's /profiles dir."""
-    rc, stdout = await exec_in_util("ls /profiles/", timeout=10)
+    cfg = _get_config()
+    # Only return subdirs that contain .credentials.json (actual profiles)
+    rc, stdout, _ = await _run(
+        f'docker.exe exec {cfg["name"]} bash -c "for d in /profiles/*/; do [ -f \\"$d/.credentials.json\\" ] && basename \\"$d\\"; done"',
+        timeout=10,
+    )
     if rc != 0:
         return []
     return [name.strip() for name in stdout.split("\n") if name.strip()]
@@ -230,29 +235,36 @@ async def list_profiles() -> list[str]:
 async def probe_usage(claude_dir: str, timeout: float = 60) -> dict | None:
     """Run claude-usage inside the utility container for a specific config dir.
 
-    Uses PTY exec because claude-usage-plz needs a real TTY (pexpect).
+    Uses `script -qc` to provide a PTY (required by claude-usage-plz/pexpect).
     Returns parsed JSON dict or None on failure.
     """
-    rc, stdout = await exec_in_util_pty(
-        f"claude-usage --claude-dir {claude_dir} --json",
-        timeout=timeout,
-    )
-    if rc != 0:
-        logger.warning("claude-usage probe failed for {}: rc={}", claude_dir, rc)
+    cfg = _get_config()
+
+    if not await is_util_running():
         return None
+
+    # script -qc allocates a PTY so pexpect works inside docker exec
+    inner_timeout = max(timeout - 5, 10)
+    cmd = (
+        f'docker.exe exec {cfg["name"]} bash -c '
+        f'"script -qc \'timeout {inner_timeout} claude-usage --claude-dir {claude_dir} --json\' /dev/null 2>/dev/null"'
+    )
+    logger.debug("probe_usage: {}", cmd)
+    rc, stdout, stderr = await _run(cmd, timeout=timeout)
+
+    if rc != 0:
+        logger.warning("claude-usage probe failed for {} (rc={}): {}", claude_dir, rc, stderr[:200] if stderr else "")
+        return None
+
+    clean = stdout.replace('\r', '').strip()
+    json_start = clean.find('{')
+    json_end = clean.rfind('}')
+    if json_start < 0 or json_end <= json_start:
+        logger.warning("No JSON found in probe output for {}: {}", claude_dir, clean[:200])
+        return None
+
     try:
-        # PTY output may contain ANSI escapes and extra text — extract JSON object
-        import re
-        # Strip ANSI escape codes
-        clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', stdout)
-        clean = re.sub(r'\x1b\][^\x07]*\x07', '', clean)  # OSC sequences
-        clean = re.sub(r'\r', '', clean)
-        # Find the JSON object in the output
-        match = re.search(r'\{[^{}]*\}', clean, re.DOTALL)
-        if not match:
-            logger.warning("No JSON found in probe output for {}: {}", claude_dir, clean[:200])
-            return None
-        return json.loads(match.group(0))
-    except (json.JSONDecodeError, ValueError) as exc:
+        return json.loads(clean[json_start:json_end + 1])
+    except json.JSONDecodeError as exc:
         logger.warning("claude-usage returned invalid JSON for {}: {}", claude_dir, exc)
         return None
