@@ -1,4 +1,4 @@
-# claude-rts utility container
+# supreme-claudemander utility container
 # Purpose: background tasks, monitoring, status probing (NOT coding or LLM calls)
 # Runs probe loop + stays alive for interactive exec
 

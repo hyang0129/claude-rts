@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>claude-rts</title>
+<title>supreme-claudemander</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -440,7 +440,7 @@
 <body>
 
 <div id="status-bar">
-  <span class="title">claude-rts</span>
+  <span class="title">supreme-claudemander</span>
   <span class="info" id="hub-count">connecting...</span>
   <div id="canvas-switcher">
     <button id="canvas-switcher-btn">
@@ -778,7 +778,7 @@ function showContextMenu(sx, sy) {
   const hostShells = [
     { id: 'powershell', label: 'PowerShell', cmd: 'powershell.exe' },
     { id: 'cmd', label: 'Command Prompt', cmd: 'cmd.exe' },
-    { id: 'util', label: 'Utility Container', cmd: 'docker.exe exec -it claude-rts-util bash' },
+    { id: 'util', label: 'Utility Container', cmd: 'docker.exe exec -it supreme-claudemander-util bash' },
   ];
   for (const shell of hostShells) {
     html += `<div class="ctx-item" data-host-shell="${shell.id}" data-host-cmd="${shell.cmd}">

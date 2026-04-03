@@ -8,7 +8,7 @@ from claude_rts.__main__ import main
 
 def test_default_port():
     """Verify default port is 3000 when no args given."""
-    with patch("sys.argv", ["claude-rts"]), \
+    with patch("sys.argv", ["supreme-claudemander"]), \
          patch("claude_rts.__main__.web") as mock_web, \
          patch("claude_rts.__main__.create_app") as mock_create:
         mock_create.return_value = MagicMock()
@@ -24,7 +24,7 @@ def test_default_port():
 
 def test_custom_port():
     """Verify --port flag is respected."""
-    with patch("sys.argv", ["claude-rts", "--port", "4000"]), \
+    with patch("sys.argv", ["supreme-claudemander", "--port", "4000"]), \
          patch("claude_rts.__main__.web") as mock_web, \
          patch("claude_rts.__main__.create_app") as mock_create:
         mock_create.return_value = MagicMock()
@@ -38,7 +38,7 @@ def test_custom_port():
 
 def test_no_browser_flag():
     """Verify --no-browser skips browser open."""
-    with patch("sys.argv", ["claude-rts", "--no-browser"]), \
+    with patch("sys.argv", ["supreme-claudemander", "--no-browser"]), \
          patch("claude_rts.__main__.web") as mock_web, \
          patch("claude_rts.__main__.create_app") as mock_create:
         mock_app = MagicMock()
@@ -54,7 +54,7 @@ def test_no_browser_flag():
 
 def test_browser_opens_by_default():
     """Verify browser open callback is added by default."""
-    with patch("sys.argv", ["claude-rts"]), \
+    with patch("sys.argv", ["supreme-claudemander"]), \
          patch("claude_rts.__main__.web") as mock_web, \
          patch("claude_rts.__main__.create_app") as mock_create:
         mock_app = MagicMock()

@@ -1,4 +1,4 @@
-"""Manage the claude-rts utility container.
+"""Manage the supreme-claudemander utility container.
 
 The utility container is a lightweight Linux container for background tasks,
 monitoring, and status probing. It is NOT for coding or LLM calls.
@@ -17,8 +17,8 @@ from loguru import logger
 from .config import read_config
 
 DOCKERFILE = pathlib.Path(__file__).parent / "Dockerfile.util"
-DEFAULT_CONTAINER_NAME = "claude-rts-util"
-DEFAULT_IMAGE_NAME = "claude-rts-util:latest"
+DEFAULT_CONTAINER_NAME = "supreme-claudemander-util"
+DEFAULT_IMAGE_NAME = "supreme-claudemander-util:latest"
 
 
 def _get_config() -> dict:

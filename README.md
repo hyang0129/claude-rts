@@ -1,4 +1,4 @@
-# claude-rts
+# supreme-claudemander
 
 An RTS-style terminal canvas for managing devcontainer hubs. Terminal shells live as draggable, resizable cards on a pannable/zoomable 4K canvas — like commanding units in an RTS game.
 
@@ -18,7 +18,7 @@ An RTS-style terminal canvas for managing devcontainer hubs. Terminal shells liv
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ claude-rts   6 hub(s) | 6 terminal(s)   42%     [Fit all] ⚙│
+│ supreme-claudemander   6 hub(s) | 6 terminal(s)   42%     [Fit all] ⚙│
 ├──────────────────────────────────────────────────────────────┤
 │ ┌─[A hub_1]──────┐ ┌─[B hub_2]──────┐ ┌─[C hub_3]──────┐  │
 │ │ vscode@hub_1:$ │ │ vscode@hub_2:$ │ │ vscode@hub_3:$ │  │
@@ -45,8 +45,8 @@ An RTS-style terminal canvas for managing devcontainer hubs. Terminal shells liv
 ### Install and run
 
 ```bash
-git clone https://github.com/hyang0129/claude-rts.git
-cd claude-rts
+git clone https://github.com/hyang0129/supreme-claudemander.git
+cd supreme-claudemander
 pip install -e .
 python -m claude_rts
 ```
@@ -159,7 +159,7 @@ tests/
 
 ### Logging
 
-Server operations are logged via loguru to stderr (colored) and `claude-rts.log` (rotating, 10 MB). Terminal I/O is intentionally not logged.
+Server operations are logged via loguru to stderr (colored) and `supreme-claudemander.log` (rotating, 10 MB). Terminal I/O is intentionally not logged.
 
 ## Roadmap
 

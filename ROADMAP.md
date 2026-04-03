@@ -1,4 +1,4 @@
-# claude-rts — RTS-Style Terminal Canvas
+# supreme-claudemander — RTS-Style Terminal Canvas
 
 A web-based terminal multiplexer where devcontainer shells live as draggable, resizable cards on a pannable/zoomable 4K canvas — like commanding units in an RTS game.
 
@@ -76,7 +76,7 @@ Python server (aiohttp, localhost:3000)          │
 - [x] Close button (X) on cards: kills PTY, removes card
 - [x] Fit-all button in status bar
 
-### M2 — Symbol coding and terminal state ✅ ([#1](https://github.com/hyang0129/claude-rts/issues/1))
+### M2 — Symbol coding and terminal state ✅ ([#1](https://github.com/hyang0129/supreme-claudemander/issues/1))
 - [x] Assign each hub a unique symbol (A, B, C...)
 - [x] Replace colored dot in title bar with hub symbol
 - [x] Symbol color reflects terminal state, not hub identity:
@@ -107,11 +107,11 @@ Python server (aiohttp, localhost:3000)          │
 
 | Issue | Description | Status |
 |-------|-------------|--------|
-| [#2](https://github.com/hyang0129/claude-rts/issues/2) | Scroll wheel conflicts between terminal scroll and canvas zoom | Open |
-| [#3](https://github.com/hyang0129/claude-rts/issues/3) | Right-click context menu opens even when user intends to right-click-drag | Open |
-| [#4](https://github.com/hyang0129/claude-rts/issues/4) | Dragging terminal card quickly loses mouse tracking | Open |
-| [#5](https://github.com/hyang0129/claude-rts/issues/5) | Browser default context menu appears in some areas | Open |
-| [#6](https://github.com/hyang0129/claude-rts/issues/6) | Canvas needs a distinct texture to differentiate from terminal backgrounds | Open |
+| [#2](https://github.com/hyang0129/supreme-claudemander/issues/2) | Scroll wheel conflicts between terminal scroll and canvas zoom | Open |
+| [#3](https://github.com/hyang0129/supreme-claudemander/issues/3) | Right-click context menu opens even when user intends to right-click-drag | Open |
+| [#4](https://github.com/hyang0129/supreme-claudemander/issues/4) | Dragging terminal card quickly loses mouse tracking | Open |
+| [#5](https://github.com/hyang0129/supreme-claudemander/issues/5) | Browser default context menu appears in some areas | Open |
+| [#6](https://github.com/hyang0129/supreme-claudemander/issues/6) | Canvas needs a distinct texture to differentiate from terminal backgrounds | Open |
 
 ## Future Work
 
@@ -132,7 +132,7 @@ Python server (aiohttp, localhost:3000)          │
 ## File Structure
 
 ```
-claude-rts/
+supreme-claudemander/
   README.md
   ROADMAP.md
   CLAUDE.md

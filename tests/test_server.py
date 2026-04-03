@@ -30,7 +30,7 @@ async def test_index_returns_html(client):
     resp = await client.get("/")
     assert resp.status == 200
     text = await resp.text()
-    assert "claude-rts" in text
+    assert "supreme-claudemander" in text
     assert "xterm" in text
 
 

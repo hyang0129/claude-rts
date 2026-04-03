@@ -24,12 +24,14 @@ from claude_rts.server import create_app
 @pytest.fixture
 def config_dir(tmp_path):
     """Patch CONFIG_DIR, CONFIG_FILE, CANVASES_DIR to use tmp_path."""
-    cfg_dir = tmp_path / ".claude-rts"
+    cfg_dir = tmp_path / ".supreme-claudemander"
     cfg_file = cfg_dir / "config.json"
     canvases_dir = cfg_dir / "canvases"
+    legacy_dir = tmp_path / ".claude-rts-nonexistent"
     with patch("claude_rts.config.CONFIG_DIR", cfg_dir), \
          patch("claude_rts.config.CONFIG_FILE", cfg_file), \
-         patch("claude_rts.config.CANVASES_DIR", canvases_dir):
+         patch("claude_rts.config.CANVASES_DIR", canvases_dir), \
+         patch("claude_rts.config._LEGACY_CONFIG_DIR", legacy_dir):
         yield cfg_dir, cfg_file, canvases_dir
 
 

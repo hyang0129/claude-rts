@@ -1,11 +1,11 @@
-# claude-rts
+# supreme-claudemander
 
 RTS-style terminal canvas — a web-based multiplexer where devcontainer shells live as draggable, resizable cards on a pannable/zoomable 4K canvas.
 
 ## Quick Start
 
 ```bash
-cd d:/containers/claude-rts
+cd d:/containers/supreme-claudemander
 pip install -e .
 python -m claude_rts                          # starts server on :3000, opens browser
 python -m claude_rts --port 3001 --no-browser # custom port, no auto-open
@@ -30,9 +30,9 @@ claude_rts/
   server.py            # aiohttp routes, WebSocket handlers, session endpoints, test API
   sessions.py          # SessionManager, ScrollbackBuffer, Session — PTY persistence
   discovery.py         # docker.exe ps → list of {hub, container}
-  config.py            # File-based config and canvas layout persistence (~/.claude-rts/)
+  config.py            # File-based config and canvas layout persistence (~/.supreme-claudemander/)
   startup.py           # Pluggable startup scripts (discover-devcontainers, custom)
-  util_container.py    # Manage the claude-rts-util container (build, start, exec)
+  util_container.py    # Manage the supreme-claudemander-util container (build, start, exec)
   Dockerfile.util      # Utility container image (Python + Node.js + claude CLI)
   probe_loop.sh        # Background usage probe script for utility container
   static/
@@ -45,7 +45,7 @@ claude_rts/
 - **Session persistence**: SessionManager decouples PTY lifetime from WebSocket. PTYs run in server memory with a 64KB scrollback ring buffer. Orphan reaper cleans up after 5 min.
 - **Single HTML file**: All JS/CSS is inline in index.html. External libs (xterm.js) load from CDN. No npm, no bundler.
 - **Card class hierarchy**: Card base class → TerminalCard, WidgetCard, LoaderCard. Enables mixed dashboards.
-- **No container lifecycle management**: claude-rts only attaches to running containers. Starting/stopping containers is out of scope.
+- **No container lifecycle management**: supreme-claudemander only attaches to running containers. Starting/stopping containers is out of scope.
 
 ## Development
 
@@ -101,7 +101,7 @@ Tests use `MockPty` (in `test_sessions.py`) to avoid needing Docker. For integra
 
 Server ops are logged verbosely via loguru:
 - stderr: colored, human-readable
-- `claude-rts.log`: rotating file log (10 MB, 3 day retention)
+- `supreme-claudemander.log`: rotating file log (10 MB, 3 day retention)
 
 Terminal data (stdout bytes) is intentionally NOT logged.
 
@@ -131,17 +131,17 @@ Terminal data (stdout bytes) is intentionally NOT logged.
 
 ### Config
 
-Stored in `~/.claude-rts/config.json`. Key fields:
+Stored in `~/.supreme-claudemander/config.json`. Key fields:
 
 ```json
 {
   "startup_script": "discover-devcontainers",
   "sessions": { "orphan_timeout": 300, "scrollback_size": 65536 },
-  "util_container": { "name": "claude-rts-util", "mounts": {} }
+  "util_container": { "name": "supreme-claudemander-util", "mounts": {} }
 }
 ```
 
-Canvas layouts stored in `~/.claude-rts/canvases/{name}.json`.
+Canvas layouts stored in `~/.supreme-claudemander/canvases/{name}.json`.
 
 ## Roadmap
 

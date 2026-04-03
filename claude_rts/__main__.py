@@ -11,7 +11,7 @@ from .server import create_app
 
 
 def main():
-    parser = argparse.ArgumentParser(description="claude-rts terminal canvas")
+    parser = argparse.ArgumentParser(description="supreme-claudemander terminal canvas")
     parser.add_argument("--port", type=int, default=3000, help="Server port (default: 3000)")
     parser.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
     parser.add_argument("--test-mode", action="store_true", help="Enable test puppeting API")
@@ -25,14 +25,14 @@ def main():
         level="DEBUG",
     )
     logger.add(
-        "claude-rts.log",
+        "supreme-claudemander.log",
         rotation="10 MB",
         retention="3 days",
         level="DEBUG",
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
     )
 
-    logger.info("claude-rts starting on http://localhost:{}", args.port)
+    logger.info("supreme-claudemander starting on http://localhost:{}", args.port)
 
     import os
     test_mode = args.test_mode or os.environ.get("CLAUDE_RTS_TEST_MODE", "").lower() in ("1", "true")

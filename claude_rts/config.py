@@ -1,19 +1,23 @@
 """File-based persistence for config and canvas layouts.
 
-Config dir: ~/.claude-rts/
-Config file: ~/.claude-rts/config.json
-Canvas layouts: ~/.claude-rts/canvases/{name}.json
+Config dir: ~/.supreme-claudemander/
+Config file: ~/.supreme-claudemander/config.json
+Canvas layouts: ~/.supreme-claudemander/canvases/{name}.json
 """
 
 import json
 import pathlib
 import re
+import shutil
 
 from loguru import logger
 
-CONFIG_DIR = pathlib.Path.home() / ".claude-rts"
+CONFIG_DIR = pathlib.Path.home() / ".supreme-claudemander"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 CANVASES_DIR = CONFIG_DIR / "canvases"
+
+# Legacy config dir — migrated automatically on first run
+_LEGACY_CONFIG_DIR = pathlib.Path.home() / ".claude-rts"
 
 DEFAULT_CONFIG = {
     "copy": "ctrl-shift-c",
@@ -24,8 +28,8 @@ DEFAULT_CONFIG = {
     "theme": "catppuccin-mocha",
     "startup_script": "discover-devcontainers",
     "util_container": {
-        "name": "claude-rts-util",
-        "image": "claude-rts-util:latest",
+        "name": "supreme-claudemander-util",
+        "image": "supreme-claudemander-util:latest",
         "auto_start": True,
         "auto_stop": False,
         "mounts": {},
@@ -41,8 +45,21 @@ DEFAULT_CONFIG = {
 _CANVAS_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
+def _migrate_legacy_config() -> None:
+    """Migrate ~/.claude-rts/ to ~/.supreme-claudemander/ if it exists."""
+    if not _LEGACY_CONFIG_DIR.exists() or CONFIG_DIR.exists():
+        return
+    try:
+        shutil.copytree(_LEGACY_CONFIG_DIR, CONFIG_DIR)
+        logger.info("Migrated config from {} to {}", _LEGACY_CONFIG_DIR, CONFIG_DIR)
+        # Leave the old dir in place as a backup — user can delete it manually
+    except Exception as exc:
+        logger.warning("Failed to migrate legacy config: {}", exc)
+
+
 def ensure_dirs() -> None:
     """Create config and canvases directories if they don't exist."""
+    _migrate_legacy_config()
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CANVASES_DIR.mkdir(parents=True, exist_ok=True)
     logger.debug("Ensured config dirs: {}, {}", CONFIG_DIR, CANVASES_DIR)

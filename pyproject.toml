@@ -1,5 +1,5 @@
 [project]
-name = "claude-rts"
+name = "supreme-claudemander"
 version = "0.1.0"
 description = "RTS-style terminal canvas for devcontainer hubs"
 requires-python = ">=3.10"
@@ -17,7 +17,7 @@ test = [
 ]
 
 [project.scripts]
-claude-rts = "claude_rts.__main__:main"
+supreme-claudemander = "claude_rts.__main__:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
