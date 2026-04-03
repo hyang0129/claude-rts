@@ -370,6 +370,23 @@
     animation: none;
   }
 
+  /* ── Widget body ── */
+  .widget-body {
+    padding: 12px;
+    font-size: 13px;
+    color: #cdd6f4;
+    overflow-y: auto;
+  }
+  .widget-body .widget-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    border-bottom: 1px solid #313244;
+  }
+  .widget-body .widget-row:last-child { border-bottom: none; }
+  .widget-body .widget-label { color: #a6adc8; }
+  .widget-body .widget-value { color: #cdd6f4; font-family: monospace; }
+
   /* ── Control group badge ── */
   .control-group-badge {
     font-size: 10px;
@@ -724,17 +741,40 @@ function showContextMenu(sx, sy) {
       ${h.hub}${detail}
     </div>`;
   });
+
+  // Widget section
+  const widgetTypes = Object.keys(WIDGET_REGISTRY);
+  if (widgetTypes.length > 0) {
+    html += '<div class="ctx-header">Spawn widget</div>';
+    for (const wt of widgetTypes) {
+      const def = WIDGET_REGISTRY[wt];
+      html += `<div class="ctx-item" data-widget="${wt}">
+        <span class="symbol-preview">W</span>
+        ${def.label || wt}
+      </div>`;
+    }
+  }
+
   ctxMenu.innerHTML = html;
   ctxMenu.style.left = sx + 'px';
   ctxMenu.style.top = sy + 'px';
   ctxMenu.classList.add('visible');
 
-  ctxMenu.querySelectorAll('.ctx-item').forEach(item => {
+  ctxMenu.querySelectorAll('.ctx-item[data-hub]').forEach(item => {
     item.addEventListener('click', (e) => {
       e.stopPropagation();
       const hubName = item.dataset.hub;
       const hub = hubs.find(h => h.hub === hubName);
       if (hub) spawnCard(hub, ctxMenuCanvasPos.x, ctxMenuCanvasPos.y);
+      hideContextMenu();
+    });
+  });
+
+  ctxMenu.querySelectorAll('.ctx-item[data-widget]').forEach(item => {
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const widgetType = item.dataset.widget;
+      spawnWidget(widgetType, ctxMenuCanvasPos.x, ctxMenuCanvasPos.y);
       hideContextMenu();
     });
   });
@@ -1220,6 +1260,84 @@ class LoaderCard {
 }
 
 // ════════════════════════════════════════════
+// Widget registry
+// ════════════════════════════════════════════
+const WIDGET_REGISTRY = {
+  'system-info': {
+    label: 'System Info',
+    defaultRefreshInterval: 10000,
+    async render(body, card) {
+      try {
+        const resp = await fetch('/api/widgets/system-info');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        const activeTerminals = cards.filter(c => c.type === 'terminal').length;
+        const rows = [
+          ['Hostname', data.hostname],
+          ['Platform', data.platform],
+          ['Python', data.python_version],
+          ['Server uptime', data.uptime],
+          ['Active terminals', String(activeTerminals)],
+          ['Current time', new Date().toLocaleTimeString()],
+        ];
+        body.innerHTML = rows.map(([label, value]) =>
+          `<div class="widget-row"><span class="widget-label">${label}</span><span class="widget-value">${value}</span></div>`
+        ).join('');
+        card.updateState('working');
+      } catch (err) {
+        body.innerHTML = `<div class="widget-row"><span class="widget-label" style="color:#f38ba8">Error: ${err.message}</span></div>`;
+        card.updateState('dead');
+      }
+    },
+  },
+};
+
+// ════════════════════════════════════════════
+// WidgetCard subclass
+// ════════════════════════════════════════════
+class WidgetCard extends Card {
+  constructor(opts) {
+    super({ ...opts, type: 'widget', hub: opts.hub || opts.widgetType, container: '', symbol: opts.symbol || 'W' });
+    this.widgetType = opts.widgetType;
+    this.refreshInterval = opts.refreshInterval || (WIDGET_REGISTRY[opts.widgetType]?.defaultRefreshInterval) || 30000;
+    this._refreshTimer = null;
+  }
+
+  createBody() {
+    const body = document.createElement('div');
+    body.className = 'terminal-body widget-body';
+    return body;
+  }
+
+  onInit() {
+    this.render();
+    this._refreshTimer = setInterval(() => this.render(), this.refreshInterval);
+  }
+
+  onDestroy() {
+    if (this._refreshTimer) clearInterval(this._refreshTimer);
+  }
+
+  async render() {
+    const body = this.el.querySelector(`[data-body="${this.id}"]`);
+    if (!body) return;
+    const widgetDef = WIDGET_REGISTRY[this.widgetType];
+    if (widgetDef && widgetDef.render) {
+      await widgetDef.render(body, this);
+    } else {
+      body.innerHTML = `<div class="widget-row"><span class="widget-label" style="color:#f38ba8">Unknown widget: ${this.widgetType}</span></div>`;
+    }
+  }
+
+  serialize() {
+    const data = super.serialize();
+    data.widgetType = this.widgetType;
+    data.refreshInterval = this.refreshInterval;
+    return data;
+  }
+}
+
+// ════════════════════════════════════════════
 // Terminal state management
 // ════════════════════════════════════════════
 function updateCardState(id, state) {
@@ -1261,6 +1379,26 @@ function spawnCard(hub, x, y, w, h, savedControlGroups, execCmd) {
   return card;
 }
 
+function spawnWidget(widgetType, x, y, w, h) {
+  const card = new WidgetCard({
+    widgetType,
+    x,
+    y,
+    w: w || 360,
+    h: h || 280,
+    symbol: 'W',
+  });
+  card.createElement();
+  canvas.appendChild(card.el);
+  cards.push(card);
+  card.setupDrag();
+  card.setupResize();
+  card.onInit();
+  drawMinimap();
+  updateHubCount();
+  return card;
+}
+
 function destroyCard(id) {
   const idx = cards.findIndex(c => c.id === id);
   if (idx === -1) return;
@@ -1280,7 +1418,11 @@ function focusCard(id) {
 }
 
 function updateHubCount() {
-  document.getElementById('hub-count').textContent = `${hubs.length} hub(s) | ${cards.length} terminal(s)`;
+  const termCount = cards.filter(c => c.type === 'terminal').length;
+  const widgetCount = cards.filter(c => c.type === 'widget').length;
+  const parts = [`${hubs.length} hub(s)`, `${termCount} terminal(s)`];
+  if (widgetCount > 0) parts.push(`${widgetCount} widget(s)`);
+  document.getElementById('hub-count').textContent = parts.join(' | ');
 }
 
 // ════════════════════════════════════════════
@@ -1839,8 +1981,12 @@ async function switchCanvas(name) {
   const saved = await loadLayout();
   if (saved && saved.length > 0) {
     for (const s of saved) {
-      const hub = hubs.find(h => h.hub === s.hub);
-      if (hub) spawnCard(hub, s.x, s.y, s.w, s.h, s.controlGroups, s.exec);
+      if (s.type === 'widget' && s.widgetType) {
+        spawnWidget(s.widgetType, s.x, s.y, s.w, s.h);
+      } else {
+        const hub = hubs.find(h => h.hub === s.hub);
+        if (hub) spawnCard(hub, s.x, s.y, s.w, s.h, s.controlGroups, s.exec);
+      }
     }
     rebuildControlGroupsFromCards();
   }
@@ -1941,12 +2087,16 @@ async function switchCanvas(name) {
   if (saved && saved.length > 0) {
     // Spawn cards from saved layout
     for (const s of saved) {
-      const hub = hubs.find(h => h.hub === s.hub);
-      if (hub) spawnCard(hub, s.x, s.y, s.w, s.h, s.controlGroups, s.exec);
+      if (s.type === 'widget' && s.widgetType) {
+        spawnWidget(s.widgetType, s.x, s.y, s.w, s.h);
+      } else {
+        const hub = hubs.find(h => h.hub === s.hub);
+        if (hub) spawnCard(hub, s.x, s.y, s.w, s.h, s.controlGroups, s.exec);
+      }
     }
     // Spawn any new hubs not in saved layout
     for (const hub of hubs) {
-      if (!saved.some(s => s.hub === hub.hub)) {
+      if (!saved.some(s => s.hub === hub.hub && s.type !== 'widget')) {
         spawnCard(hub, 100 + Math.random() * 200, 100 + Math.random() * 200);
       }
     }

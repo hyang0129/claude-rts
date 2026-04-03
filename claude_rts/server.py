@@ -3,10 +3,15 @@
 import asyncio
 import json
 import pathlib
+import platform
+import sys
+import time
 
 from aiohttp import web
 from loguru import logger
 from winpty import PtyProcess
+
+_start_time = time.monotonic()
 
 from .config import read_config, write_config, list_canvases, read_canvas, write_canvas, delete_canvas
 from .discovery import discover_hubs
@@ -183,6 +188,23 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+async def widget_system_info_handler(request: web.Request) -> web.Response:
+    """Return system information for the system-info widget."""
+    uptime_seconds = int(time.monotonic() - _start_time)
+    hours, remainder = divmod(uptime_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    uptime_str = f"{hours}h {minutes}m {seconds}s"
+
+    data = {
+        "hostname": platform.node(),
+        "platform": platform.platform(),
+        "python_version": sys.version.split()[0],
+        "uptime": uptime_str,
+        "uptime_seconds": uptime_seconds,
+    }
+    return web.json_response(data)
+
+
 async def exec_websocket_handler(request: web.Request) -> web.WebSocketResponse:
     """WebSocket handler that spawns a PTY for an arbitrary command."""
     cmd = request.query.get("cmd", "").strip()
@@ -269,6 +291,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/canvases/{name}", canvas_get_handler)
     app.router.add_put("/api/canvases/{name}", canvas_put_handler)
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
+    app.router.add_get("/api/widgets/system-info", widget_system_info_handler)
     app.router.add_get("/ws/exec", exec_websocket_handler)
     app.router.add_get("/ws/{hub}", websocket_handler)
     logger.info("Application routes registered")

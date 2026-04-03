@@ -63,6 +63,29 @@ async def test_websocket_404_for_unknown_hub(client):
     assert resp.status == 404
 
 
+async def test_widget_system_info_returns_json(client):
+    resp = await client.get("/api/widgets/system-info")
+    assert resp.status == 200
+    data = await resp.json()
+    assert "hostname" in data
+    assert "platform" in data
+    assert "python_version" in data
+    assert "uptime" in data
+    assert "uptime_seconds" in data
+    assert isinstance(data["uptime_seconds"], int)
+    assert isinstance(data["hostname"], str)
+
+
+async def test_widget_system_info_uptime_format(client):
+    resp = await client.get("/api/widgets/system-info")
+    assert resp.status == 200
+    data = await resp.json()
+    # Uptime should match "Xh Ym Zs" format
+    assert "h " in data["uptime"]
+    assert "m " in data["uptime"]
+    assert data["uptime"].endswith("s")
+
+
 async def test_app_has_all_routes(app):
     routes = [r.resource.canonical for r in app.router.routes() if hasattr(r, 'resource')]
     assert "/" in routes
@@ -71,5 +94,6 @@ async def test_app_has_all_routes(app):
     assert "/api/canvases" in routes
     assert "/api/canvases/{name}" in routes
     assert "/api/startup" in routes
+    assert "/api/widgets/system-info" in routes
     assert "/ws/exec" in routes
     assert "/ws/{hub}" in routes
