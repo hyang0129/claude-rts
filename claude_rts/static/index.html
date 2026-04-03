@@ -778,6 +778,7 @@ function showContextMenu(sx, sy) {
   const hostShells = [
     { id: 'powershell', label: 'PowerShell', cmd: 'powershell.exe' },
     { id: 'cmd', label: 'Command Prompt', cmd: 'cmd.exe' },
+    { id: 'util', label: 'Utility Container', cmd: 'docker.exe exec -it claude-rts-util bash' },
   ];
   for (const shell of hostShells) {
     html += `<div class="ctx-item" data-host-shell="${shell.id}" data-host-cmd="${shell.cmd}">
