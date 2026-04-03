@@ -803,6 +803,8 @@ function destroyCard(id) {
   if (idx === -1) return;
   const card = cards[idx];
   card.ro.disconnect();
+  if (card._cancelDrag) card._cancelDrag();
+  if (card._cancelResize) card._cancelResize();
   if (card._cleanup) card._cleanup();
   if (card.ws && card.ws.readyState === WebSocket.OPEN) card.ws.close();
   card.term.dispose();
@@ -861,8 +863,14 @@ function setupDrag(card) {
     origY = card.y;
     document.addEventListener('pointermove', onMove);
     document.addEventListener('pointerup', onUp);
+    e.preventDefault();
     e.stopPropagation();
   });
+
+  card._cancelDrag = () => {
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+  };
 }
 
 // ════════════════════════════════════════════
@@ -892,8 +900,14 @@ function setupResize(card) {
     origH = card.h;
     document.addEventListener('pointermove', onMove);
     document.addEventListener('pointerup', onUp);
+    e.preventDefault();
     e.stopPropagation();
   });
+
+  card._cancelResize = () => {
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+  };
 }
 
 // ════════════════════════════════════════════
