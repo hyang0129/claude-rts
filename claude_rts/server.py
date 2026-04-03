@@ -245,7 +245,7 @@ async def widget_claude_usage_handler(request: web.Request) -> web.Response:
             results.append({"profile": profile, **cached["data"], "cached": True})
             continue
 
-        claude_dir = f"/profiles/{profile}/.claude"
+        claude_dir = f"/profiles/{profile}"
         usage = await probe_usage(claude_dir)
         if usage:
             _usage_cache[profile] = {"data": usage, "timestamp": now}

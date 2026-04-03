@@ -1370,17 +1370,20 @@ const WIDGET_REGISTRY = {
         const resetStr = resets ? `<span class="usage-reset">resets ${resets}</span>` : '';
         return `<div class="usage-metric"><span class="usage-metric-label">${label}</span><span class="usage-metric-value">${pctStr}</span></div>${renderBar(pct)}${resetStr ? `<div style="text-align:right">${resetStr}</div>` : ''}`;
       }
+      const ts = () => new Date().toLocaleTimeString();
       try {
+        body.innerHTML = `<div class="usage-status">Fetching usage data... (${ts()})</div>`;
+        card.updateState('connecting');
         const resp = await fetch('/api/widgets/claude-usage');
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         if (data.status === 'error') {
-          body.innerHTML = `<div class="usage-status">${data.error}</div>`;
+          body.innerHTML = `<div class="usage-status" style="color:#f38ba8">${data.error}</div><div class="usage-status">${ts()}</div>`;
           card.updateState('dead');
           return;
         }
         if (!data.profiles || data.profiles.length === 0) {
-          body.innerHTML = `<div class="usage-status">${data.message || 'No profiles found.'}<br><br>Mount ~/.claude-profiles/ to the utility container.</div>`;
+          body.innerHTML = `<div class="usage-status">${data.message || 'No profiles found.'}<br><br>Mount ~/.claude-profiles/ to the utility container.</div><div class="usage-status">${ts()}</div>`;
           card.updateState('idle');
           return;
         }
@@ -1399,11 +1402,12 @@ const WIDGET_REGISTRY = {
           }
           html += `</div>`;
         }
+        html += `<div class="usage-status">Last updated: ${ts()}</div>`;
         html += `<button class="usage-refresh-btn" onclick="this.closest('[data-card-id]')||void 0;fetch('/api/widgets/claude-usage?force=1').then(()=>{const c=cards.find(c=>c.widgetType==='claude-usage');if(c)c.render();})">Refresh now</button>`;
         body.innerHTML = html;
         card.updateState('working');
       } catch (err) {
-        body.innerHTML = `<div class="widget-row"><span class="widget-label" style="color:#f38ba8">Error: ${err.message}</span></div>`;
+        body.innerHTML = `<div class="widget-row"><span class="widget-label" style="color:#f38ba8">Error: ${err.message}</span></div><div class="usage-status">${ts()}</div>`;
         card.updateState('dead');
       }
     },

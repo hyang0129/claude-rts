@@ -1,12 +1,13 @@
 # claude-rts utility container
 # Purpose: background tasks, monitoring, status probing (NOT coding or LLM calls)
-# Stays alive via sleep infinity, commands executed via docker exec
+# Runs probe loop + stays alive for interactive exec
 
 FROM python:3.11-slim
 
 # Install Node.js (needed for claude CLI, which claude-usage-plz spawns)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    procps \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -20,10 +21,14 @@ RUN pip install --no-cache-dir claude-usage-plz
 # Create profiles mount point
 RUN mkdir -p /profiles
 
+# Copy probe loop script
+COPY probe_loop.sh /usr/local/bin/probe_loop.sh
+RUN chmod +x /usr/local/bin/probe_loop.sh
+
 # Non-root user for safety
 RUN useradd -m -s /bin/bash util
 USER util
 WORKDIR /home/util
 
-# Stay alive, awaiting exec commands
-CMD ["sleep", "infinity"]
+# Run probe loop in background, keep container alive
+CMD ["bash", "-c", "/usr/local/bin/probe_loop.sh &\nsleep infinity"]

@@ -10,6 +10,7 @@ import asyncio
 import json
 import pathlib
 import shutil
+import time
 
 from loguru import logger
 
@@ -146,6 +147,66 @@ async def exec_in_util(cmd: str, timeout: float = 60) -> tuple[int, str]:
     return rc, stdout
 
 
+async def exec_in_util_pty(cmd: str, timeout: float = 60) -> tuple[int, str]:
+    """Execute a command in the utility container using a real PTY.
+
+    Required for commands that need a TTY (e.g., claude-usage-plz which uses pexpect).
+    Uses pywinpty to provide a ConPTY, same as terminal WebSocket connections.
+    """
+    from winpty import PtyProcess
+
+    cfg = _get_config()
+
+    if not await is_util_running():
+        raise RuntimeError(f"Utility container '{cfg['name']}' is not running")
+
+    full_cmd = f'docker.exe exec -it {cfg["name"]} {cmd}'
+    logger.debug("exec_in_util_pty: {}", cmd)
+
+    loop = asyncio.get_event_loop()
+
+    def _run_pty():
+        try:
+            pty = PtyProcess.spawn(full_cmd, dimensions=(24, 120))
+        except Exception as exc:
+            logger.error("Failed to spawn PTY for exec_in_util_pty: {}", exc)
+            return -1, ""
+
+        output = []
+        deadline = time.monotonic() + timeout
+        try:
+            while pty.isalive() and time.monotonic() < deadline:
+                try:
+                    data = pty.read()
+                    if data:
+                        output.append(data)
+                        # Early exit: if we see a complete JSON object, we're done
+                        combined = "".join(output)
+                        if '{\n' in combined and combined.rstrip().endswith('}'):
+                            logger.debug("exec_in_util_pty: detected complete JSON, exiting early")
+                            break
+                except EOFError:
+                    break
+                except Exception:
+                    break
+        finally:
+            try:
+                pty.terminate(force=True)
+            except Exception:
+                pass
+
+        if time.monotonic() >= deadline:
+            logger.warning("exec_in_util_pty timed out after {}s", timeout)
+            return -1, "".join(output)
+
+        return 0, "".join(output)
+
+    rc, stdout = await loop.run_in_executor(None, _run_pty)
+    if rc != 0:
+        logger.warning("exec_in_util_pty failed (rc={})", rc)
+    return rc, stdout
+
+
 async def ensure_util_container() -> bool:
     """Ensure the utility container is running. Start if needed.
 
@@ -160,26 +221,58 @@ async def ensure_util_container() -> bool:
 
 async def list_profiles() -> list[str]:
     """List available claude profiles in the utility container's /profiles dir."""
-    rc, stdout = await exec_in_util("ls /profiles/", timeout=10)
+    cfg = _get_config()
+    # Only return subdirs that contain .credentials.json (actual profiles)
+    rc, stdout, _ = await _run(
+        f'docker.exe exec {cfg["name"]} bash -c "for d in /profiles/*/; do [ -f \\"$d/.credentials.json\\" ] && basename \\"$d\\"; done"',
+        timeout=10,
+    )
     if rc != 0:
         return []
     return [name.strip() for name in stdout.split("\n") if name.strip()]
 
 
-async def probe_usage(claude_dir: str, timeout: float = 45) -> dict | None:
+async def probe_usage(claude_dir: str, timeout: float = 60) -> dict | None:
     """Run claude-usage inside the utility container for a specific config dir.
 
+    Uses `script -qc` to provide a PTY (required by claude-usage-plz/pexpect).
     Returns parsed JSON dict or None on failure.
     """
-    rc, stdout = await exec_in_util(
-        f"claude-usage --claude-dir {claude_dir} --json",
-        timeout=timeout,
-    )
-    if rc != 0:
-        logger.warning("claude-usage probe failed for {}: rc={}", claude_dir, rc)
+    cfg = _get_config()
+
+    if not await is_util_running():
         return None
+
+    # Write a temp probe script to disk, docker cp it in, then execute.
+    # This avoids Windows -> docker -> bash quoting nightmares.
+    inner_timeout = max(timeout - 5, 10)
+    import tempfile
+    script_content = f"#!/bin/bash\nscript -qc 'timeout {inner_timeout} claude-usage --claude-dir {claude_dir} --json' /dev/null 2>/dev/null\n"
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False, newline='\n') as f:
+        f.write(script_content)
+        tmp_path = f.name
     try:
-        return json.loads(stdout)
+        await _run(f'docker.exe cp "{tmp_path}" {cfg["name"]}:/tmp/_probe.sh', timeout=5)
+        cmd = f'docker.exe exec {cfg["name"]} bash /tmp/_probe.sh'
+    finally:
+        import os
+        os.unlink(tmp_path)
+    logger.debug("probe_usage: {}", cmd)
+    rc, stdout, stderr = await _run(cmd, timeout=timeout)
+
+    if rc != 0:
+        logger.warning("claude-usage probe failed for {} (rc={}): {}", claude_dir, rc, stderr[:200] if stderr else "")
+        return None
+
+    clean = stdout.replace('\r', '').strip()
+    json_start = clean.find('{')
+    json_end = clean.rfind('}')
+    if json_start < 0 or json_end <= json_start:
+        logger.warning("No JSON found in probe output for {}: {}", claude_dir, clean[:200])
+        return None
+
+    try:
+        return json.loads(clean[json_start:json_end + 1])
     except json.JSONDecodeError as exc:
         logger.warning("claude-usage returned invalid JSON for {}: {}", claude_dir, exc)
         return None
