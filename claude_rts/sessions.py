@@ -7,6 +7,7 @@ scrollback contents before live data.
 """
 
 import asyncio
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -76,6 +77,7 @@ class Session:
     session_id: str
     cmd: str
     hub: Optional[str]
+    container: Optional[str]
     pty: PtyProcess
     scrollback: ScrollbackBuffer
     created_at: float = field(default_factory=time.monotonic)
@@ -86,31 +88,55 @@ class Session:
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
+# Docker container names: alphanumeric, underscores, hyphens, dots
+_CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+
+def _valid_container_name(name: str) -> bool:
+    """Return True if name is a safe Docker container name."""
+    return bool(name) and len(name) <= 128 and bool(_CONTAINER_NAME_RE.match(name))
+
+
 class SessionManager:
     """Registry of persistent PTY sessions."""
 
-    def __init__(self, orphan_timeout: float = 300, scrollback_size: int = 65536):
+    def __init__(self, orphan_timeout: float = 300, scrollback_size: int = 65536,
+                 tmux_enabled: bool = True):
         self._sessions: dict[str, Session] = {}
         self.orphan_timeout = orphan_timeout
         self.scrollback_size = scrollback_size
+        self.tmux_enabled = tmux_enabled
         self._reaper_task: Optional[asyncio.Task] = None
+        self._tmux_cache: dict[str, bool] = {}
 
     def create_session(
         self,
         cmd: str,
         hub: str | None = None,
+        container: str | None = None,
         dimensions: tuple[int, int] = (24, 80),
     ) -> Session:
         """Spawn a PTY and register a new session."""
-        session_id = uuid.uuid4().hex[:16]
-        logger.info("Creating session {} for cmd={!r} hub={}", session_id, cmd, hub)
+        session_id = "rts-" + uuid.uuid4().hex[:8]
+        logger.info("Creating session {} for cmd={!r} hub={} container={}", session_id, cmd, hub, container)
 
-        pty = PtyProcess.spawn(cmd, dimensions=dimensions)
+        if container and not _valid_container_name(container):
+            logger.warning("Invalid container name rejected: {!r}", container)
+            container = None
+
+        if container and self.tmux_enabled and self._tmux_cache.get(container):
+            spawn_cmd = f'docker.exe exec -it {container} tmux new-session -As {session_id}'
+            logger.info("Using tmux persistence: {}", spawn_cmd)
+        else:
+            spawn_cmd = cmd
+
+        pty = PtyProcess.spawn(spawn_cmd, dimensions=dimensions)
 
         session = Session(
             session_id=session_id,
             cmd=cmd,
             hub=hub,
+            container=container,
             pty=pty,
             scrollback=ScrollbackBuffer(self.scrollback_size),
         )
@@ -148,8 +174,12 @@ class SessionManager:
         logger.info("Session {}: client detached ({} remaining)",
                      session_id, len(session.clients))
 
-    def destroy_session(self, session_id: str) -> None:
-        """Kill a session's PTY and remove it from the registry."""
+    def destroy_session(self, session_id: str, kill_tmux: bool = False) -> None:
+        """Kill a session's PTY and remove it from the registry.
+
+        If kill_tmux is True and the session has a container, also kill the
+        tmux session inside the container so it doesn't persist.
+        """
         session = self._sessions.pop(session_id, None)
         if not session:
             return
@@ -160,7 +190,25 @@ class SessionManager:
             session.pty.terminate(force=True)
         except Exception:
             pass
-        logger.info("Session {} destroyed", session_id)
+        if kill_tmux and session.container:
+            task = asyncio.create_task(self._kill_tmux_session(session))
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        logger.info("Session {} destroyed (kill_tmux={})", session_id, kill_tmux)
+
+    async def _kill_tmux_session(self, session: Session) -> None:
+        """Kill a tmux session inside its container."""
+        if not session.container:
+            return
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker.exe", "exec", session.container,
+                "tmux", "kill-session", "-t", session.session_id,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            logger.info("Killed tmux session {} in container {}", session.session_id, session.container)
+        except Exception:
+            logger.warning("Failed to kill tmux session {} in {}", session.session_id, session.container)
 
     def list_sessions(self) -> list[dict]:
         """Return metadata for all active sessions."""
@@ -170,6 +218,7 @@ class SessionManager:
                 "session_id": s.session_id,
                 "cmd": s.cmd,
                 "hub": s.hub,
+                "container": s.container,
                 "alive": s.alive,
                 "client_count": len(s.clients),
                 "scrollback_size": s.scrollback.size,
@@ -228,14 +277,98 @@ class SessionManager:
                 and (now - s.last_client_time) > self.orphan_timeout
             ]
             for sid in to_kill:
-                logger.info("Orphan reaper: killing session {} (no clients for {}s)",
+                logger.info("Orphan reaper: detaching session {} (no clients for {}s)",
                             sid, int(now - self._sessions[sid].last_client_time))
-                self.destroy_session(sid)
+                self.destroy_session(sid, kill_tmux=False)
 
     def stop_all(self) -> None:
-        """Destroy all sessions and stop the reaper."""
+        """Detach all local PTY handles and stop the reaper.
+
+        tmux sessions inside containers are NOT killed — they persist for
+        recovery on the next server start.
+        """
         if self._reaper_task:
             self._reaper_task.cancel()
         for sid in list(self._sessions.keys()):
-            self.destroy_session(sid)
-        logger.info("SessionManager: all sessions stopped")
+            self.destroy_session(sid, kill_tmux=False)
+        logger.info("SessionManager: all sessions detached (tmux sessions preserved)")
+
+    async def probe_tmux(self, container: str) -> bool:
+        """Check if tmux is available in a container and cache the result."""
+        if container in self._tmux_cache:
+            return self._tmux_cache[container]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker.exe", "exec", container, "tmux", "-V",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            available = proc.returncode == 0
+        except Exception:
+            available = False
+        self._tmux_cache[container] = available
+        if available:
+            logger.info("tmux available in container {}", container)
+        else:
+            logger.debug("tmux not available in container {}", container)
+        return available
+
+    async def recover_tmux_sessions(self, hubs: list[dict]) -> int:
+        """Discover and re-attach to existing tmux sessions in containers."""
+        recovered = 0
+        for hub in hubs:
+            container = hub["container"]
+            hub_name = hub["hub"]
+            proc = await asyncio.create_subprocess_exec(
+                "docker.exe", "exec", container,
+                "tmux", "list-sessions", "-F", "#{session_name}",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode != 0:
+                continue
+
+            self._tmux_cache[container] = True
+
+            for line in stdout.decode().strip().splitlines():
+                session_name = line.strip()
+                if not session_name.startswith("rts-"):
+                    continue
+                if session_name in self._sessions:
+                    continue
+
+                tmux_cmd = f'docker.exe exec -it {container} tmux attach-session -t {session_name}'
+                try:
+                    pty = PtyProcess.spawn(tmux_cmd, dimensions=(24, 80))
+                except Exception:
+                    logger.warning("Failed to reattach to tmux session {} in {}", session_name, container)
+                    continue
+
+                session = Session(
+                    session_id=session_name,
+                    cmd=tmux_cmd,
+                    hub=hub_name,
+                    container=container,
+                    pty=pty,
+                    scrollback=ScrollbackBuffer(self.scrollback_size),
+                )
+
+                # Seed scrollback from tmux history
+                try:
+                    cap_proc = await asyncio.create_subprocess_exec(
+                        "docker.exe", "exec", container,
+                        "tmux", "capture-pane", "-t", session_name, "-p", "-S", "-500",
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    )
+                    cap_stdout, _ = await cap_proc.communicate()
+                    if cap_proc.returncode == 0 and cap_stdout:
+                        session.scrollback.append(cap_stdout)
+                except Exception:
+                    pass
+
+                session.read_task = asyncio.create_task(self._pty_read_loop(session))
+                self._sessions[session_name] = session
+                recovered += 1
+                logger.info("Recovered tmux session {} from container {}", session_name, container)
+
+        return recovered

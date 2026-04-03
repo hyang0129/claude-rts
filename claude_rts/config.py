@@ -33,6 +33,7 @@ DEFAULT_CONFIG = {
     "sessions": {
         "orphan_timeout": 300,
         "scrollback_size": 65536,
+        "tmux_persistence": True,
     },
 }
 

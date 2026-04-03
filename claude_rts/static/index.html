@@ -1157,7 +1157,7 @@ class TerminalCard extends Card {
     } else {
       // Create new persistent session
       const cmd = this.execCmd || `docker.exe exec -it -u vscode ${this.container} bash -l`;
-      wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}`;
+      wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}`;
     }
     this.ws = new WebSocket(wsUrl);
     this.ws.binaryType = 'arraybuffer';

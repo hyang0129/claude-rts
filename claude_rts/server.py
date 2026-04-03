@@ -374,6 +374,7 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
     """Create a new persistent session and attach via WebSocket."""
     cmd = request.query.get("cmd", "").strip()
     hub = request.query.get("hub", "")
+    container = request.query.get("container", "").strip()
     if not cmd:
         raise web.HTTPBadRequest(text="Missing 'cmd' query parameter")
 
@@ -383,7 +384,7 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
     await ws.prepare(request)
 
     try:
-        session = mgr.create_session(cmd, hub=hub or None)
+        session = mgr.create_session(cmd, hub=hub or None, container=container or None)
     except Exception:
         logger.exception("Failed to create session for cmd={!r}", cmd)
         await ws.send_str(json.dumps({"error": "Failed to spawn terminal"}))
@@ -435,11 +436,12 @@ async def sessions_list_handler(request: web.Request) -> web.Response:
 async def test_session_create(request: web.Request) -> web.Response:
     cmd = request.query.get("cmd", "").strip()
     hub = request.query.get("hub", "")
+    container = request.query.get("container", "").strip()
     if not cmd:
         raise web.HTTPBadRequest(text="Missing 'cmd' query parameter")
     mgr: SessionManager = request.app["session_manager"]
     try:
-        session = mgr.create_session(cmd, hub=hub or None)
+        session = mgr.create_session(cmd, hub=hub or None, container=container or None)
         return web.json_response({"session_id": session.session_id})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
@@ -492,7 +494,7 @@ async def test_session_delete(request: web.Request) -> web.Response:
     mgr: SessionManager = request.app["session_manager"]
     if not mgr.get_session(sid):
         raise web.HTTPNotFound(text="Session not found")
-    mgr.destroy_session(sid)
+    mgr.destroy_session(sid, kill_tmux=True)
     return web.json_response({"status": "ok"})
 
 
@@ -545,9 +547,23 @@ def create_app(test_mode: bool = False) -> web.Application:
         mgr = SessionManager(
             orphan_timeout=session_config.get("orphan_timeout", 300),
             scrollback_size=session_config.get("scrollback_size", 65536),
+            tmux_enabled=session_config.get("tmux_persistence", True),
         )
         app["session_manager"] = mgr
         mgr.start_orphan_reaper()
+
+        # Probe tmux availability and recover existing sessions
+        if mgr.tmux_enabled:
+            try:
+                hubs = await discover_hubs()
+                for hub in hubs:
+                    await mgr.probe_tmux(hub["container"])
+                recovered = await mgr.recover_tmux_sessions(hubs)
+                if recovered:
+                    logger.info("Recovered {} tmux session(s) from running containers", recovered)
+            except Exception:
+                logger.warning("Failed to recover tmux sessions on startup (non-fatal)")
+
         try:
             await ensure_util_container()
         except Exception:

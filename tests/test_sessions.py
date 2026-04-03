@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 import pytest
 from aiohttp import web
 
-from claude_rts.sessions import ScrollbackBuffer, SessionManager, Session
+from claude_rts.sessions import ScrollbackBuffer, SessionManager, Session, _valid_container_name
 from claude_rts.server import create_app
 
 
@@ -110,6 +110,85 @@ async def test_session_manager_create(monkeypatch):
     assert session.alive
     assert mgr.get_session(session.session_id) is session
     mgr.stop_all()
+
+
+async def test_session_id_format(monkeypatch):
+    """Session IDs should use rts-{hex8} format."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    session = mgr.create_session("test")
+    assert session.session_id.startswith("rts-")
+    assert len(session.session_id) == 12  # "rts-" + 8 hex chars
+    mgr.stop_all()
+
+
+async def test_create_session_with_container_tmux(monkeypatch):
+    """When container is provided and tmux is cached, should use tmux command."""
+    spawned_cmds = []
+    original_spawn = MockPty.spawn
+
+    @classmethod
+    def tracking_spawn(cls, cmd, dimensions=(24, 80)):
+        spawned_cmds.append(cmd)
+        return original_spawn(cmd, dimensions)
+
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    MockPty.spawn = tracking_spawn
+    try:
+        mgr = SessionManager()
+        mgr._tmux_cache["my-container"] = True
+        session = mgr.create_session("bash -l", hub="hub1", container="my-container")
+        assert any("tmux new-session" in c for c in spawned_cmds)
+        assert session.container == "my-container"
+        mgr.stop_all()
+    finally:
+        MockPty.spawn = original_spawn
+
+
+async def test_create_session_fallback_no_tmux(monkeypatch):
+    """Without tmux in cache, should use the original command."""
+    spawned_cmds = []
+    original_spawn = MockPty.spawn
+
+    @classmethod
+    def tracking_spawn(cls, cmd, dimensions=(24, 80)):
+        spawned_cmds.append(cmd)
+        return original_spawn(cmd, dimensions)
+
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    MockPty.spawn = tracking_spawn
+    try:
+        mgr = SessionManager()
+        # No tmux cache entry
+        session = mgr.create_session("bash -l", hub="hub1", container="my-container")
+        assert spawned_cmds[-1] == "bash -l"
+        assert session.container == "my-container"
+        mgr.stop_all()
+    finally:
+        MockPty.spawn = original_spawn
+
+
+async def test_destroy_session_default_no_kill_tmux(monkeypatch):
+    """Default destroy_session should not attempt to kill tmux."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    session = mgr.create_session("test", container="cont1")
+    sid = session.session_id
+    # destroy without kill_tmux — should not raise or call docker
+    mgr.destroy_session(sid, kill_tmux=False)
+    assert mgr.get_session(sid) is None
+    mgr.stop_all()
+
+
+async def test_stop_all_preserves_tmux(monkeypatch):
+    """stop_all should detach sessions without killing tmux."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    s1 = mgr.create_session("cmd1", container="cont1")
+    s2 = mgr.create_session("cmd2", container="cont2")
+    mgr.stop_all()
+    assert mgr.get_session(s1.session_id) is None
+    assert mgr.get_session(s2.session_id) is None
 
 
 async def test_session_manager_destroy(monkeypatch):
@@ -247,3 +326,126 @@ async def test_app_has_session_routes():
     assert "/ws/session/new" in routes
     assert "/ws/session/{session_id}" in routes
     assert "/api/sessions" in routes
+
+
+# ── Container name validation tests ────────────────────────────────────────
+
+
+def test_valid_container_names():
+    assert _valid_container_name("my-container")
+    assert _valid_container_name("container_1")
+    assert _valid_container_name("abc.def")
+    assert _valid_container_name("a")
+
+
+def test_invalid_container_names():
+    assert not _valid_container_name("")
+    assert not _valid_container_name("-starts-with-dash")
+    assert not _valid_container_name(".starts-with-dot")
+    assert not _valid_container_name("has spaces")
+    assert not _valid_container_name("semi;colon")
+    assert not _valid_container_name("$(injection)")
+    assert not _valid_container_name("foo; rm -rf /")
+    assert not _valid_container_name("a" * 129)
+
+
+async def test_create_session_rejects_invalid_container(monkeypatch):
+    """Invalid container names should be sanitized to None."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    mgr._tmux_cache["$(evil)"] = True  # even if cached, should be rejected
+    session = mgr.create_session("bash -l", container="$(evil)")
+    assert session.container is None
+    mgr.stop_all()
+
+
+# ── tmux recovery test ─────────────────────────────────────────────────────
+
+
+async def test_recover_tmux_sessions(monkeypatch):
+    """recover_tmux_sessions should find and re-attach to existing tmux sessions."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+
+    # Mock asyncio.create_subprocess_exec to simulate tmux list-sessions
+    call_count = {"list": 0, "capture": 0}
+
+    async def mock_subprocess_exec(*args, **kwargs):
+        mock_proc = AsyncMock()
+        cmd_args = list(args)
+        if "list-sessions" in cmd_args:
+            call_count["list"] += 1
+            mock_proc.communicate.return_value = (b"rts-abc12345\nother-session\n", b"")
+            mock_proc.returncode = 0
+        elif "capture-pane" in cmd_args:
+            call_count["capture"] += 1
+            mock_proc.communicate.return_value = (b"$ previous output\n", b"")
+            mock_proc.returncode = 0
+        else:
+            mock_proc.communicate.return_value = (b"", b"")
+            mock_proc.returncode = 1
+        return mock_proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subprocess_exec)
+
+    mgr = SessionManager()
+    hubs = [{"container": "test-container", "hub": "hub1"}]
+    recovered = await mgr.recover_tmux_sessions(hubs)
+
+    assert recovered == 1
+    assert "rts-abc12345" in mgr._sessions
+    session = mgr._sessions["rts-abc12345"]
+    assert session.hub == "hub1"
+    assert session.container == "test-container"
+    assert mgr._tmux_cache["test-container"] is True
+    # Scrollback should be seeded from capture-pane
+    assert session.scrollback.size > 0
+    assert call_count["list"] == 1
+    assert call_count["capture"] == 1
+    mgr.stop_all()
+
+
+async def test_recover_skips_non_rts_sessions(monkeypatch):
+    """recover_tmux_sessions should skip sessions without rts- prefix."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+
+    async def mock_subprocess_exec(*args, **kwargs):
+        mock_proc = AsyncMock()
+        cmd_args = list(args)
+        if "list-sessions" in cmd_args:
+            mock_proc.communicate.return_value = (b"user-session\nanother\n", b"")
+            mock_proc.returncode = 0
+        else:
+            mock_proc.communicate.return_value = (b"", b"")
+            mock_proc.returncode = 1
+        return mock_proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", mock_subprocess_exec)
+
+    mgr = SessionManager()
+    recovered = await mgr.recover_tmux_sessions([{"container": "c1", "hub": "h1"}])
+    assert recovered == 0
+    assert len(mgr._sessions) == 0
+    mgr.stop_all()
+
+
+async def test_tmux_disabled_via_config(monkeypatch):
+    """When tmux_enabled=False, sessions should not use tmux even if cached."""
+    spawned_cmds = []
+    original_spawn = MockPty.spawn
+
+    @classmethod
+    def tracking_spawn(cls, cmd, dimensions=(24, 80)):
+        spawned_cmds.append(cmd)
+        return original_spawn(cmd, dimensions)
+
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    MockPty.spawn = tracking_spawn
+    try:
+        mgr = SessionManager(tmux_enabled=False)
+        mgr._tmux_cache["my-container"] = True
+        session = mgr.create_session("bash -l", container="my-container")
+        # Should use original command, not tmux
+        assert spawned_cmds[-1] == "bash -l"
+        mgr.stop_all()
+    finally:
+        MockPty.spawn = original_spawn
