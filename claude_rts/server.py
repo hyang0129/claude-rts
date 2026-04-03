@@ -16,6 +16,7 @@ _start_time = time.monotonic()
 from .config import read_config, write_config, list_canvases, read_canvas, write_canvas, delete_canvas
 from .discovery import discover_hubs
 from .startup import run_startup
+from .util_container import ensure_util_container, is_util_running, list_profiles, probe_usage
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
@@ -205,6 +206,67 @@ async def widget_system_info_handler(request: web.Request) -> web.Response:
     return web.json_response(data)
 
 
+# ── Claude usage widget ──────────────────────────────────────────────────────
+
+# Cache: {profile_name: {data: {...}, timestamp: float}}
+_usage_cache: dict[str, dict] = {}
+_USAGE_CACHE_TTL = 60  # seconds
+
+
+async def widget_claude_usage_handler(request: web.Request) -> web.Response:
+    """Return Claude usage data for all profiles.
+
+    Probes each profile via claude-usage-plz in the utility container.
+    Results cached for 60s since each probe takes 15-20s.
+    """
+    force = request.query.get("force", "").lower() in ("1", "true")
+
+    if not await is_util_running():
+        return web.json_response({
+            "status": "error",
+            "error": "Utility container not running. Start it from config.",
+            "profiles": [],
+        })
+
+    profiles = await list_profiles()
+    if not profiles:
+        return web.json_response({
+            "status": "ok",
+            "profiles": [],
+            "message": "No profiles found in /profiles/. Mount ~/.claude-profiles/ to the utility container.",
+        })
+
+    now = time.monotonic()
+    results = []
+
+    for profile in profiles:
+        cached = _usage_cache.get(profile)
+        if cached and not force and (now - cached["timestamp"]) < _USAGE_CACHE_TTL:
+            results.append({"profile": profile, **cached["data"], "cached": True})
+            continue
+
+        claude_dir = f"/profiles/{profile}/.claude"
+        usage = await probe_usage(claude_dir)
+        if usage:
+            _usage_cache[profile] = {"data": usage, "timestamp": now}
+            results.append({"profile": profile, **usage, "cached": False})
+        else:
+            results.append({"profile": profile, "error": "probe failed", "cached": False})
+
+    return web.json_response({"status": "ok", "profiles": results})
+
+
+async def widget_claude_usage_status_handler(request: web.Request) -> web.Response:
+    """Lightweight status check: is utility container running, how many profiles."""
+    running = await is_util_running()
+    profiles = await list_profiles() if running else []
+    return web.json_response({
+        "util_running": running,
+        "profile_count": len(profiles),
+        "profiles": profiles,
+    })
+
+
 async def exec_websocket_handler(request: web.Request) -> web.WebSocketResponse:
     """WebSocket handler that spawns a PTY for an arbitrary command."""
     cmd = request.query.get("cmd", "").strip()
@@ -292,7 +354,18 @@ def create_app() -> web.Application:
     app.router.add_put("/api/canvases/{name}", canvas_put_handler)
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
     app.router.add_get("/api/widgets/system-info", widget_system_info_handler)
+    app.router.add_get("/api/widgets/claude-usage", widget_claude_usage_handler)
+    app.router.add_get("/api/widgets/claude-usage/status", widget_claude_usage_status_handler)
     app.router.add_get("/ws/exec", exec_websocket_handler)
+
+    # Start utility container in background on app startup
+    async def on_startup(app: web.Application) -> None:
+        try:
+            await ensure_util_container()
+        except Exception:
+            logger.warning("Failed to start utility container (non-fatal)")
+
+    app.on_startup.append(on_startup)
     app.router.add_get("/ws/{hub}", websocket_handler)
     logger.info("Application routes registered")
     return app

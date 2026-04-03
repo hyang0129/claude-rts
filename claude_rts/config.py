@@ -23,6 +23,13 @@ DEFAULT_CONFIG = {
     "default_canvas": "main",
     "theme": "catppuccin-mocha",
     "startup_script": "discover-devcontainers",
+    "util_container": {
+        "name": "claude-rts-util",
+        "image": "claude-rts-util:latest",
+        "auto_start": True,
+        "auto_stop": False,
+        "mounts": {},
+    },
 }
 
 # Allowed canvas name pattern: alphanumeric, hyphens, underscores
