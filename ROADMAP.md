@@ -6,7 +6,7 @@ A web-based terminal multiplexer where devcontainer shells live as draggable, re
 
 1. Claude does all configuration and setup — the user should not need to edit config files
 2. User launches with a single script; browser auto-opens to the server; server dies when the script is terminated (Ctrl+C)
-3. Minimap in the top-left corner showing current viewport position + dot markers for each terminal card
+3. Minimap in the top-left corner showing current viewport position + markers for each terminal card
 4. Canvas size defaults to 3840x2160 (4K)
 5. Right-click on empty canvas opens a context menu with "Spawn terminal copy" — user picks a hub, new terminal card appears at the click position
 
@@ -28,7 +28,7 @@ Python server (aiohttp, localhost:3000)          │
   ├─ GET  /api/hubs      → discovered hubs JSON  │
   └─ WS   /ws/{hub}  ←──────────────────────────┘
        └─ per connection:
-            asyncio subprocess: docker.exe exec -it -u vscode <container> bash -l
+            pywinpty ConPTY: docker.exe exec -it -u vscode <container> bash -l
             stdin:  browser keystrokes → process stdin
             stdout: process stdout → browser terminal
 ```
@@ -38,61 +38,60 @@ Python server (aiohttp, localhost:3000)          │
 | Layer | Choice | Why |
 |-------|--------|-----|
 | Terminal rendering | xterm.js + xterm-addon-fit (CDN) | Industry standard, same as VS Code terminal |
-| WebSocket relay | Python asyncio subprocess | No external binaries, full control |
-| Canvas pan/zoom | panzoom (CDN) | Lightweight, smooth inertia, cursor-centered zoom |
-| Drag/resize | interact.js (CDN) | Drag + resize + snapping in one library |
+| WebSocket-to-PTY bridge | Python pywinpty (ConPTY) | Full PTY on Windows (colors, readline, resize) |
+| Canvas pan/zoom | Custom pointer events + wheel | No library dependency, cursor-centered zoom |
+| Drag/resize | Custom pointer events | Title bar drag, corner resize handles |
 | Frontend | Single index.html, no build step | Served by the Python server |
 | Backend | aiohttp | Async HTTP + WebSocket in one package |
 | Container discovery | subprocess `docker.exe ps` | Simple, no SDK dependency |
+| Logging | loguru | Verbose server ops, rotating file log |
 | Launcher | `python -m claude_rts` (argparse) | Starts server, opens browser, Ctrl+C kills all |
 
 ## Milestones
 
-### M0 — Single terminal in browser (plumbing)
-- [ ] Project scaffolding: pyproject.toml, claude_rts package, static/index.html
-- [ ] aiohttp server serves index.html on GET /
-- [ ] WebSocket endpoint /ws/{hub} spawns `docker.exe exec -it -u vscode <container> bash -l`
-- [ ] Bridge subprocess stdin/stdout over WebSocket binary frames
-- [ ] index.html: load xterm.js from CDN, connect to /ws/{hub}, render terminal
-- [ ] Handle PTY sizing: client sends JSON resize message, server adjusts (if possible)
-- [ ] `python -m claude_rts` starts server on :3000 and opens browser
-- [ ] Ctrl+C cleanly kills subprocess bridges (containers keep running)
-- **Exit criteria**: Type `ls` in browser, see container filesystem
+### M0 — Single terminal in browser (plumbing) ✅
+- [x] Project scaffolding: pyproject.toml, claude_rts package, static/index.html
+- [x] aiohttp server serves index.html on GET /
+- [x] WebSocket endpoint /ws/{hub} spawns docker exec via pywinpty ConPTY
+- [x] Bridge PTY stdin/stdout over WebSocket binary frames
+- [x] index.html: load xterm.js from CDN, connect to /ws/{hub}, render terminal
+- [x] Handle PTY sizing: client sends JSON resize message, server calls pty.setwinsize
+- [x] `python -m claude_rts` starts server on :3000 and opens browser
+- [x] Ctrl+C cleanly kills PTY processes (containers keep running)
+- [x] Copy/paste: Ctrl+Shift+C/V, right-click paste
+- [x] Verbose loguru logging (stderr + rotating file)
 
-### M1 — Multi-terminal canvas with minimap
-- [ ] /api/hubs endpoint: discover running devcontainers via docker.exe ps
-- [ ] Frontend fetches /api/hubs on load, creates one terminal card per hub
-- [ ] Cards absolute-positioned on a 3840x2160 canvas div
-- [ ] Default layout: 3x2 grid centered on canvas
-- [ ] Each card: title bar (hub name) + xterm.js + own WebSocket connection
-- [ ] panzoom on the canvas container (wheel to zoom, drag empty space to pan)
-- [ ] Minimap (top-left, ~200x112px):
-  - [ ] Shows 4K canvas scaled down
-  - [ ] Colored dot per terminal card at its position
-  - [ ] Viewport rectangle showing current view
-  - [ ] Click minimap to jump to that position
-- [ ] interact.js: drag cards by title bar, resize by edges/corners
-- [ ] xterm.js addon-fit re-fits on card resize
-- [ ] Z-order: clicked card comes to front
-- **Exit criteria**: All hubs visible on canvas, pannable, zoomable, minimap works
+### M1 — Multi-terminal canvas ✅
+- [x] /api/hubs endpoint: discover running devcontainers via docker.exe ps
+- [x] Frontend fetches /api/hubs on load, creates one terminal card per hub
+- [x] Cards absolute-positioned on a 3840x2160 canvas div
+- [x] Default layout: 3x2 grid centered on canvas
+- [x] Each card: title bar (hub name) + xterm.js + own WebSocket + ConPTY
+- [x] Cursor-centered zoom (scroll wheel), drag empty space to pan
+- [x] Minimap (top-left, 200x112px): scaled canvas, dots per card, viewport rect, click to jump
+- [x] Drag cards by title bar, resize by corner handle
+- [x] xterm.js addon-fit re-fits on card resize, sends resize to PTY
+- [x] Z-order: clicked card comes to front
+- [x] Right-click empty canvas: context menu to spawn terminal copy at click position
+- [x] Close button (X) on cards: kills PTY, removes card
+- [x] Fit-all button in status bar
 
-### M2 — Context menu and terminal spawning
-- [ ] Right-click on empty canvas shows context menu at click position
-- [ ] Menu item: "Spawn terminal" → submenu lists available hubs
-- [ ] Selecting a hub spawns a new terminal card at the right-click position
-- [ ] New card gets its own WebSocket + subprocess (independent shell session)
-- [ ] Multiple cards can connect to the same hub (separate bash sessions)
-- [ ] Close button (X) on card title bar: kills subprocess, removes card
-- **Exit criteria**: Can right-click, spawn a hub_1 copy, use it independently
+### M2 — Symbol coding and terminal state ([#1](https://github.com/hyang0129/claude-rts/issues/1))
+- [ ] Assign each hub a unique symbol (A, B, C... or hub number)
+- [ ] Replace colored dot in title bar with hub symbol
+- [ ] Symbol color reflects terminal state, not hub identity:
+  - **Green** = doing work (stdout activity in last N seconds)
+  - **Yellow** = idle / needs user input (no recent output, process alive)
+  - **Red** = dead terminal / major issue (WebSocket closed, process exited)
+- [ ] Minimap renders hub symbols instead of colored dots, colored by state
+- [ ] State detection: track last stdout timestamp per card, periodic check
+- **Exit criteria**: Can identify hubs by symbol and terminal health by color at a glance
 
 ### M3 — Polish
-- [ ] Card status indicator (green dot = connected, red = disconnected, spinner = connecting)
 - [ ] Auto-reconnect on WebSocket drop (exponential backoff)
 - [ ] Double-click title bar to zoom-to-fill (card takes full viewport)
-- [ ] Zoom-to-fit button (frames all cards)
 - [ ] Keyboard shortcuts: Ctrl+0 zoom-to-fit, Escape to deselect
 - [ ] Save card positions/sizes to localStorage, restore on reload
-- [ ] Dark theme (default), clean card styling
 - **Exit criteria**: Feels like a real tool
 
 ### M4 — Settings menu
@@ -105,27 +104,31 @@ Python server (aiohttp, localhost:3000)          │
 - [ ] Settings applied immediately (no reload required)
 - **Exit criteria**: User can configure copy/paste to match their preferred workflow
 
+## Resolved Questions
+
+1. **PTY on Windows** — Resolved: pywinpty provides ConPTY. `asyncio.create_subprocess_exec` only gives pipes (no echo, no colors). pywinpty + `docker.exe exec -it` gives full terminal support. The PTY read loop runs in a thread executor.
+
+2. **docker vs docker.exe** — Resolved: On Windows, `docker` (no extension) is a shell script that `CreateProcessW` can't execute. Always use `docker.exe` explicitly.
+
 ## Open Questions
 
-1. **PTY on Windows** — `asyncio.create_subprocess_exec` gives pipes, not a PTY. `docker.exe exec -it` may refuse without a real PTY. Options:
-   - Use pywinpty to provide a ConPTY
-   - Drop `-t`, send raw bytes (loses colors/readline — test if acceptable)
-   - Test in M0, pick the approach that works
+1. **Container lifecycle** — MVP is attach-only. Starting/stopping containers is out of scope.
 
-2. **Container lifecycle** — MVP is attach-only. Starting/stopping containers is out of scope.
+2. **Canvas size** — Fixed 4K for MVP. Could make configurable or auto-scale later.
 
-3. **Canvas size** — Fixed 4K for MVP. Could make configurable or auto-scale later.
+3. **State detection heuristics** — How long after last stdout before marking "idle"? Need to tune the threshold (M2).
 
 ## File Structure
 
 ```
 claude-rts/
   ROADMAP.md
+  CLAUDE.md
   pyproject.toml
   claude_rts/
     __init__.py
-    __main__.py          # CLI: parse args, start server, open browser
-    server.py            # aiohttp app: static files, /api/hubs, /ws/{hub}
+    __main__.py          # CLI: parse args, loguru setup, start server, open browser
+    server.py            # aiohttp app: static files, /api/hubs, /ws/{hub}, pywinpty bridge
     discovery.py         # docker.exe ps parsing → list of {hub, container}
     static/
       index.html         # single-page canvas UI (all JS/CSS inline)
