@@ -773,6 +773,19 @@ function showContextMenu(sx, sy) {
     </div>`;
   });
 
+  // Host terminal section
+  html += '<div class="ctx-header">Host terminal</div>';
+  const hostShells = [
+    { id: 'powershell', label: 'PowerShell', cmd: 'powershell.exe' },
+    { id: 'cmd', label: 'Command Prompt', cmd: 'cmd.exe' },
+  ];
+  for (const shell of hostShells) {
+    html += `<div class="ctx-item" data-host-shell="${shell.id}" data-host-cmd="${shell.cmd}">
+      <span class="symbol-preview" style="color:#89b4fa">H</span>
+      ${shell.label}
+    </div>`;
+  }
+
   // Widget section
   const widgetTypes = Object.keys(WIDGET_REGISTRY);
   if (widgetTypes.length > 0) {
@@ -797,6 +810,21 @@ function showContextMenu(sx, sy) {
       const hubName = item.dataset.hub;
       const hub = hubs.find(h => h.hub === hubName);
       if (hub) spawnCard(hub, ctxMenuCanvasPos.x, ctxMenuCanvasPos.y);
+      hideContextMenu();
+    });
+  });
+
+  ctxMenu.querySelectorAll('.ctx-item[data-host-shell]').forEach(item => {
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const shellId = item.dataset.hostShell;
+      const shellCmd = item.dataset.hostCmd;
+      const hub = { hub: shellId, container: 'localhost', exec: shellCmd };
+      // Add to hubs if not already there so symbol assignment works
+      if (!hubSymbolMap[shellId]) {
+        hubSymbolMap[shellId] = 'H';
+      }
+      spawnCard(hub, ctxMenuCanvasPos.x, ctxMenuCanvasPos.y, CARD_W, CARD_H, null, shellCmd);
       hideContextMenu();
     });
   });
