@@ -9,12 +9,13 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body {
     width: 100%; height: 100%;
-    background: #1e1e2e;
+    background: #11111b;
     color: #cdd6f4;
     font-family: system-ui, -apple-system, sans-serif;
     overflow: hidden;
   }
 
+  /* ── Status bar ── */
   #status-bar {
     position: fixed;
     top: 0; left: 0; right: 0;
@@ -29,49 +30,75 @@
     gap: 16px;
   }
   #status-bar .title { font-weight: 600; color: #cba6f7; }
-  #status-bar .hub-count { color: #a6adc8; }
+  #status-bar .info { color: #a6adc8; }
+  #status-bar .btn {
+    background: #313244; border: 1px solid #45475a; color: #cdd6f4;
+    padding: 2px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;
+  }
+  #status-bar .btn:hover { background: #45475a; }
 
-  #terminal-container {
+  /* ── Viewport (clips the canvas) ── */
+  #viewport {
     position: fixed;
     top: 32px; left: 0; right: 0; bottom: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 24px;
+    overflow: hidden;
+    cursor: grab;
+  }
+  #viewport.panning { cursor: grabbing; }
+
+  /* ── Canvas (4K, pannable/zoomable) ── */
+  #canvas {
+    position: absolute;
+    width: 3840px;
+    height: 2160px;
+    transform-origin: 0 0;
+    background:
+      radial-gradient(circle, #181825 1px, transparent 1px);
+    background-size: 40px 40px;
   }
 
+  /* ── Terminal card ── */
   .terminal-card {
+    position: absolute;
     display: flex;
     flex-direction: column;
-    width: 100%;
-    height: 100%;
-    max-width: 1200px;
-    max-height: 800px;
     border: 1px solid #45475a;
     border-radius: 8px;
     overflow: hidden;
     background: #1e1e2e;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    min-width: 300px;
+    min-height: 200px;
   }
+  .terminal-card.focused { border-color: #cba6f7; box-shadow: 0 4px 24px rgba(203,166,247,0.15); }
 
   .terminal-titlebar {
     height: 32px;
     background: #313244;
     display: flex;
     align-items: center;
-    padding: 0 12px;
+    padding: 0 8px 0 12px;
     font-size: 13px;
     font-weight: 500;
     gap: 8px;
     flex-shrink: 0;
+    cursor: move;
+    user-select: none;
   }
   .terminal-titlebar .dot {
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: #a6e3a1;
+    width: 8px; height: 8px; border-radius: 50%; background: #a6e3a1; flex-shrink: 0;
   }
   .terminal-titlebar .dot.disconnected { background: #f38ba8; }
   .terminal-titlebar .dot.connecting { background: #f9e2af; }
   .terminal-titlebar .hub-name { color: #cdd6f4; }
+  .terminal-titlebar .container-name { color: #585b70; font-size: 11px; }
+  .terminal-titlebar .spacer { flex: 1; }
+  .terminal-titlebar .close-btn {
+    width: 20px; height: 20px; border: none; background: transparent;
+    color: #585b70; font-size: 16px; cursor: pointer; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .terminal-titlebar .close-btn:hover { background: #f38ba8; color: #1e1e2e; }
 
   .terminal-body {
     flex: 1;
@@ -79,159 +106,569 @@
     min-height: 0;
   }
   .terminal-body .xterm { height: 100%; }
+
+  /* Resize handle */
+  .resize-handle {
+    position: absolute;
+    bottom: 0; right: 0;
+    width: 16px; height: 16px;
+    cursor: nwse-resize;
+  }
+  .resize-handle::after {
+    content: '';
+    position: absolute;
+    bottom: 3px; right: 3px;
+    width: 8px; height: 8px;
+    border-right: 2px solid #585b70;
+    border-bottom: 2px solid #585b70;
+  }
+
+  /* ── Minimap ── */
+  #minimap {
+    position: fixed;
+    top: 44px; left: 12px;
+    width: 200px; height: 112px;
+    background: #181825;
+    border: 1px solid #313244;
+    border-radius: 6px;
+    z-index: 999;
+    overflow: hidden;
+    cursor: pointer;
+  }
+  #minimap-canvas {
+    width: 100%; height: 100%;
+  }
+
+  /* ── Context menu ── */
+  #context-menu {
+    display: none;
+    position: fixed;
+    background: #1e1e2e;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    padding: 4px 0;
+    z-index: 2000;
+    min-width: 200px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  #context-menu.visible { display: block; }
+  .ctx-header {
+    padding: 6px 12px;
+    font-size: 11px;
+    color: #585b70;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .ctx-item {
+    padding: 6px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .ctx-item:hover { background: #313244; }
+  .ctx-item .dot-preview {
+    width: 8px; height: 8px; border-radius: 50%;
+  }
 </style>
 </head>
 <body>
 
 <div id="status-bar">
   <span class="title">claude-rts</span>
-  <span class="hub-count" id="hub-count">connecting...</span>
+  <span class="info" id="hub-count">connecting...</span>
+  <span class="info" id="zoom-level"></span>
+  <div style="flex:1"></div>
+  <button class="btn" id="btn-fit">Fit all</button>
 </div>
 
-<div id="terminal-container">
-  <!-- Terminal card inserted here by JS -->
+<div id="viewport">
+  <div id="canvas"></div>
 </div>
+
+<div id="minimap">
+  <canvas id="minimap-canvas" width="200" height="112"></canvas>
+</div>
+
+<div id="context-menu"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
 <script>
-(async function() {
-  // Fetch available hubs
-  const resp = await fetch('/api/hubs');
-  const hubs = await resp.json();
+// ════════════════════════════════════════════
+// Constants
+// ════════════════════════════════════════════
+const CANVAS_W = 3840;
+const CANVAS_H = 2160;
+const CARD_W = 720;
+const CARD_H = 480;
+const CARD_GAP = 40;
 
-  if (hubs.length === 0) {
-    document.getElementById('hub-count').textContent = 'No containers running';
-    return;
+// Hub colors for minimap dots and card accents
+const HUB_COLORS = ['#f38ba8','#fab387','#f9e2af','#a6e3a1','#89b4fa','#cba6f7','#94e2d5','#f5c2e7'];
+
+// ════════════════════════════════════════════
+// State
+// ════════════════════════════════════════════
+let cards = [];         // {id, hub, container, el, term, fitAddon, ws, x, y, w, h, color}
+let nextCardId = 0;
+let hubs = [];          // from /api/hubs
+let pan = { x: 0, y: 0 };
+let zoom = 1;
+let isPanning = false;
+let panStart = { x: 0, y: 0, panX: 0, panY: 0 };
+let focusedCardId = null;
+let maxZ = 10;
+
+const viewport = document.getElementById('viewport');
+const canvas = document.getElementById('canvas');
+const ctxMenu = document.getElementById('context-menu');
+
+// ════════════════════════════════════════════
+// Canvas transform
+// ════════════════════════════════════════════
+function applyTransform() {
+  canvas.style.transform = `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`;
+  document.getElementById('zoom-level').textContent = `${Math.round(zoom * 100)}%`;
+  drawMinimap();
+}
+
+// ════════════════════════════════════════════
+// Pan (drag empty canvas)
+// ════════════════════════════════════════════
+viewport.addEventListener('pointerdown', (e) => {
+  if (e.target !== viewport && e.target !== canvas) return;
+  isPanning = true;
+  viewport.classList.add('panning');
+  panStart = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y };
+  viewport.setPointerCapture(e.pointerId);
+});
+viewport.addEventListener('pointermove', (e) => {
+  if (!isPanning) return;
+  pan.x = panStart.panX + (e.clientX - panStart.x);
+  pan.y = panStart.panY + (e.clientY - panStart.y);
+  applyTransform();
+});
+viewport.addEventListener('pointerup', () => {
+  isPanning = false;
+  viewport.classList.remove('panning');
+});
+
+// ════════════════════════════════════════════
+// Zoom (wheel, cursor-centered)
+// ════════════════════════════════════════════
+viewport.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const rect = viewport.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  const oldZoom = zoom;
+  const delta = e.deltaY > 0 ? 0.9 : 1.1;
+  zoom = Math.min(3, Math.max(0.15, zoom * delta));
+
+  // Adjust pan so zoom centers on cursor
+  pan.x = mx - (mx - pan.x) * (zoom / oldZoom);
+  pan.y = my - (my - pan.y) * (zoom / oldZoom);
+  applyTransform();
+}, { passive: false });
+
+// ════════════════════════════════════════════
+// Fit all cards in view
+// ════════════════════════════════════════════
+document.getElementById('btn-fit').addEventListener('click', fitAll);
+
+function fitAll() {
+  if (cards.length === 0) return;
+  const vw = viewport.clientWidth;
+  const vh = viewport.clientHeight;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const c of cards) {
+    minX = Math.min(minX, c.x);
+    minY = Math.min(minY, c.y);
+    maxX = Math.max(maxX, c.x + c.w);
+    maxY = Math.max(maxY, c.y + c.h);
+  }
+  const cw = maxX - minX;
+  const ch = maxY - minY;
+  const pad = 60;
+  zoom = Math.min((vw - pad * 2) / cw, (vh - pad * 2) / ch, 1.5);
+  pan.x = (vw - cw * zoom) / 2 - minX * zoom;
+  pan.y = (vh - ch * zoom) / 2 - minY * zoom;
+  applyTransform();
+  // Refit all terminals after zoom settles
+  setTimeout(() => cards.forEach(c => c.fitAddon.fit()), 100);
+}
+
+// ════════════════════════════════════════════
+// Minimap
+// ════════════════════════════════════════════
+const minimapEl = document.getElementById('minimap');
+const mmCanvas = document.getElementById('minimap-canvas');
+const mmCtx = mmCanvas.getContext('2d');
+
+function drawMinimap() {
+  const mw = mmCanvas.width;
+  const mh = mmCanvas.height;
+  const scaleX = mw / CANVAS_W;
+  const scaleY = mh / CANVAS_H;
+
+  mmCtx.clearRect(0, 0, mw, mh);
+
+  // Background
+  mmCtx.fillStyle = '#181825';
+  mmCtx.fillRect(0, 0, mw, mh);
+
+  // Card dots
+  for (const c of cards) {
+    const cx = c.x * scaleX + (c.w * scaleX) / 2;
+    const cy = c.y * scaleY + (c.h * scaleY) / 2;
+    // Card rect
+    mmCtx.fillStyle = c.color + '40';
+    mmCtx.fillRect(c.x * scaleX, c.y * scaleY, c.w * scaleX, c.h * scaleY);
+    // Dot
+    mmCtx.beginPath();
+    mmCtx.arc(cx, cy, 4, 0, Math.PI * 2);
+    mmCtx.fillStyle = c.color;
+    mmCtx.fill();
   }
 
-  // M0: connect to the first hub only
-  const hub = hubs[0];
-  document.getElementById('hub-count').textContent = `${hubs.length} hub(s) found \u2014 connected to ${hub.hub}`;
+  // Viewport rect
+  const vw = viewport.clientWidth;
+  const vh = viewport.clientHeight;
+  const vx = (-pan.x / zoom) * scaleX;
+  const vy = (-pan.y / zoom) * scaleY;
+  const vfw = (vw / zoom) * scaleX;
+  const vfh = (vh / zoom) * scaleY;
+  mmCtx.strokeStyle = '#cdd6f4';
+  mmCtx.lineWidth = 1.5;
+  mmCtx.strokeRect(vx, vy, vfw, vfh);
+}
 
-  // Create terminal card
-  const container = document.getElementById('terminal-container');
-  const card = document.createElement('div');
-  card.className = 'terminal-card';
-  card.innerHTML = `
-    <div class="terminal-titlebar">
-      <span class="dot connecting" id="status-dot"></span>
+// Click minimap to jump
+minimapEl.addEventListener('click', (e) => {
+  const rect = mmCanvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const scaleX = mmCanvas.width / CANVAS_W;
+  const scaleY = mmCanvas.height / CANVAS_H;
+  const canvasX = mx / scaleX;
+  const canvasY = my / scaleY;
+  const vw = viewport.clientWidth;
+  const vh = viewport.clientHeight;
+  pan.x = -(canvasX * zoom - vw / 2);
+  pan.y = -(canvasY * zoom - vh / 2);
+  applyTransform();
+});
+
+// ════════════════════════════════════════════
+// Context menu (right-click on empty canvas)
+// ════════════════════════════════════════════
+let ctxMenuCanvasPos = { x: 0, y: 0 };
+
+viewport.addEventListener('contextmenu', (e) => {
+  // Only show on empty canvas, not on terminal cards
+  if (e.target !== viewport && e.target !== canvas) return;
+  e.preventDefault();
+  ctxMenuCanvasPos = screenToCanvas(e.clientX, e.clientY);
+  showContextMenu(e.clientX, e.clientY);
+});
+
+document.addEventListener('click', () => hideContextMenu());
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideContextMenu(); });
+
+function showContextMenu(sx, sy) {
+  let html = '<div class="ctx-header">Spawn terminal</div>';
+  hubs.forEach((h, i) => {
+    const color = HUB_COLORS[i % HUB_COLORS.length];
+    html += `<div class="ctx-item" data-hub="${h.hub}">
+      <span class="dot-preview" style="background:${color}"></span>
+      ${h.hub} <span style="color:#585b70;font-size:11px">(${h.container})</span>
+    </div>`;
+  });
+  ctxMenu.innerHTML = html;
+  ctxMenu.style.left = sx + 'px';
+  ctxMenu.style.top = sy + 'px';
+  ctxMenu.classList.add('visible');
+
+  ctxMenu.querySelectorAll('.ctx-item').forEach(item => {
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const hubName = item.dataset.hub;
+      const hub = hubs.find(h => h.hub === hubName);
+      if (hub) spawnCard(hub, ctxMenuCanvasPos.x, ctxMenuCanvasPos.y);
+      hideContextMenu();
+    });
+  });
+}
+
+function hideContextMenu() {
+  ctxMenu.classList.remove('visible');
+}
+
+function screenToCanvas(sx, sy) {
+  const rect = viewport.getBoundingClientRect();
+  return {
+    x: (sx - rect.left - pan.x) / zoom,
+    y: (sy - rect.top - pan.y) / zoom,
+  };
+}
+
+// ════════════════════════════════════════════
+// Terminal theme (shared)
+// ════════════════════════════════════════════
+const TERM_THEME = {
+  background: '#1e1e2e',
+  foreground: '#cdd6f4',
+  cursor: '#f5e0dc',
+  selectionBackground: '#585b7066',
+  black: '#45475a', red: '#f38ba8', green: '#a6e3a1', yellow: '#f9e2af',
+  blue: '#89b4fa', magenta: '#cba6f7', cyan: '#94e2d5', white: '#bac2de',
+  brightBlack: '#585b70', brightRed: '#f38ba8', brightGreen: '#a6e3a1', brightYellow: '#f9e2af',
+  brightBlue: '#89b4fa', brightMagenta: '#cba6f7', brightCyan: '#94e2d5', brightWhite: '#a6adc8',
+};
+
+// ════════════════════════════════════════════
+// Spawn a terminal card
+// ════════════════════════════════════════════
+function spawnCard(hub, x, y, w, h) {
+  w = w || CARD_W;
+  h = h || CARD_H;
+  const id = nextCardId++;
+  const colorIdx = cards.filter(c => c.hub === hub.hub).length;
+  const color = HUB_COLORS[hubs.findIndex(hh => hh.hub === hub.hub) % HUB_COLORS.length];
+
+  const el = document.createElement('div');
+  el.className = 'terminal-card';
+  el.style.left = x + 'px';
+  el.style.top = y + 'px';
+  el.style.width = w + 'px';
+  el.style.height = h + 'px';
+  el.style.zIndex = ++maxZ;
+  el.dataset.cardId = id;
+
+  const copyLabel = cards.filter(c => c.hub === hub.hub).length;
+  el.innerHTML = `
+    <div class="terminal-titlebar" data-drag="${id}">
+      <span class="dot connecting" data-dot="${id}"></span>
       <span class="hub-name">${hub.hub}</span>
-      <span style="color:#585b70; margin-left:4px">(${hub.container})</span>
+      ${copyLabel > 0 ? `<span style="color:#585b70;font-size:11px">#${copyLabel + 1}</span>` : ''}
+      <span class="container-name">${hub.container}</span>
+      <span class="spacer"></span>
+      <button class="close-btn" data-close="${id}">&times;</button>
     </div>
-    <div class="terminal-body" id="term-body"></div>
+    <div class="terminal-body" data-body="${id}"></div>
+    <div class="resize-handle" data-resize="${id}"></div>
   `;
-  container.appendChild(card);
+  el.style.borderTopColor = color;
+  canvas.appendChild(el);
 
-  // Initialize xterm.js
-  const term = new window.Terminal({
-    cursorBlink: true,
-    fontSize: 14,
-    fontFamily: '"JetBrains Mono", "Cascadia Code", "Consolas", monospace',
-    theme: {
-      background: '#1e1e2e',
-      foreground: '#cdd6f4',
-      cursor: '#f5e0dc',
-      selectionBackground: '#585b7066',
-      black: '#45475a',
-      red: '#f38ba8',
-      green: '#a6e3a1',
-      yellow: '#f9e2af',
-      blue: '#89b4fa',
-      magenta: '#cba6f7',
-      cyan: '#94e2d5',
-      white: '#bac2de',
-      brightBlack: '#585b70',
-      brightRed: '#f38ba8',
-      brightGreen: '#a6e3a1',
-      brightYellow: '#f9e2af',
-      brightBlue: '#89b4fa',
-      brightMagenta: '#cba6f7',
-      brightCyan: '#94e2d5',
-      brightWhite: '#a6adc8',
-    },
+  // Focus on click
+  el.addEventListener('pointerdown', (e) => {
+    // Don't steal focus from xterm
+    focusCard(id);
+    el.style.zIndex = ++maxZ;
   });
 
+  // Close button
+  el.querySelector(`[data-close="${id}"]`).addEventListener('click', (e) => {
+    e.stopPropagation();
+    destroyCard(id);
+  });
+
+  // xterm.js
+  const term = new window.Terminal({
+    cursorBlink: true,
+    fontSize: 13,
+    fontFamily: '"JetBrains Mono","Cascadia Code","Consolas",monospace',
+    theme: TERM_THEME,
+  });
   const fitAddon = new window.FitAddon.FitAddon();
   term.loadAddon(fitAddon);
-  if (window.WebLinksAddon) {
-    term.loadAddon(new window.WebLinksAddon.WebLinksAddon());
-  }
-  term.open(document.getElementById('term-body'));
+  if (window.WebLinksAddon) term.loadAddon(new window.WebLinksAddon.WebLinksAddon());
+
+  const body = el.querySelector(`[data-body="${id}"]`);
+  term.open(body);
   fitAddon.fit();
 
-  // Copy/paste: Ctrl+Shift+C to copy, Ctrl+Shift+V to paste, right-click to paste
+  // WebSocket
+  const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${wsProto}//${location.host}/ws/${hub.hub}`);
+  ws.binaryType = 'arraybuffer';
+  const dot = el.querySelector(`[data-dot="${id}"]`);
+
+  ws.addEventListener('open', () => {
+    dot.className = 'dot';
+    ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+  });
+  ws.addEventListener('message', (ev) => {
+    if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
+  });
+  ws.addEventListener('close', () => {
+    dot.className = 'dot disconnected';
+    term.write('\r\n\x1b[31m[disconnected]\x1b[0m\r\n');
+  });
+  ws.addEventListener('error', () => { dot.className = 'dot disconnected'; });
+
+  term.onData((data) => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(new TextEncoder().encode(data));
+  });
+
+  // Copy/paste
   term.attachCustomKeyEventHandler((ev) => {
     if (ev.type === 'keydown' && ev.ctrlKey && ev.shiftKey && ev.key === 'C') {
       const sel = term.getSelection();
       if (sel) navigator.clipboard.writeText(sel);
-      return false; // prevent sending to shell
+      return false;
     }
     if (ev.type === 'keydown' && ev.ctrlKey && ev.shiftKey && ev.key === 'V') {
       navigator.clipboard.readText().then(text => {
-        if (text && ws.readyState === WebSocket.OPEN) {
-          ws.send(new TextEncoder().encode(text));
-        }
+        if (text && ws.readyState === WebSocket.OPEN) ws.send(new TextEncoder().encode(text));
       });
       return false;
     }
     return true;
   });
 
-  // Right-click paste
-  document.getElementById('term-body').addEventListener('contextmenu', (ev) => {
-    ev.preventDefault();
-    navigator.clipboard.readText().then(text => {
-      if (text && ws.readyState === WebSocket.OPEN) {
-        ws.send(new TextEncoder().encode(text));
-      }
-    });
-  });
-
-  // Connect WebSocket
-  const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${wsProto}//${location.host}/ws/${hub.hub}`);
-  ws.binaryType = 'arraybuffer';
-
-  const dot = document.getElementById('status-dot');
-
-  ws.addEventListener('open', () => {
-    dot.className = 'dot';
-    // Send initial size
-    ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-  });
-
-  ws.addEventListener('message', (event) => {
-    if (event.data instanceof ArrayBuffer) {
-      term.write(new Uint8Array(event.data));
-    }
-  });
-
-  ws.addEventListener('close', () => {
-    dot.className = 'dot disconnected';
-    term.write('\r\n\x1b[31m[disconnected]\x1b[0m\r\n');
-  });
-
-  ws.addEventListener('error', () => {
-    dot.className = 'dot disconnected';
-  });
-
-  // Send keystrokes to server
-  term.onData((data) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(new TextEncoder().encode(data));
-    }
-  });
-
-  // Handle resize
-  const resizeObserver = new ResizeObserver(() => {
+  // Resize observer for xterm fit
+  const ro = new ResizeObserver(() => {
     fitAddon.fit();
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
     }
   });
-  resizeObserver.observe(document.getElementById('term-body'));
+  ro.observe(body);
+
+  const card = { id, hub: hub.hub, container: hub.container, el, term, fitAddon, ws, x, y, w, h, color, ro };
+  cards.push(card);
+
+  // ── Drag (title bar) ──
+  setupDrag(card);
+  // ── Resize (handle) ──
+  setupResize(card);
+
+  drawMinimap();
+  updateHubCount();
+  return card;
+}
+
+function destroyCard(id) {
+  const idx = cards.findIndex(c => c.id === id);
+  if (idx === -1) return;
+  const card = cards[idx];
+  card.ro.disconnect();
+  if (card.ws.readyState === WebSocket.OPEN) card.ws.close();
+  card.term.dispose();
+  card.el.remove();
+  cards.splice(idx, 1);
+  drawMinimap();
+  updateHubCount();
+}
+
+function focusCard(id) {
+  focusedCardId = id;
+  cards.forEach(c => c.el.classList.toggle('focused', c.id === id));
+}
+
+function updateHubCount() {
+  document.getElementById('hub-count').textContent = `${hubs.length} hub(s) | ${cards.length} terminal(s)`;
+}
+
+// ════════════════════════════════════════════
+// Drag
+// ════════════════════════════════════════════
+function setupDrag(card) {
+  const titlebar = card.el.querySelector(`[data-drag="${card.id}"]`);
+  let dragging = false;
+  let startX, startY, origX, origY;
+
+  titlebar.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('.close-btn')) return;
+    dragging = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    origX = card.x;
+    origY = card.y;
+    titlebar.setPointerCapture(e.pointerId);
+    e.stopPropagation(); // don't trigger canvas pan
+  });
+  titlebar.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    card.x = origX + (e.clientX - startX) / zoom;
+    card.y = origY + (e.clientY - startY) / zoom;
+    card.el.style.left = card.x + 'px';
+    card.el.style.top = card.y + 'px';
+    drawMinimap();
+  });
+  titlebar.addEventListener('pointerup', () => { dragging = false; });
+}
+
+// ════════════════════════════════════════════
+// Resize
+// ════════════════════════════════════════════
+function setupResize(card) {
+  const handle = card.el.querySelector(`[data-resize="${card.id}"]`);
+  let resizing = false;
+  let startX, startY, origW, origH;
+
+  handle.addEventListener('pointerdown', (e) => {
+    resizing = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    origW = card.w;
+    origH = card.h;
+    handle.setPointerCapture(e.pointerId);
+    e.stopPropagation();
+  });
+  handle.addEventListener('pointermove', (e) => {
+    if (!resizing) return;
+    card.w = Math.max(300, origW + (e.clientX - startX) / zoom);
+    card.h = Math.max(200, origH + (e.clientY - startY) / zoom);
+    card.el.style.width = card.w + 'px';
+    card.el.style.height = card.h + 'px';
+    drawMinimap();
+  });
+  handle.addEventListener('pointerup', () => { resizing = false; });
+}
+
+// ════════════════════════════════════════════
+// Initial layout: 3x2 grid centered on canvas
+// ════════════════════════════════════════════
+function layoutGrid(hubList) {
+  const cols = 3;
+  const totalW = cols * CARD_W + (cols - 1) * CARD_GAP;
+  const rows = Math.ceil(hubList.length / cols);
+  const totalH = rows * CARD_H + (rows - 1) * CARD_GAP;
+  const startX = (CANVAS_W - totalW) / 2;
+  const startY = (CANVAS_H - totalH) / 2;
+
+  hubList.forEach((hub, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const x = startX + col * (CARD_W + CARD_GAP);
+    const y = startY + row * (CARD_H + CARD_GAP);
+    spawnCard(hub, x, y);
+  });
+}
+
+// ════════════════════════════════════════════
+// Boot
+// ════════════════════════════════════════════
+(async function() {
+  const resp = await fetch('/api/hubs');
+  hubs = await resp.json();
+
+  if (hubs.length === 0) {
+    document.getElementById('hub-count').textContent = 'No containers running';
+    return;
+  }
+
+  layoutGrid(hubs);
+
+  // Center viewport on the grid
+  setTimeout(fitAll, 200);
 })();
 </script>
 </body>
