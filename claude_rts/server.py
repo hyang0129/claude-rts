@@ -8,7 +8,7 @@ from aiohttp import web
 from loguru import logger
 from winpty import PtyProcess
 
-from .config import read_config, write_config, list_canvases, read_canvas, write_canvas
+from .config import read_config, write_config, list_canvases, read_canvas, write_canvas, delete_canvas
 from .discovery import discover_hubs
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
@@ -67,6 +67,17 @@ async def canvas_put_handler(request: web.Request) -> web.Response:
     ok = write_canvas(name, body)
     if not ok:
         raise web.HTTPBadRequest(text=f"Invalid canvas name '{name}'")
+    return web.json_response({"status": "ok", "name": name})
+
+
+async def canvas_delete_handler(request: web.Request) -> web.Response:
+    name = request.match_info["name"]
+    logger.info("Canvas '{}' delete requested by {}", name, request.remote)
+    if name == "main":
+        raise web.HTTPBadRequest(text="Cannot delete the 'main' canvas")
+    ok = delete_canvas(name)
+    if not ok:
+        raise web.HTTPNotFound(text=f"Canvas '{name}' not found")
     return web.json_response({"status": "ok", "name": name})
 
 
@@ -164,6 +175,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/canvases", canvases_list_handler)
     app.router.add_get("/api/canvases/{name}", canvas_get_handler)
     app.router.add_put("/api/canvases/{name}", canvas_put_handler)
+    app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
     app.router.add_get("/ws/{hub}", websocket_handler)
     logger.info("Application routes registered")
     return app

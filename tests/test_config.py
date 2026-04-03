@@ -210,6 +210,45 @@ async def test_put_canvas_invalid_json(client, config_dir):
     assert resp.status == 400
 
 
+async def test_delete_canvas_via_api(client, config_dir):
+    """DELETE /api/canvases/{name} removes a canvas."""
+    # Create a canvas first
+    layout = {"name": "temp", "canvas_size": [3840, 2160], "cards": []}
+    resp = await client.put("/api/canvases/temp", json=layout)
+    assert resp.status == 200
+
+    # Verify it exists
+    resp = await client.get("/api/canvases/temp")
+    assert resp.status == 200
+
+    # Delete it
+    resp = await client.delete("/api/canvases/temp")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["status"] == "ok"
+    assert data["name"] == "temp"
+
+    # Verify it's gone
+    resp = await client.get("/api/canvases/temp")
+    assert resp.status == 404
+
+
+async def test_delete_canvas_not_found_via_api(client, config_dir):
+    """DELETE returns 404 for non-existent canvas."""
+    resp = await client.delete("/api/canvases/nonexistent")
+    assert resp.status == 404
+
+
+async def test_delete_main_canvas_forbidden(client, config_dir):
+    """DELETE returns 400 when trying to delete 'main' canvas."""
+    # Create main canvas first
+    layout = {"name": "main", "canvas_size": [3840, 2160], "cards": []}
+    await client.put("/api/canvases/main", json=layout)
+
+    resp = await client.delete("/api/canvases/main")
+    assert resp.status == 400
+
+
 async def test_app_has_config_and_canvas_routes(app):
     routes = [r.resource.canonical for r in app.router.routes() if hasattr(r, 'resource')]
     assert "/api/config" in routes

@@ -232,6 +232,72 @@
   .settings-footer .btn-close:hover { background: #45475a; }
   .settings-footer .btn-reset { background: transparent; color: #f38ba8; border-color: #f38ba8; }
   .settings-footer .btn-reset:hover { background: #f38ba822; }
+
+  /* ── Canvas switcher ── */
+  #canvas-switcher {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  #canvas-switcher-btn {
+    background: #313244; border: 1px solid #45475a; color: #cdd6f4;
+    padding: 2px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;
+    display: flex; align-items: center; gap: 6px;
+    white-space: nowrap;
+  }
+  #canvas-switcher-btn:hover { background: #45475a; }
+  #canvas-switcher-btn .canvas-icon { color: #cba6f7; }
+  #canvas-switcher-btn .arrow { font-size: 10px; color: #a6adc8; }
+
+  #canvas-dropdown {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: 4px;
+    background: #1e1e2e;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    padding: 4px 0;
+    z-index: 2000;
+    min-width: 200px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  #canvas-dropdown.visible { display: block; }
+  .canvas-dropdown-item {
+    padding: 6px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .canvas-dropdown-item:hover { background: #313244; }
+  .canvas-dropdown-item.active { color: #cba6f7; }
+  .canvas-dropdown-item .canvas-label { flex: 1; }
+  .canvas-dropdown-item .delete-canvas-btn {
+    background: none; border: none; color: #585b70; cursor: pointer;
+    font-size: 14px; padding: 0 2px; border-radius: 3px;
+    visibility: hidden;
+  }
+  .canvas-dropdown-item:hover .delete-canvas-btn { visibility: visible; }
+  .canvas-dropdown-item .delete-canvas-btn:hover { color: #f38ba8; }
+  .canvas-dropdown-sep {
+    height: 1px;
+    background: #313244;
+    margin: 4px 0;
+  }
+  .canvas-dropdown-action {
+    padding: 6px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    color: #a6adc8;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .canvas-dropdown-action:hover { background: #313244; color: #cdd6f4; }
 </style>
 </head>
 <body>
@@ -239,6 +305,14 @@
 <div id="status-bar">
   <span class="title">claude-rts</span>
   <span class="info" id="hub-count">connecting...</span>
+  <div id="canvas-switcher">
+    <button id="canvas-switcher-btn">
+      <span class="canvas-icon">&#9638;</span>
+      <span id="canvas-switcher-label">main</span>
+      <span class="arrow">&#9660;</span>
+    </button>
+    <div id="canvas-dropdown"></div>
+  </div>
   <span class="info" id="zoom-level"></span>
   <div style="flex:1"></div>
   <button class="btn" id="btn-fit">Fit all</button>
@@ -1161,6 +1235,18 @@ document.addEventListener('keydown', (e) => {
     fitAll();
     return;
   }
+  // Ctrl+Tab: cycle canvases
+  if (e.ctrlKey && e.key === 'Tab') {
+    e.preventDefault();
+    if (canvasList.length > 1) {
+      const idx = canvasList.indexOf(currentCanvasName);
+      const next = e.shiftKey
+        ? (idx - 1 + canvasList.length) % canvasList.length
+        : (idx + 1) % canvasList.length;
+      switchCanvas(canvasList[next]);
+    }
+    return;
+  }
   // Escape: deselect focused card
   if (e.key === 'Escape') {
     focusedCardId = null;
@@ -1173,6 +1259,7 @@ document.addEventListener('keydown', (e) => {
 // Layout persistence (server-side canvases)
 // ════════════════════════════════════════════
 let currentCanvasName = 'main';
+let canvasList = [];  // list of available canvas names
 
 function saveLayout() {
   const data = {
@@ -1199,12 +1286,196 @@ async function loadLayout() {
 }
 
 // ════════════════════════════════════════════
+// Canvas switcher
+// ════════════════════════════════════════════
+const canvasSwitcherBtn = document.getElementById('canvas-switcher-btn');
+const canvasDropdown = document.getElementById('canvas-dropdown');
+const canvasSwitcherLabel = document.getElementById('canvas-switcher-label');
+
+function updateCanvasSwitcherLabel() {
+  canvasSwitcherLabel.textContent = currentCanvasName;
+}
+
+async function refreshCanvasList() {
+  try {
+    const resp = await fetch('/api/canvases');
+    if (resp.ok) canvasList = await resp.json();
+  } catch (err) {
+    console.warn('Failed to fetch canvas list:', err);
+  }
+  // Ensure current canvas is in the list
+  if (!canvasList.includes(currentCanvasName)) {
+    canvasList.push(currentCanvasName);
+    canvasList.sort();
+  }
+}
+
+function renderCanvasDropdown() {
+  let html = '';
+  for (const name of canvasList) {
+    const active = name === currentCanvasName ? ' active' : '';
+    const deleteBtn = name === 'main' ? '' :
+      `<button class="delete-canvas-btn" data-delete-canvas="${name}" title="Delete canvas">&times;</button>`;
+    html += `<div class="canvas-dropdown-item${active}" data-switch-canvas="${name}">
+      <span class="canvas-label">${name}</span>${deleteBtn}
+    </div>`;
+  }
+  html += '<div class="canvas-dropdown-sep"></div>';
+  html += '<div class="canvas-dropdown-action" id="canvas-new-action">+ New canvas</div>';
+  html += '<div class="canvas-dropdown-action" id="canvas-rename-action">Rename current</div>';
+  canvasDropdown.innerHTML = html;
+
+  // Switch handlers
+  canvasDropdown.querySelectorAll('[data-switch-canvas]').forEach(item => {
+    item.addEventListener('click', (e) => {
+      if (e.target.closest('.delete-canvas-btn')) return;
+      const name = item.dataset.switchCanvas;
+      if (name !== currentCanvasName) switchCanvas(name);
+      hideCanvasDropdown();
+    });
+  });
+
+  // Delete handlers
+  canvasDropdown.querySelectorAll('.delete-canvas-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const name = btn.dataset.deleteCanvas;
+      if (!confirm(`Delete canvas "${name}"?`)) return;
+      try {
+        const resp = await fetch(`/api/canvases/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        if (resp.ok) {
+          await refreshCanvasList();
+          if (currentCanvasName === name) {
+            await switchCanvas('main');
+          }
+          renderCanvasDropdown();
+        }
+      } catch (err) {
+        console.warn('Failed to delete canvas:', err);
+      }
+    });
+  });
+
+  // New canvas
+  const newAction = canvasDropdown.querySelector('#canvas-new-action');
+  if (newAction) {
+    newAction.addEventListener('click', async () => {
+      hideCanvasDropdown();
+      const name = prompt('New canvas name (letters, numbers, hyphens, underscores):');
+      if (!name || !/^[a-zA-Z0-9_-]+$/.test(name)) {
+        if (name !== null) alert('Invalid canvas name. Use only letters, numbers, hyphens, underscores.');
+        return;
+      }
+      // Save current canvas first, then switch to the new empty canvas
+      saveLayout();
+      // Create an empty canvas on the server
+      await fetch(`/api/canvases/${encodeURIComponent(name)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, canvas_size: [CANVAS_W, CANVAS_H], cards: [] }),
+      });
+      await switchCanvas(name);
+    });
+  }
+
+  // Rename canvas
+  const renameAction = canvasDropdown.querySelector('#canvas-rename-action');
+  if (renameAction) {
+    renameAction.addEventListener('click', async () => {
+      hideCanvasDropdown();
+      const newName = prompt('Rename canvas to:', currentCanvasName);
+      if (!newName || newName === currentCanvasName || !/^[a-zA-Z0-9_-]+$/.test(newName)) {
+        if (newName !== null && newName !== currentCanvasName) alert('Invalid canvas name.');
+        return;
+      }
+      // Save current layout under the new name, delete the old one
+      const oldName = currentCanvasName;
+      const layoutData = {
+        name: newName,
+        canvas_size: [CANVAS_W, CANVAS_H],
+        cards: cards.map(c => c.serialize()),
+      };
+      await fetch(`/api/canvases/${encodeURIComponent(newName)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(layoutData),
+      });
+      if (oldName !== 'main') {
+        await fetch(`/api/canvases/${encodeURIComponent(oldName)}`, { method: 'DELETE' });
+      }
+      currentCanvasName = newName;
+      updateCanvasSwitcherLabel();
+      await refreshCanvasList();
+    });
+  }
+}
+
+function showCanvasDropdown() {
+  renderCanvasDropdown();
+  canvasDropdown.classList.add('visible');
+}
+
+function hideCanvasDropdown() {
+  canvasDropdown.classList.remove('visible');
+}
+
+canvasSwitcherBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (canvasDropdown.classList.contains('visible')) {
+    hideCanvasDropdown();
+  } else {
+    showCanvasDropdown();
+  }
+});
+
+document.addEventListener('click', () => hideCanvasDropdown());
+canvasDropdown.addEventListener('click', (e) => e.stopPropagation());
+
+async function switchCanvas(name) {
+  // 1. Save current layout
+  saveLayout();
+
+  // 2. Destroy all current cards
+  while (cards.length > 0) {
+    const card = cards.pop();
+    card.destroy();
+  }
+  focusedCardId = null;
+
+  // 3. Update current canvas name
+  currentCanvasName = name;
+  updateCanvasSwitcherLabel();
+  await refreshCanvasList();
+
+  // 4. Load the new canvas layout
+  const saved = await loadLayout();
+  if (saved && saved.length > 0) {
+    for (const s of saved) {
+      const hub = hubs.find(h => h.hub === s.hub);
+      if (hub) spawnCard(hub, s.x, s.y, s.w, s.h);
+    }
+  }
+
+  // 5. Fit view
+  if (cards.length > 0) {
+    setTimeout(fitAll, 200);
+  }
+
+  drawMinimap();
+  updateHubCount();
+}
+
+// ════════════════════════════════════════════
 // Boot
 // ════════════════════════════════════════════
 (async function() {
   // Load settings first (determines default_canvas)
   await loadSettings();
   currentCanvasName = settings.default_canvas || 'main';
+  updateCanvasSwitcherLabel();
+
+  // Load canvas list
+  await refreshCanvasList();
 
   const resp = await fetch('/api/hubs');
   hubs = await resp.json();
