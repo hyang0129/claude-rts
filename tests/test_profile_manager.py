@@ -135,7 +135,7 @@ def test_credential_state_to_dict_keys():
     expected_keys = {
         "name", "usage_5hr_pct", "usage_daily_pct", "five_hour_resets",
         "seven_day_resets", "burn_rate", "burn_class", "health",
-        "account_id", "last_probe_time", "last_health_check", "error",
+        "account_id", "last_probe_time", "last_probe_wall", "last_health_check", "error",
     }
     assert expected_keys == set(d.keys())
     assert d["name"] == "acct-alice"
@@ -352,8 +352,8 @@ async def test_probe_one_happy_path():
     mgr = _make_manager()
 
     mock_usage = {
-        "usage_5hr_pct": 50.0,
-        "usage_daily_pct": 30.0,
+        "five_hour_pct": 50.0,
+        "seven_day_pct": 30.0,
         "five_hour_resets": "2h 30m",
         "seven_day_resets": "Apr 7, 3pm (UTC)",
     }

@@ -33,6 +33,7 @@ class CredentialState:
     health: str = "unknown"                     # "healthy", "stale", "unknown"
     account_id: Optional[str] = None
     last_probe_time: Optional[float] = None    # time.monotonic()
+    last_probe_wall: Optional[float] = None    # time.time() — wall clock for display
     last_health_check: Optional[float] = None
     error: Optional[str] = None
 
@@ -48,6 +49,7 @@ class CredentialState:
             "health": self.health,
             "account_id": self.account_id,
             "last_probe_time": self.last_probe_time,
+            "last_probe_wall": self.last_probe_wall,
             "last_health_check": self.last_health_check,
             "error": self.error,
         }
@@ -187,6 +189,39 @@ class CredentialManager:
         """Return True once the first probe cycle has completed."""
         return self._first_probe_done
 
+    def ingest_probe_result(self, name: str, data: dict) -> CredentialState:
+        """Store probe data submitted by the frontend PTY probe and update cache.
+
+        Accepts the raw JSON dict from claude-usage (keys: five_hour_pct, seven_day_pct, etc.)
+        and returns the updated CredentialState.
+        """
+        existing = self._cache.get(name, CredentialState(name=name))
+        usage_5hr = data.get("five_hour_pct")
+        five_hr_resets = data.get("five_hour_resets")
+        burn_rate = None
+        burn_class = "unknown"
+        if usage_5hr is not None and five_hr_resets:
+            burn_rate = compute_burn_rate(float(usage_5hr), five_hr_resets)
+            if burn_rate is not None:
+                burn_class = classify_burn(burn_rate)
+        state = CredentialState(
+            name=name,
+            usage_5hr_pct=usage_5hr,
+            usage_daily_pct=data.get("seven_day_pct"),
+            five_hour_resets=five_hr_resets,
+            seven_day_resets=data.get("seven_day_resets"),
+            burn_rate=burn_rate,
+            burn_class=burn_class,
+            health=existing.health,
+            account_id=existing.account_id,
+            last_probe_time=time.monotonic(),
+            last_probe_wall=time.time(),
+            last_health_check=existing.last_health_check,
+            error=None,
+        )
+        self._cache[name] = state
+        return state
+
     async def force_probe(self, name: str) -> CredentialState:
         """Immediately probe a single profile and update the cache."""
         state = await self._probe_one(name)
@@ -232,17 +267,14 @@ class CredentialManager:
             # probe_usage expects the container path, e.g. /profiles/<name>
             result = await probe_usage(f"/profiles/{name}")
             if result is None:
-                return CredentialState(
-                    name=name,
-                    health=existing.health,
-                    account_id=existing.account_id,
-                    last_probe_time=time.monotonic(),
-                    last_health_check=existing.last_health_check,
-                    error="probe returned no data",
-                )
+                # Probe failed — preserve last successful data if available
+                existing.last_probe_time = time.monotonic()
+                existing.error = "probe returned no data"
+                return existing
 
-            usage_5hr = result.get("usage_5hr_pct")
-            five_hr_resets = result.get("five_hour_resets") or result.get("fiveHourResets")
+            # Field names from probe_usage() response (see /api/widgets/claude-usage)
+            usage_5hr = result.get("five_hour_pct")
+            five_hr_resets = result.get("five_hour_resets")
 
             burn_rate = None
             burn_class = "unknown"
@@ -261,9 +293,9 @@ class CredentialManager:
             return CredentialState(
                 name=name,
                 usage_5hr_pct=usage_5hr,
-                usage_daily_pct=result.get("usage_daily_pct"),
+                usage_daily_pct=result.get("seven_day_pct"),
                 five_hour_resets=five_hr_resets,
-                seven_day_resets=result.get("seven_day_resets") or result.get("sevenDayResets"),
+                seven_day_resets=result.get("seven_day_resets"),
                 burn_rate=burn_rate,
                 burn_class=burn_class,
                 health=existing.health,   # preserved from health_check loop
@@ -273,14 +305,10 @@ class CredentialManager:
             )
         except Exception as exc:
             logger.warning("Failed to probe credential '{}': {}", name, exc)
-            return CredentialState(
-                name=name,
-                health=existing.health,
-                account_id=existing.account_id,
-                last_probe_time=time.monotonic(),
-                last_health_check=existing.last_health_check,
-                error=str(exc),
-            )
+            # Preserve last successful data if available
+            existing.last_probe_time = time.monotonic()
+            existing.error = str(exc)
+            return existing
 
     async def _probe_loop(self) -> None:
         """Background loop: probe all profiles every probe_interval seconds."""

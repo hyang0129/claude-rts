@@ -444,7 +444,12 @@ async def credentials_list_handler(request: web.Request) -> web.Response:
     """GET /api/credentials — return all cached credential states."""
     cred_mgr: CredentialManager = request.app["credential_manager"]
     states = cred_mgr.get_all()
-    return web.json_response({"credentials": [s.to_dict() for s in states]})
+    config = read_config()
+    util_name = config.get("util_container", {}).get("name", "supreme-claudemander-util")
+    return web.json_response({
+        "credentials": [s.to_dict() for s in states],
+        "util_container_name": util_name,
+    })
 
 
 async def credentials_best_handler(request: web.Request) -> web.Response:
@@ -548,6 +553,21 @@ async def credentials_check_handler(request: web.Request) -> web.Response:
     return web.json_response(state.to_dict())
 
 
+async def credentials_probe_result_handler(request: web.Request) -> web.Response:
+    """POST /api/credentials/{name}/probe-result — ingest probe data from the frontend PTY probe."""
+    name = request.match_info["name"]
+    if not _VALID_PROFILE_NAME.match(name):
+        return web.json_response({"error": "Invalid profile name"}, status=400)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+    cred_mgr: CredentialManager = request.app["credential_manager"]
+    state = cred_mgr.ingest_probe_result(name, data)
+    logger.info("Ingested probe result for '{}': usage_5hr={}", name, state.usage_5hr_pct)
+    return web.json_response(state.to_dict())
+
+
 # ── Test puppeting API (test_mode only) ──────────────────────────────────────
 
 
@@ -647,6 +667,7 @@ def create_app(test_mode: bool = False) -> web.Application:
     app.router.add_delete("/api/credentials/{name}", credentials_delete_handler)
     app.router.add_post("/api/credentials/{name}/probe", credentials_probe_handler)
     app.router.add_post("/api/credentials/{name}/check", credentials_check_handler)
+    app.router.add_post("/api/credentials/{name}/probe-result", credentials_probe_result_handler)
 
     # Session routes (must be before /ws/{hub} catch-all)
     app.router.add_get("/api/sessions", sessions_list_handler)

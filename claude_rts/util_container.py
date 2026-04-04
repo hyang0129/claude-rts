@@ -191,7 +191,8 @@ async def exec_in_util_pty(cmd: str, timeout: float = 60) -> tuple[int, str]:
                         output.append(data)
                         # Early exit: if we see a complete JSON object, we're done
                         combined = "".join(output)
-                        if '{\n' in combined and combined.rstrip().endswith('}'):
+                        stripped = combined.replace('\r', '').strip()
+                        if '{\n' in stripped and stripped.endswith('}'):
                             logger.debug("exec_in_util_pty: detected complete JSON, exiting early")
                             break
                 except EOFError:
@@ -361,36 +362,32 @@ async def write_account_id_file(name: str, account_id: str) -> bool:
 async def probe_usage(claude_dir: str, timeout: float = 60) -> dict | None:
     """Run claude-usage inside the utility container for a specific config dir.
 
-    Uses `script -qc` to provide a PTY (required by claude-usage-plz/pexpect).
+    Uses exec_in_util_pty to provide a real ConPTY — required because
+    claude-usage-plz/pexpect needs a TTY to function.  The probe is flaky
+    (ConPTY escape codes can confuse pexpect), so callers should cache
+    successful results and tolerate None returns.
+
     Returns parsed JSON dict or None on failure.
     """
-    cfg = _get_config()
-
     if not await is_util_running():
         return None
 
-    # Write a temp probe script to disk, docker cp it in, then execute.
-    # This avoids Windows -> docker -> bash quoting nightmares.
-    inner_timeout = max(timeout - 5, 10)
-    import tempfile
-    script_content = f"#!/bin/bash\nscript -qc 'timeout {inner_timeout} claude-usage --claude-dir {claude_dir} --json' /dev/null 2>/dev/null\n"
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False, newline='\n') as f:
-        f.write(script_content)
-        tmp_path = f.name
-    try:
-        await _run(f'docker.exe cp "{tmp_path}" {cfg["name"]}:/tmp/_probe.sh', timeout=5)
-        cmd = f'docker.exe exec {cfg["name"]} bash /tmp/_probe.sh'
-    finally:
-        import os
-        os.unlink(tmp_path)
+    cmd = f"claude-usage --claude-dir {claude_dir} --json"
     logger.debug("probe_usage: {}", cmd)
-    rc, stdout, stderr = await _run(cmd, timeout=timeout)
-
-    if rc != 0:
-        logger.warning("claude-usage probe failed for {} (rc={}): {}", claude_dir, rc, stderr[:200] if stderr else "")
+    try:
+        rc, stdout = await exec_in_util_pty(cmd, timeout=timeout)
+    except RuntimeError:
+        return None
+    except Exception as exc:
+        logger.warning("probe_usage PTY error for {}: {}", claude_dir, exc)
         return None
 
-    clean = stdout.replace('\r', '').strip()
+    clean = stdout.replace('\r', '').replace('\x00', '').strip()
+    # Remove ANSI escape sequences and terminal control codes
+    import re
+    clean = re.sub(r'\x1b\[[^a-zA-Z]*[a-zA-Z]', '', clean)
+    clean = re.sub(r'\x1b[^[[]', '', clean)
+
     json_start = clean.find('{')
     json_end = clean.rfind('}')
     if json_start < 0 or json_end <= json_start:

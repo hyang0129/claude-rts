@@ -492,6 +492,15 @@
   }
   .cred-add-btn:hover { background: #45475a; }
   .cred-footer-msg { color: #a6adc8; font-size: 11px; margin-top: 6px; text-align: center; }
+  .cred-probe-btn {
+    background: #313244; border: 1px solid #45475a; color: #89dceb;
+    padding: 2px 7px; border-radius: 4px; cursor: pointer; font-size: 10px;
+    flex-shrink: 0; line-height: 1.4;
+  }
+  .cred-probe-btn:hover { background: #45475a; }
+  .cred-probe-btn:disabled { opacity: 0.5; cursor: default; }
+  .cred-probe-btn.probing { color: #f9e2af; }
+  .cred-stale-age { font-size: 10px; color: #585b70; flex-shrink: 0; }
 
   /* ── Control group badge ── */
   .control-group-badge {
@@ -1516,6 +1525,75 @@ const WIDGET_REGISTRY = {
   'credential-manager': {
     label: 'Credential Manager',
     defaultRefreshInterval: 60000,
+
+    async probeViaWs(name, containerName) {
+      // Opens a real ConPTY via /ws/exec, runs claude-usage inside the util container,
+      // strips ANSI codes, extracts JSON, and POSTs it to probe-result.
+      return new Promise((resolve, reject) => {
+        const cmd = `docker.exe exec -it ${containerName} bash -c "claude-usage --claude-dir /profiles/${name}/.claude --json"`;
+        const wsUrl = `ws://${location.host}/ws/exec?cmd=${encodeURIComponent(cmd)}`;
+        const ws = new WebSocket(wsUrl);
+        ws.binaryType = 'arraybuffer';
+
+        let buffer = '';
+        let resolved = false;
+
+        const timeout = setTimeout(() => {
+          if (!resolved) { resolved = true; try { ws.close(); } catch(e) {} reject(new Error('probe timeout (90s)')); }
+        }, 90000);
+
+        function cleanup() {
+          resolved = true;
+          clearTimeout(timeout);
+          try { ws.close(); } catch(e) {}
+        }
+
+        function tryParseJson() {
+          // Strip ANSI escape codes and carriage returns
+          const clean = buffer
+            .replace(/\r/g, '')
+            .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+            .replace(/\x1b[^[[\x1b]/g, '');
+          const jsonStart = clean.indexOf('{');
+          const jsonEnd = clean.lastIndexOf('}');
+          if (jsonStart >= 0 && jsonEnd > jsonStart) {
+            try {
+              return JSON.parse(clean.slice(jsonStart, jsonEnd + 1));
+            } catch(e) {}
+          }
+          return null;
+        }
+
+        ws.onopen = () => {
+          ws.send(JSON.stringify({ type: 'resize', cols: 200, rows: 50 }));
+        };
+
+        ws.onmessage = (evt) => {
+          const data = evt.data instanceof ArrayBuffer
+            ? new TextDecoder().decode(evt.data)
+            : evt.data;
+          buffer += data;
+          const result = tryParseJson();
+          if (result && !resolved) {
+            cleanup();
+            resolve(result);
+          }
+        };
+
+        ws.onclose = () => {
+          if (!resolved) {
+            const result = tryParseJson();
+            if (result) { cleanup(); resolve(result); }
+            else { cleanup(); reject(new Error('ws closed without valid JSON')); }
+          }
+        };
+
+        ws.onerror = () => {
+          if (!resolved) { cleanup(); reject(new Error('WebSocket error')); }
+        };
+      });
+    },
+
     async render(body, card) {
       const ts = () => new Date().toLocaleTimeString();
 
@@ -1562,15 +1640,25 @@ const WIDGET_REGISTRY = {
         return { icon: icons[cls] || '✅', cls };
       }
 
+      function formatAgo(wallEpoch) {
+        if (wallEpoch == null) return null;
+        const secs = Math.floor(Date.now() / 1000 - wallEpoch);
+        if (secs < 60) return `${secs}s ago`;
+        if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+        return `${Math.floor(secs / 3600)}h ago`;
+      }
+
       function buildDetailHtml(cred, status) {
         const rows = [];
-        if (cred.usage_5hr_pct != null) rows.push(['5h usage', `${cred.usage_5hr_pct}%`]);
-        if (cred.usage_daily_pct != null) rows.push(['Daily usage', `${cred.usage_daily_pct}%`]);
+        if (cred.usage_5hr_pct != null) rows.push(['5h usage', `${cred.usage_5hr_pct.toFixed(1)}%`]);
+        if (cred.usage_daily_pct != null) rows.push(['Daily usage', `${cred.usage_daily_pct.toFixed(1)}%`]);
         if (cred.five_hour_resets != null) rows.push(['5h reset', cred.five_hour_resets]);
         if (cred.seven_day_resets != null) rows.push(['7d reset', cred.seven_day_resets]);
+        if (cred.burn_rate != null) rows.push(['Burn rate', `${cred.burn_rate.toFixed(1)}/hr`]);
         if (cred.account_id) rows.push(['Account ID', cred.account_id]);
         if (cred.health) rows.push(['Health', cred.health]);
-        if (cred.last_check) rows.push(['Last check', cred.last_check]);
+        const ago = formatAgo(cred.last_probe_wall);
+        if (ago) rows.push(['Data age', ago]);
 
         let html = rows.map(([l, v]) =>
           `<div class="cred-detail-row"><span class="cred-detail-label">${l}</span><span class="cred-detail-value">${v}</span></div>`
@@ -1590,6 +1678,7 @@ const WIDGET_REGISTRY = {
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         const credentials = data.credentials || [];
+        const utilContainerName = data.util_container_name || 'supreme-claudemander-util';
 
         if (credentials.length === 0) {
           body.innerHTML = `<div class="usage-status">No credentials configured.</div>`;
@@ -1613,10 +1702,11 @@ const WIDGET_REGISTRY = {
           for (const cred of enriched) {
             const { icon, cls: statusCls } = cred._burnStatus;
             const pct = cred.usage_5hr_pct != null ? cred.usage_5hr_pct : (cred.usage_daily_pct != null ? cred.usage_daily_pct : 0);
-            const burnRateStr = cred.burn_rate != null ? `${cred.burn_rate}/hr` : '—';
+            const burnRateStr = cred.burn_rate != null ? `${cred.burn_rate.toFixed(1)}/hr` : '—';
             const resetStr = cred.five_hour_resets != null
               ? `5hr reset: ${cred.five_hour_resets}`
               : (cred.seven_day_resets != null ? `7d reset: ${cred.seven_day_resets}` : '');
+            const ago = formatAgo(cred.last_probe_wall);
 
             html += `<div class="${credRowClass(statusCls)}" data-cred-toggle="${cred.name}">`;
             html += `<span class="cred-icon">${icon}</span>`;
@@ -1625,6 +1715,8 @@ const WIDGET_REGISTRY = {
             html += renderBurnBar(pct, statusCls);
             html += `<div class="cred-stats"><span>${burnRateStr}</span><span>${resetStr}</span></div>`;
             html += `</div>`;
+            if (ago) html += `<span class="cred-stale-age" title="Last probe">${ago}</span>`;
+            html += `<button class="cred-probe-btn" data-cred-probe="${cred.name}" title="Probe usage via terminal">↺</button>`;
             html += `</div>`;
             // Detail panel (hidden by default)
             html += `<div class="cred-detail" id="cred-detail-${cred.name.replace(/[^a-zA-Z0-9_-]/g,'_')}" style="display:none">`;
@@ -1666,6 +1758,31 @@ const WIDGET_REGISTRY = {
               await fetch(`/api/credentials/${encodeURIComponent(name)}/check`, { method: 'POST' });
             } catch (_) {}
             await WIDGET_REGISTRY['credential-manager'].render(body, card);
+          });
+        });
+
+        // Wire up probe buttons
+        body.querySelectorAll('[data-cred-probe]').forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const name = btn.getAttribute('data-cred-probe');
+            btn.disabled = true;
+            btn.textContent = '…';
+            btn.classList.add('probing');
+            try {
+              const probeData = await WIDGET_REGISTRY['credential-manager'].probeViaWs(name, utilContainerName);
+              await fetch(`/api/credentials/${encodeURIComponent(name)}/probe-result`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(probeData),
+              });
+              await WIDGET_REGISTRY['credential-manager'].render(body, card);
+            } catch (err) {
+              btn.disabled = false;
+              btn.textContent = '↺';
+              btn.classList.remove('probing');
+              btn.title = `Probe failed: ${err.message}`;
+            }
           });
         });
 
