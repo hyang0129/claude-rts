@@ -1,11 +1,12 @@
 """Tests for the utility container module and claude-usage widget API."""
 
 import json
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 
 import pytest
 
 from claude_rts.server import create_app
+from claude_rts.util_container import parse_json_from_output
 
 
 @pytest.fixture
@@ -54,7 +55,7 @@ async def test_claude_usage_with_profiles(client):
     }
     with patch("claude_rts.server.is_util_running", new_callable=AsyncMock, return_value=True), \
          patch("claude_rts.server.list_profiles", new_callable=AsyncMock, return_value=["acct-alice"]), \
-         patch("claude_rts.server.probe_usage", new_callable=AsyncMock, return_value=mock_usage):
+         patch("claude_rts.server.probe_usage_via_session", new_callable=AsyncMock, return_value=mock_usage):
         resp = await client.get("/api/widgets/claude-usage")
     assert resp.status == 200
     data = await resp.json()
@@ -65,14 +66,39 @@ async def test_claude_usage_with_profiles(client):
 
 
 async def test_claude_usage_probe_failure(client):
-    """When a probe fails, return error for that profile."""
+    """When a probe fails with no stale data, return error for that profile."""
     with patch("claude_rts.server.is_util_running", new_callable=AsyncMock, return_value=True), \
          patch("claude_rts.server.list_profiles", new_callable=AsyncMock, return_value=["acct-bob"]), \
-         patch("claude_rts.server.probe_usage", new_callable=AsyncMock, return_value=None):
+         patch("claude_rts.server.probe_usage_via_session", new_callable=AsyncMock, return_value=None):
         resp = await client.get("/api/widgets/claude-usage")
     assert resp.status == 200
     data = await resp.json()
     assert data["profiles"][0]["error"] == "probe failed"
+
+
+# ── parse_json_from_output unit tests ──
+
+
+def test_parse_json_clean():
+    assert parse_json_from_output('{"five_hour_pct": 42.0}') == {"five_hour_pct": 42.0}
+
+
+def test_parse_json_with_ansi():
+    raw = '\x1b[32m{"five_hour_pct": 10.0}\x1b[0m'
+    assert parse_json_from_output(raw) == {"five_hour_pct": 10.0}
+
+
+def test_parse_json_with_surrounding_text():
+    raw = "some preamble\r\n{\"key\": \"val\"}\r\nextra output"
+    assert parse_json_from_output(raw) == {"key": "val"}
+
+
+def test_parse_json_no_json():
+    assert parse_json_from_output("WARNING: No usage data parsed") is None
+
+
+def test_parse_json_malformed():
+    assert parse_json_from_output("{not valid json}") is None
 
 
 async def test_claude_usage_status_endpoint(client):

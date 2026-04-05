@@ -9,6 +9,7 @@ It stays alive via `sleep infinity` and commands are executed via `docker exec`.
 import asyncio
 import json
 import pathlib
+import re
 import shutil
 import time
 
@@ -276,3 +277,66 @@ async def probe_usage(claude_dir: str, timeout: float = 60) -> dict | None:
     except json.JSONDecodeError as exc:
         logger.warning("claude-usage returned invalid JSON for {}: {}", claude_dir, exc)
         return None
+
+
+_ANSI_ESCAPE = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+
+def parse_json_from_output(output: str) -> dict | None:
+    """Extract and parse a JSON object from raw PTY/ANSI output."""
+    clean = _ANSI_ESCAPE.sub('', output).replace('\r', '').strip()
+    json_start = clean.find('{')
+    json_end = clean.rfind('}')
+    if json_start < 0 or json_end <= json_start:
+        return None
+    try:
+        return json.loads(clean[json_start:json_end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+async def probe_usage_via_session(
+    name: str,
+    session_mgr,
+    container_name: str | None = None,
+    timeout: float = 90,
+) -> dict | None:
+    """Run claude-usage inside the utility container via a real ConPTY session.
+
+    Uses SessionManager.create_session() without a container= argument so that
+    tmux-wrapping is NOT triggered — the full docker exec command is passed
+    directly, giving pexpect the genuine Windows ConPTY it requires.
+
+    Each probe takes 30-60s; the background probe loop staggers calls.
+    """
+    if container_name is None:
+        cfg = _get_config()
+        container_name = cfg["name"]
+
+    cmd = f'docker.exe exec -it {container_name} claude-usage --claude-dir /profiles/{name} --json'
+    logger.info("probe_usage_via_session: name={} container={}", name, container_name)
+
+    try:
+        session = session_mgr.create_session(cmd)
+    except Exception as exc:
+        logger.error("probe_usage_via_session: failed to create session for {}: {}", name, exc)
+        return None
+
+    try:
+        deadline = time.monotonic() + timeout
+        while session.alive and time.monotonic() < deadline:
+            await asyncio.sleep(1)
+
+        if time.monotonic() >= deadline:
+            logger.warning("probe_usage_via_session: timed out after {}s for name={}", timeout, name)
+
+        output = session.scrollback.get_all().decode("utf-8", errors="replace")
+        result = parse_json_from_output(output)
+        if result is None:
+            logger.warning(
+                "probe_usage_via_session: no JSON found for name={}; raw={!r}",
+                name, output[:200],
+            )
+        return result
+    finally:
+        session_mgr.destroy_session(session.session_id)
