@@ -418,6 +418,88 @@
   .usage-refresh-btn:hover { background: #45475a; color: #cdd6f4; }
   .usage-status { color: #585b70; font-size: 11px; text-align: center; padding: 8px 0; }
 
+  /* ── Credential manager widget ── */
+  .cred-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid #313244;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s;
+    border-radius: 4px;
+  }
+  .cred-row:last-of-type { border-bottom: none; }
+  .cred-row:hover { background: rgba(69,71,90,0.4); }
+  .cred-row.overburning .cred-name { color: #f38ba8; }
+  .cred-row.stale { opacity: 0.6; }
+  .cred-row.stale .cred-name { color: #585b70; }
+  .cred-icon { font-size: 14px; flex-shrink: 0; width: 18px; text-align: center; }
+  .cred-name { font-weight: 600; font-size: 12px; color: #cdd6f4; flex-shrink: 0; min-width: 80px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cred-bar-wrap { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .cred-burn-bar { width: 100%; height: 6px; background: #313244; border-radius: 3px; overflow: hidden; }
+  .cred-burn-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s ease; }
+  .cred-stats { display: flex; justify-content: space-between; font-size: 10px; color: #a6adc8; font-family: monospace; }
+  .cred-detail {
+    background: #181825;
+    border: 1px solid #313244;
+    border-radius: 6px;
+    padding: 10px;
+    margin: 2px 0 6px 26px;
+    font-size: 11px;
+  }
+  .cred-detail-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 0;
+    border-bottom: 1px solid #1e1e2e;
+  }
+  .cred-detail-row:last-child { border-bottom: none; }
+  .cred-detail-label { color: #a6adc8; }
+  .cred-detail-value { color: #cdd6f4; font-family: monospace; }
+  .cred-reauth-btn {
+    background: #313244; border: 1px solid #45475a; color: #f9e2af;
+    padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;
+    margin-top: 6px;
+  }
+  .cred-reauth-btn:hover { background: #45475a; }
+  .cred-add-form {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #313244;
+    align-items: center;
+  }
+  .cred-add-form input {
+    flex: 1;
+    background: #181825;
+    border: 1px solid #45475a;
+    color: #cdd6f4;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: monospace;
+    outline: none;
+  }
+  .cred-add-form input:focus { border-color: #cba6f7; }
+  .cred-add-form input::placeholder { color: #585b70; }
+  .cred-add-btn {
+    background: #313244; border: 1px solid #45475a; color: #a6e3a1;
+    padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;
+    flex-shrink: 0;
+  }
+  .cred-add-btn:hover { background: #45475a; }
+  .cred-footer-msg { color: #a6adc8; font-size: 11px; margin-top: 6px; text-align: center; }
+  .cred-stale-age { font-size: 10px; color: #a6adc8; flex-shrink: 0; }
+  .cred-stale-age.warn { color: #f9e2af; }
+  .cred-stale-banner {
+    background: rgba(243,139,168,0.15); border: 1px solid #f38ba8;
+    border-radius: 6px; padding: 8px 10px; margin: 4px 0;
+    font-size: 11px; color: #f38ba8; display: flex; align-items: center; gap: 6px;
+  }
+
   /* ── Control group badge ── */
   .control-group-badge {
     font-size: 10px;
@@ -1431,6 +1513,179 @@ const WIDGET_REGISTRY = {
         html += `<button class="usage-refresh-btn" onclick="this.closest('[data-card-id]')||void 0;fetch('/api/widgets/claude-usage?force=1').then(()=>{const c=cards.find(c=>c.widgetType==='claude-usage');if(c)c.render();})">Refresh now</button>`;
         body.innerHTML = html;
         card.updateState('working');
+      } catch (err) {
+        body.innerHTML = `<div class="widget-row"><span class="widget-label" style="color:#f38ba8">Error: ${err.message}</span></div><div class="usage-status">${ts()}</div>`;
+        card.updateState('dead');
+      }
+    },
+  },
+
+  'credential-manager': {
+    label: 'Credential Manager',
+    defaultRefreshInterval: 60000,
+
+    async render(body, card) {
+      const ts = () => new Date().toLocaleTimeString();
+
+      function burnColor(cls) {
+        if (cls === 'overburning') return '#f38ba8';
+        if (cls === 'stale') return '#585b70';
+        if (cls === 'underburning') return '#a6e3a1';
+        return '#a6e3a1';
+      }
+
+      function getBurnStatus(cred) {
+        if (cred.health === 'stale') return { icon: '⚠️', cls: 'stale' };
+        if (cred.health === 'unknown') return { icon: '❓', cls: '' };
+        const cls = cred.burn_class || 'normal';
+        const icons = { overburning: '🔥', normal: '⚡', underburning: '✅' };
+        return { icon: icons[cls] || '✅', cls };
+      }
+
+      function renderBurnBar(pct, statusCls) {
+        const color = burnColor(statusCls);
+        const width = pct != null ? Math.min(100, Math.max(0, pct)) : 0;
+        return `<div class="cred-burn-bar"><div class="cred-burn-bar-fill" style="width:${width}%;background:${color}"></div></div>`;
+      }
+
+      function formatAgo(wallEpoch) {
+        if (wallEpoch == null) return null;
+        const secs = Math.floor(Date.now() / 1000 - wallEpoch);
+        if (secs < 60) return `${secs}s ago`;
+        if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+        return `${Math.floor(secs / 3600)}h ago`;
+      }
+
+      function buildDetailHtml(cred, statusCls) {
+        const rows = [];
+        if (cred.usage_5hr_pct != null) rows.push(['5h usage', `${cred.usage_5hr_pct.toFixed(1)}%`]);
+        if (cred.usage_daily_pct != null) rows.push(['Daily usage', `${cred.usage_daily_pct.toFixed(1)}%`]);
+        if (cred.five_hour_resets != null) rows.push(['5h reset', cred.five_hour_resets]);
+        if (cred.seven_day_resets != null) rows.push(['7d reset', cred.seven_day_resets]);
+        if (cred.burn_rate != null) rows.push(['Burn rate', `${cred.burn_rate.toFixed(1)}/hr`]);
+        if (cred.account_id) rows.push(['Account ID', cred.account_id]);
+        if (cred.health) rows.push(['Health', cred.health]);
+        const ago = formatAgo(cred.data_timestamp);
+        if (ago) rows.push(['Data age', ago]);
+        let html = rows.map(([l, v]) =>
+          `<div class="cred-detail-row"><span class="cred-detail-label">${l}</span><span class="cred-detail-value">${v}</span></div>`
+        ).join('');
+        if (statusCls === 'stale') {
+          html += `<button class="cred-reauth-btn" data-cred-reauth="${cred.name}">Re-authenticate</button>`;
+        }
+        return html;
+      }
+
+      body.innerHTML = `<div class="usage-status">Loading credentials… (${ts()})</div>`;
+      card.updateState('connecting');
+
+      try {
+        const resp = await fetch('/api/credentials');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        const credentials = data.credentials || [];
+        const maxDataAge = data.max_data_age || 300;
+
+        if (credentials.length === 0) {
+          body.innerHTML = `<div class="usage-status">No credentials configured.</div>`;
+          card.updateState('idle');
+        } else {
+          const enriched = credentials.map(cred => ({ ...cred, _burnStatus: getBurnStatus(cred) }));
+          const statusOrder = { overburning: 0, normal: 1, underburning: 2, stale: 3, '': 4 };
+          enriched.sort((a, b) => {
+            const so = (statusOrder[a._burnStatus.cls] ?? 4) - (statusOrder[b._burnStatus.cls] ?? 4);
+            if (so !== 0) return so;
+            return (b.burn_rate ?? -1) - (a.burn_rate ?? -1);
+          });
+
+          const nowSec = Date.now() / 1000;
+          let html = `<div id="cred-list">`;
+          for (const cred of enriched) {
+            const { icon, cls: statusCls } = cred._burnStatus;
+            const dataAge = cred.data_timestamp != null ? nowSec - cred.data_timestamp : null;
+            const tooStale = dataAge != null && dataAge > maxDataAge;
+            const warnStale = !tooStale && dataAge != null && dataAge > 60;
+            const showValues = !tooStale && cred.data_timestamp != null;
+            const pct = showValues ? (cred.usage_5hr_pct ?? cred.usage_daily_pct ?? 0) : 0;
+            const burnRateStr = showValues && cred.burn_rate != null ? `${cred.burn_rate.toFixed(1)}/hr` : '—';
+            const resetStr = showValues && cred.five_hour_resets != null ? `5hr reset: ${cred.five_hour_resets}` : '';
+            const ago = formatAgo(cred.data_timestamp);
+            const agoClass = warnStale ? 'cred-stale-age warn' : 'cred-stale-age';
+            const rowCls = ['cred-row', statusCls].filter(Boolean).join(' ');
+            const safeId = cred.name.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+            html += `<div class="${rowCls}" data-cred-toggle="${cred.name}">`;
+            html += `<span class="cred-icon">${icon}</span>`;
+            html += `<span class="cred-name" title="${cred.name}">${cred.name}</span>`;
+            html += `<div class="cred-bar-wrap">`;
+            html += renderBurnBar(pct, statusCls);
+            html += `<div class="cred-stats"><span>${burnRateStr}</span><span>${resetStr}</span></div>`;
+            html += `</div>`;
+            if (ago) html += `<span class="${agoClass}">${ago}</span>`;
+            html += `</div>`;
+            if (tooStale) {
+              html += `<div class="cred-stale-banner">⚠ Usage data is ${Math.floor(dataAge / 60)}m old — values hidden until next probe.</div>`;
+            }
+            html += `<div class="cred-detail" id="cred-detail-${safeId}" style="display:none">`;
+            html += buildDetailHtml(cred, statusCls);
+            html += `</div>`;
+          }
+          html += `</div>`;
+          html += `<div class="usage-status">Last updated: ${ts()}</div>`;
+          html += `<div class="cred-add-form"><input type="text" class="cred-name-input" placeholder="Profile name…"><button class="cred-add-btn">Add</button></div>`;
+          html += `<div class="cred-footer-msg" style="display:none"></div>`;
+          body.innerHTML = html;
+          card.updateState('working');
+        }
+
+        body.querySelectorAll('[data-cred-toggle]').forEach(row => {
+          row.addEventListener('click', () => {
+            const safeId = row.getAttribute('data-cred-toggle').replace(/[^a-zA-Z0-9_-]/g, '_');
+            const detail = body.querySelector(`#cred-detail-${safeId}`);
+            if (detail) detail.style.display = detail.style.display === 'none' ? '' : 'none';
+          });
+        });
+
+        body.querySelectorAll('[data-cred-reauth]').forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const name = btn.getAttribute('data-cred-reauth');
+            btn.disabled = true; btn.textContent = 'Checking…';
+            try { await fetch(`/api/credentials/${encodeURIComponent(name)}/check`, { method: 'POST' }); } catch (_) {}
+            await WIDGET_REGISTRY['credential-manager'].render(body, card);
+          });
+        });
+
+        const addBtn = body.querySelector('.cred-add-btn');
+        const nameInput = body.querySelector('.cred-name-input');
+        const footerMsg = body.querySelector('.cred-footer-msg');
+        if (addBtn && nameInput) {
+          addBtn.addEventListener('click', async () => {
+            const name = nameInput.value.trim();
+            if (!name) { nameInput.focus(); return; }
+            addBtn.disabled = true; addBtn.textContent = '…';
+            try {
+              const r = await fetch('/api/credentials', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name }),
+              });
+              if (!r.ok) {
+                const e = await r.json().catch(() => ({}));
+                if (footerMsg) { footerMsg.style.display = ''; footerMsg.style.color = '#f38ba8'; footerMsg.textContent = e.error || `Error ${r.status}`; }
+                addBtn.disabled = false; addBtn.textContent = 'Add';
+                return;
+              }
+              if (footerMsg) { footerMsg.style.display = ''; footerMsg.style.color = '#a6e3a1'; footerMsg.textContent = `Profile "${name}" created.`; }
+              await WIDGET_REGISTRY['credential-manager'].render(body, card);
+            } catch (err) {
+              if (footerMsg) { footerMsg.style.display = ''; footerMsg.style.color = '#f38ba8'; footerMsg.textContent = `Error: ${err.message}`; }
+              addBtn.disabled = false; addBtn.textContent = 'Add';
+            }
+          });
+          nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') addBtn.click(); });
+        }
+
       } catch (err) {
         body.innerHTML = `<div class="widget-row"><span class="widget-label" style="color:#f38ba8">Error: ${err.message}</span></div><div class="usage-status">${ts()}</div>`;
         card.updateState('dead');

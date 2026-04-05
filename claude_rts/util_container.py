@@ -17,6 +17,15 @@ from loguru import logger
 
 from .config import read_config
 
+_VALID_PROFILE_NAME = re.compile(r'^[a-zA-Z0-9_-]+$')
+
+
+def _validate_profile_name(name: str) -> None:
+    """Raise ValueError if name contains path traversal or shell metacharacters."""
+    if not name or not _VALID_PROFILE_NAME.match(name):
+        raise ValueError(f"Invalid profile name: {name!r}. Must match [a-zA-Z0-9_-]+")
+
+
 DOCKERFILE = pathlib.Path(__file__).parent / "Dockerfile.util"
 DEFAULT_CONTAINER_NAME = "supreme-claudemander-util"
 DEFAULT_IMAGE_NAME = "supreme-claudemander-util:latest"
@@ -340,3 +349,120 @@ async def probe_usage_via_session(
         return result
     finally:
         session_mgr.destroy_session(session.session_id)
+
+
+async def health_check_profile(name: str) -> bool:
+    """Run `claude --version` with a profile's CLAUDE_CONFIG_DIR to verify token validity.
+
+    Returns True if the command exits successfully (credentials healthy), False if stale or
+    the container is not running.
+    """
+    _validate_profile_name(name)
+    try:
+        rc, _ = await exec_in_util(
+            f'bash -c "CLAUDE_CONFIG_DIR=/profiles/{name}/.claude claude --version"',
+            timeout=30,
+        )
+        return rc == 0
+    except RuntimeError:
+        logger.warning("health_check_profile({}): utility container not running", name)
+        return False
+    except Exception as exc:
+        logger.warning("health_check_profile({}) error: {}", name, exc)
+        return False
+
+
+async def create_profile_dir(name: str) -> bool:
+    """Create the profile directory structure on the host: ~/.claude-profiles/<name>/.claude/
+
+    Returns True on success, False on failure.
+    """
+    _validate_profile_name(name)
+    try:
+        profile_dir = pathlib.Path.home() / ".claude-profiles" / name / ".claude"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Created profile directory: {}", profile_dir)
+        return True
+    except Exception as exc:
+        logger.error("Failed to create profile dir for '{}': {}", name, exc)
+        return False
+
+
+async def delete_profile_dir(name: str) -> bool:
+    """Remove ~/.claude-profiles/<name>/ directory tree on the host.
+
+    Returns True if removed (or didn't exist), False on error.
+    """
+    _validate_profile_name(name)
+    try:
+        profile_root = pathlib.Path.home() / ".claude-profiles" / name
+        if profile_root.exists():
+            shutil.rmtree(profile_root)
+            logger.info("Deleted profile directory: {}", profile_root)
+        else:
+            logger.debug("delete_profile_dir({}): directory does not exist, nothing to do", name)
+        return True
+    except Exception as exc:
+        logger.error("Failed to delete profile dir for '{}': {}", name, exc)
+        return False
+
+
+async def get_account_id(name: str) -> str | None:
+    """Try to parse accountId from the profile's .credentials.json.
+
+    Looks for 'accountId', 'account_id', or 'sub' fields in the JSON.
+    Returns None if not found or the file doesn't exist.
+    """
+    _validate_profile_name(name)
+    creds_path = pathlib.Path.home() / ".claude-profiles" / name / ".claude" / ".credentials.json"
+    if not creds_path.exists():
+        return None
+    try:
+        data = json.loads(creds_path.read_text(encoding="utf-8"))
+        for field in ("accountId", "account_id", "sub"):
+            value = data.get(field)
+            if value:
+                return str(value)
+        # Also check nested structures (e.g. data inside an "oauth" or "token" key)
+        for nested_key in data.values():
+            if isinstance(nested_key, dict):
+                for field in ("accountId", "account_id", "sub"):
+                    value = nested_key.get(field)
+                    if value:
+                        return str(value)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("get_account_id({}): failed to read credentials.json: {}", name, exc)
+    return None
+
+
+async def read_account_id_file(name: str) -> str | None:
+    """Read ~/.claude-profiles/<name>/account_id.txt.
+
+    Returns the stored account ID string, or None if the file doesn't exist.
+    """
+    _validate_profile_name(name)
+    id_path = pathlib.Path.home() / ".claude-profiles" / name / "account_id.txt"
+    if not id_path.exists():
+        return None
+    try:
+        return id_path.read_text(encoding="utf-8").strip() or None
+    except OSError as exc:
+        logger.warning("read_account_id_file({}): {}", name, exc)
+        return None
+
+
+async def write_account_id_file(name: str, account_id: str) -> bool:
+    """Write ~/.claude-profiles/<name>/account_id.txt.
+
+    Returns True on success, False on error.
+    """
+    _validate_profile_name(name)
+    id_path = pathlib.Path.home() / ".claude-profiles" / name / "account_id.txt"
+    try:
+        id_path.parent.mkdir(parents=True, exist_ok=True)
+        id_path.write_text(account_id, encoding="utf-8")
+        logger.debug("Wrote account_id for profile '{}': {}", name, account_id)
+        return True
+    except OSError as exc:
+        logger.error("write_account_id_file({}): {}", name, exc)
+        return False
