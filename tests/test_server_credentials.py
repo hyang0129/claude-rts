@@ -183,6 +183,17 @@ async def test_credentials_get_not_found(aiohttp_client):
     assert resp.status == 404
 
 
+async def test_credentials_get_invalid_name(aiohttp_client):
+    """GET /api/credentials/{name} with invalid chars returns 400."""
+    mgr = _make_credential_manager([])
+    client = await _make_client(aiohttp_client, mgr)
+
+    resp = await client.get("/api/credentials/bad.name")
+    assert resp.status == 400
+    data = await resp.json()
+    assert "Invalid" in data["error"]
+
+
 # -- POST /api/credentials ----------------------------------------------------
 
 

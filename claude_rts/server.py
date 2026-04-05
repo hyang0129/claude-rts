@@ -517,6 +517,8 @@ async def credentials_best_handler(request: web.Request) -> web.Response:
 async def credentials_get_handler(request: web.Request) -> web.Response:
     """GET /api/credentials/{name} — return a single credential state."""
     name = request.match_info["name"]
+    if not _VALID_PROFILE_NAME.match(name):
+        return web.json_response({"error": "Invalid profile name"}, status=400)
     cred_mgr: CredentialManager = request.app["credential_manager"]
     state = cred_mgr.get(name)
     if state is None:
