@@ -1,6 +1,11 @@
-"""Credential Manager: probe loop, burn rate math, health checking, and CRUD for Claude profiles."""
+"""Credential Manager: burn rate math, health checking, and CRUD for Claude profiles.
 
-import asyncio
+Probing is handled by the frontend service card (credential-manager widget), which
+opens a WebSocket session to run claude-usage inside the utility container and POSTs
+the parsed JSON to POST /api/credentials/{name}/probe-result. The backend is
+intentionally stateless with respect to probing.
+"""
+
 import re
 import time
 from dataclasses import dataclass
@@ -14,8 +19,6 @@ from .util_container import (
     delete_profile_dir,
     get_account_id,
     health_check_profile,
-    list_profiles,
-    probe_usage_via_session,
     read_account_id_file,
     write_account_id_file,
 )
@@ -32,9 +35,9 @@ class CredentialState:
     burn_class: str = "unknown"                 # "overburning", "normal", "underburning"
     health: str = "unknown"                     # "healthy", "stale", "unknown"
     account_id: Optional[str] = None
-    last_probe_time: Optional[float] = None    # time.monotonic() — last backend read attempt
-    last_probe_wall: Optional[float] = None    # time.time() — wall clock of last backend read
-    data_timestamp: Optional[float] = None     # probe_time from usage.json — when data was written
+    last_probe_time: Optional[float] = None    # time.monotonic() — last probe attempt
+    last_probe_wall: Optional[float] = None    # time.time() — wall clock of last probe
+    data_timestamp: Optional[float] = None     # wall time when probe result was ingested
     last_health_check: Optional[float] = None
     error: Optional[str] = None
 
@@ -115,42 +118,15 @@ def classify_burn(burn_rate: float, reset_window_hours: float = 5.0) -> str:
 
 
 class CredentialManager:
-    """Manages cached credential state, background probe/health loops, and profile CRUD."""
+    """Manages cached credential state, health checking, and profile CRUD.
 
-    def __init__(self, session_mgr, probe_interval: int = 1800, health_check_interval: int = 900):
-        self._session_mgr = session_mgr
+    Probing is frontend-driven: the credential-manager widget opens a WebSocket
+    session to run claude-usage in the utility container and POSTs parsed JSON
+    to /api/credentials/{name}/probe-result. This class only stores the results.
+    """
+
+    def __init__(self):
         self._cache: dict[str, CredentialState] = {}
-        self._probe_interval = probe_interval
-        self._health_check_interval = health_check_interval
-        self._probe_task: Optional[asyncio.Task] = None
-        self._health_task: Optional[asyncio.Task] = None
-        self._first_probe_done = False
-
-    async def start(self) -> None:
-        """Start background probe and health check loops."""
-        self._probe_task = asyncio.create_task(self._probe_loop())
-        self._health_task = asyncio.create_task(self._health_check_loop())
-        logger.info(
-            "CredentialManager started (probe_interval={}s, health_check_interval={}s)",
-            self._probe_interval,
-            self._health_check_interval,
-        )
-
-    async def stop(self) -> None:
-        """Cancel background tasks."""
-        if self._probe_task:
-            self._probe_task.cancel()
-            try:
-                await self._probe_task
-            except asyncio.CancelledError:
-                pass
-        if self._health_task:
-            self._health_task.cancel()
-            try:
-                await self._health_task
-            except asyncio.CancelledError:
-                pass
-        logger.info("CredentialManager stopped")
 
     def get_all(self) -> list[CredentialState]:
         """Return all cached credentials sorted by burn rate (highest first, None last)."""
@@ -170,12 +146,7 @@ class CredentialManager:
         return self._cache.get(name)
 
     def get_best(self) -> Optional[CredentialState]:
-        """Return the healthy credential with the lowest burn rate.
-
-        Returns None if the cache is not yet populated or all credentials are stale.
-        """
-        if not self._first_probe_done:
-            return None
+        """Return the healthy credential with the lowest burn rate, or None."""
         healthy = [
             s
             for s in self._cache.values()
@@ -188,12 +159,8 @@ class CredentialManager:
             key=lambda s: s.burn_rate if s.burn_rate != float("inf") else 999999.0,
         )
 
-    def is_cache_ready(self) -> bool:
-        """Return True once the first probe cycle has completed."""
-        return self._first_probe_done
-
     def ingest_probe_result(self, name: str, data: dict) -> CredentialState:
-        """Store probe data submitted by the frontend PTY probe and update cache.
+        """Store probe data submitted by the frontend widget and update cache.
 
         Accepts the raw JSON dict from claude-usage (keys: five_hour_pct, seven_day_pct, etc.)
         and returns the updated CredentialState.
@@ -207,6 +174,7 @@ class CredentialManager:
             burn_rate = compute_burn_rate(float(usage_5hr), five_hr_resets)
             if burn_rate is not None:
                 burn_class = classify_burn(burn_rate)
+        now = time.monotonic()
         state = CredentialState(
             name=name,
             usage_5hr_pct=usage_5hr,
@@ -217,23 +185,17 @@ class CredentialManager:
             burn_class=burn_class,
             health=existing.health,
             account_id=existing.account_id,
-            last_probe_time=time.monotonic(),
+            last_probe_time=now,
             last_probe_wall=time.time(),
-            data_timestamp=data.get("probe_time"),
+            data_timestamp=time.time(),
             last_health_check=existing.last_health_check,
             error=None,
         )
         self._cache[name] = state
         return state
 
-    async def force_probe(self, name: str) -> CredentialState:
-        """Immediately probe a single profile and update the cache."""
-        state = await self._probe_one(name)
-        self._cache[name] = state
-        return state
-
     async def force_health_check(self, name: str) -> CredentialState:
-        """Immediately run a health check on a single profile and update the cache."""
+        """Run a health check on a single profile and update the cache."""
         healthy = await health_check_profile(name)
         if name not in self._cache:
             self._cache[name] = CredentialState(name=name)
@@ -250,6 +212,16 @@ class CredentialManager:
         if not success:
             return {"success": False, "error": "Failed to create profile directory"}
         self._cache[name] = CredentialState(name=name, health="unknown")
+
+        # Try to read existing account_id if credentials are already present
+        account_id = await read_account_id_file(name)
+        if account_id is None:
+            account_id = await get_account_id(name)
+            if account_id:
+                await write_account_id_file(name, account_id)
+        if account_id:
+            self._cache[name].account_id = account_id
+
         return {"success": True, "name": name}
 
     async def delete_profile(self, name: str) -> bool:
@@ -261,89 +233,3 @@ class CredentialManager:
         if success:
             self._cache.pop(name, None)
         return success
-
-    # ── Internal probe helpers ──────────────────────────────────────────────
-
-    async def _probe_one(self, name: str) -> CredentialState:
-        """Read usage.json for a profile and return an updated CredentialState."""
-        existing = self._cache.get(name, CredentialState(name=name))
-        now_mono = time.monotonic()
-        now_wall = time.time()
-        try:
-            result = await probe_usage_via_session(name, self._session_mgr)
-            if result is None:
-                existing.last_probe_time = now_mono
-                existing.last_probe_wall = now_wall
-                existing.error = "usage.json not found"
-                return existing
-
-            usage_5hr = result.get("five_hour_pct")
-            five_hr_resets = result.get("five_hour_resets")
-            burn_rate = None
-            burn_class = "unknown"
-            if usage_5hr is not None and five_hr_resets:
-                burn_rate = compute_burn_rate(float(usage_5hr), five_hr_resets)
-                if burn_rate is not None:
-                    burn_class = classify_burn(burn_rate)
-
-            account_id = await read_account_id_file(name)
-            if account_id is None:
-                account_id = await get_account_id(name)
-                if account_id:
-                    await write_account_id_file(name, account_id)
-
-            return CredentialState(
-                name=name,
-                usage_5hr_pct=usage_5hr,
-                usage_daily_pct=result.get("seven_day_pct"),
-                five_hour_resets=five_hr_resets,
-                seven_day_resets=result.get("seven_day_resets"),
-                burn_rate=burn_rate,
-                burn_class=burn_class,
-                health=existing.health,
-                account_id=account_id,
-                last_probe_time=now_mono,
-                last_probe_wall=now_wall,
-                data_timestamp=result.get("probe_time"),
-                last_health_check=existing.last_health_check,
-                error=None,
-            )
-        except Exception as exc:
-            logger.warning("Failed to probe credential '{}': {}", name, exc)
-            existing.last_probe_time = now_mono
-            existing.last_probe_wall = now_wall
-            existing.error = str(exc)
-            return existing
-
-    async def _probe_loop(self) -> None:
-        """Background loop: probe all profiles every probe_interval seconds."""
-        while True:
-            try:
-                profiles = await list_profiles()
-                for name in profiles:
-                    state = await self._probe_one(name)
-                    self._cache[name] = state
-                self._first_probe_done = True
-                logger.debug("Credential probe cycle complete: {} profile(s)", len(profiles))
-            except Exception as exc:
-                logger.error("Credential probe loop error: {}", exc)
-                self._first_probe_done = True  # don't block /best forever on errors
-            await asyncio.sleep(self._probe_interval)
-
-    async def _health_check_loop(self) -> None:
-        """Background loop: health-check all profiles every health_check_interval seconds."""
-        # Initial delay — run health checks after the first probe cycle, not before
-        await asyncio.sleep(self._health_check_interval)
-        while True:
-            try:
-                profiles = await list_profiles()
-                for name in profiles:
-                    healthy = await health_check_profile(name)
-                    if name not in self._cache:
-                        self._cache[name] = CredentialState(name=name)
-                    self._cache[name].health = "healthy" if healthy else "stale"
-                    self._cache[name].last_health_check = time.monotonic()
-                logger.debug("Health check cycle complete: {} profile(s)", len(profiles))
-            except Exception as exc:
-                logger.error("Health check loop error: {}", exc)
-            await asyncio.sleep(self._health_check_interval)

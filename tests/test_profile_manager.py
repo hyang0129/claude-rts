@@ -1,8 +1,7 @@
 """Tests for claude_rts.profile_manager — pure functions and CredentialManager class."""
 
-import math
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -61,71 +60,64 @@ def test_parse_hours_until_reset_empty_string():
 
 
 def test_compute_burn_rate_basic():
-    """50% usage / 5 hours = 10.0/hr."""
-    # Use hm format so parse_hours_until_reset returns exactly 5.0
-    result = compute_burn_rate(50.0, "5h 0m")
-    assert result is not None
-    assert abs(result - 10.0) < 0.01
+    """50% usage with 2.5 hours until reset → 20/hr."""
+    rate = compute_burn_rate(50.0, "2h 30m")
+    assert rate is not None
+    assert abs(rate - 20.0) < 0.1
 
 
 def test_compute_burn_rate_zero_hours():
-    """When reset_str parses to <= 0 hours, return inf (past reset)."""
-    # hours <= 0 path: patch parse_hours_until_reset to return 0
-    with patch("claude_rts.profile_manager.parse_hours_until_reset", return_value=0):
-        result = compute_burn_rate(50.0, "irrelevant")
-    assert result == float("inf")
+    """Zero hours until reset → inf."""
+    rate = compute_burn_rate(50.0, "0h 0m")
+    assert rate == float("inf")
 
 
 def test_compute_burn_rate_unparseable_reset():
-    """None reset_str (unparseable) returns None."""
-    result = compute_burn_rate(50.0, None)
-    assert result is None
+    """Unparseable reset string → None."""
+    rate = compute_burn_rate(50.0, "soon")
+    assert rate is None
 
 
 def test_compute_burn_rate_garbage_reset():
-    """Garbage reset_str that cannot be parsed returns None."""
-    result = compute_burn_rate(100.0, "not a time")
-    assert result is None
+    """Completely garbage reset string → None."""
+    rate = compute_burn_rate(80.0, "????")
+    assert rate is None
 
 
 # ── classify_burn ────────────────────────────────────────────────────────────
 
 
 def test_classify_burn_overburning():
-    """burn_rate=25 (> 20/hr nominal for 5hr window) → 'overburning'."""
+    """Burn rate above nominal (>20/hr for 5hr window) → overburning."""
     assert classify_burn(25.0) == "overburning"
 
 
 def test_classify_burn_normal():
-    """burn_rate=15 (between 10 and 20) → 'normal'."""
+    """Burn rate between 10/hr and 20/hr → normal."""
     assert classify_burn(15.0) == "normal"
 
 
 def test_classify_burn_underburning():
-    """burn_rate=5 (< 10, which is 50% of nominal 20/hr) → 'underburning'."""
+    """Burn rate below half nominal (<10/hr) → underburning."""
     assert classify_burn(5.0) == "underburning"
 
 
 def test_classify_burn_inf():
-    """burn_rate=inf → 'overburning'."""
+    """Infinite burn rate → overburning."""
     assert classify_burn(float("inf")) == "overburning"
 
 
 def test_classify_burn_exactly_nominal():
-    """burn_rate exactly at nominal (20/hr) is not overburning — returns 'normal'."""
-    # burn_rate > nominal is required for overburning; equal is not overburning
-    result = classify_burn(20.0)
-    assert result == "normal"
+    """Exactly nominal rate (20/hr) is not overburning."""
+    assert classify_burn(20.0) == "normal"
 
 
 def test_classify_burn_exactly_half_nominal():
-    """burn_rate exactly at 50% of nominal (10/hr) is not underburning — returns 'normal'."""
-    # burn_rate < nominal * 0.5 required for underburning; equal is not underburning
-    result = classify_burn(10.0)
-    assert result == "normal"
+    """Exactly half nominal (10/hr) is not underburning."""
+    assert classify_burn(10.0) == "normal"
 
 
-# ── CredentialState.to_dict ──────────────────────────────────────────────────
+# ── CredentialState ──────────────────────────────────────────────────────────
 
 
 def test_credential_state_to_dict_keys():
@@ -148,8 +140,8 @@ _UTIL_MOD = "claude_rts.profile_manager"
 
 
 def _make_manager() -> CredentialManager:
-    """Return a CredentialManager with no background tasks started."""
-    return CredentialManager(MagicMock(), probe_interval=60, health_check_interval=900)
+    """Return a CredentialManager with no background tasks."""
+    return CredentialManager()
 
 
 def test_get_all_empty():
@@ -184,7 +176,6 @@ def test_get_all_none_burn_rate_last():
 def test_get_best_returns_lowest_burn_healthy():
     """get_best() picks the healthy credential with the lowest burn rate."""
     mgr = _make_manager()
-    mgr._first_probe_done = True
     mgr._cache["high"] = CredentialState(name="high", burn_rate=20.0, health="healthy")
     mgr._cache["low"] = CredentialState(name="low", burn_rate=5.0, health="healthy")
     mgr._cache["mid"] = CredentialState(name="mid", burn_rate=12.0, health="healthy")
@@ -197,7 +188,6 @@ def test_get_best_returns_lowest_burn_healthy():
 def test_get_best_excludes_stale():
     """Stale credentials are excluded from get_best()."""
     mgr = _make_manager()
-    mgr._first_probe_done = True
     mgr._cache["stale"] = CredentialState(name="stale", burn_rate=1.0, health="stale")
     mgr._cache["healthy"] = CredentialState(name="healthy", burn_rate=15.0, health="healthy")
 
@@ -209,48 +199,49 @@ def test_get_best_excludes_stale():
 def test_get_best_empty_cache():
     """Returns None when no credentials are cached."""
     mgr = _make_manager()
-    mgr._first_probe_done = True
     assert mgr.get_best() is None
 
 
-def test_get_best_cache_not_ready():
-    """Returns None before the first probe cycle completes."""
+def test_get_best_no_healthy():
+    """Returns None when all credentials have unknown or stale health."""
     mgr = _make_manager()
-    mgr._cache["acct-x"] = CredentialState(name="acct-x", burn_rate=5.0, health="healthy")
-    # _first_probe_done defaults to False
+    mgr._cache["acct-x"] = CredentialState(name="acct-x", burn_rate=5.0, health="unknown")
     assert mgr.get_best() is None
 
 
-def test_is_cache_ready_false_initially():
-    """Cache is not ready until the first probe cycle completes."""
+def test_ingest_probe_result_updates_cache():
+    """ingest_probe_result() parses JSON and stores a CredentialState."""
     mgr = _make_manager()
-    assert mgr.is_cache_ready() is False
+    data = {
+        "five_hour_pct": 40.0,
+        "seven_day_pct": 20.0,
+        "five_hour_resets": "2h 30m",
+        "seven_day_resets": "Apr 8, 3pm (UTC)",
+    }
+    state = mgr.ingest_probe_result("acct-alice", data)
+
+    assert state.name == "acct-alice"
+    assert state.usage_5hr_pct == 40.0
+    assert state.burn_rate is not None
+    assert state.burn_class in ("overburning", "normal", "underburning")
+    assert state.data_timestamp is not None
+    assert "acct-alice" in mgr._cache
 
 
-def test_is_cache_ready_true_after_flag():
-    """is_cache_ready() returns True once _first_probe_done is set."""
+def test_ingest_probe_result_preserves_health():
+    """ingest_probe_result() keeps existing health value."""
     mgr = _make_manager()
-    mgr._first_probe_done = True
-    assert mgr.is_cache_ready() is True
+    mgr._cache["acct-bob"] = CredentialState(name="acct-bob", health="healthy")
+    state = mgr.ingest_probe_result("acct-bob", {"five_hour_pct": 30.0, "five_hour_resets": "3h 0m"})
+    assert state.health == "healthy"
 
 
-async def test_force_probe_updates_cache():
-    """force_probe() calls _probe_one and stores the result in the cache."""
+def test_ingest_probe_result_no_data():
+    """ingest_probe_result() with missing pct fields leaves burn_rate None."""
     mgr = _make_manager()
-
-    updated_state = CredentialState(
-        name="acct-test",
-        usage_5hr_pct=42.0,
-        burn_rate=8.4,
-        burn_class="normal",
-        health="unknown",
-    )
-
-    with patch.object(mgr, "_probe_one", new=AsyncMock(return_value=updated_state)):
-        state = await mgr.force_probe("acct-test")
-
-    assert state is updated_state
-    assert mgr._cache["acct-test"] is updated_state
+    state = mgr.ingest_probe_result("acct-x", {})
+    assert state.burn_rate is None
+    assert state.burn_class == "unknown"
 
 
 async def test_force_health_check_marks_healthy():
@@ -291,7 +282,9 @@ async def test_create_profile_success():
     """create_profile() calls create_profile_dir and initializes cache entry on success."""
     mgr = _make_manager()
 
-    with patch(f"{_UTIL_MOD}.create_profile_dir", new=AsyncMock(return_value=True)):
+    with patch(f"{_UTIL_MOD}.create_profile_dir", new=AsyncMock(return_value=True)), \
+         patch(f"{_UTIL_MOD}.read_account_id_file", new=AsyncMock(return_value=None)), \
+         patch(f"{_UTIL_MOD}.get_account_id", new=AsyncMock(return_value=None)):
         result = await mgr.create_profile("acct-new")
 
     assert result["success"] is True
@@ -346,54 +339,3 @@ async def test_delete_profile_failure_leaves_cache_intact():
 
     assert success is False
     assert "acct-keep" in mgr._cache
-
-
-async def test_probe_one_happy_path():
-    """_probe_one() returns a populated CredentialState on a successful probe."""
-    mgr = _make_manager()
-
-    mock_usage = {
-        "five_hour_pct": 50.0,
-        "seven_day_pct": 30.0,
-        "five_hour_resets": "2h 30m",
-        "seven_day_resets": "Apr 7, 3pm (UTC)",
-    }
-
-    with patch(f"{_UTIL_MOD}.probe_usage_via_session", new=AsyncMock(return_value=mock_usage)), \
-         patch(f"{_UTIL_MOD}.read_account_id_file", new=AsyncMock(return_value="acct-123")), \
-         patch(f"{_UTIL_MOD}.get_account_id", new=AsyncMock(return_value=None)), \
-         patch(f"{_UTIL_MOD}.write_account_id_file", new=AsyncMock()):
-        state = await mgr._probe_one("acct-alice")
-
-    assert state.name == "acct-alice"
-    assert state.usage_5hr_pct == 50.0
-    assert state.burn_rate is not None
-    assert state.burn_rate > 0
-    assert state.burn_class in ("overburning", "normal", "underburning")
-    assert state.account_id == "acct-123"
-    assert state.last_probe_time is not None
-    assert state.error is None
-
-
-async def test_probe_one_probe_returns_none():
-    """_probe_one() handles probe_usage_via_session returning None gracefully."""
-    mgr = _make_manager()
-
-    with patch(f"{_UTIL_MOD}.probe_usage_via_session", new=AsyncMock(return_value=None)):
-        state = await mgr._probe_one("acct-fail")
-
-    assert state.name == "acct-fail"
-    assert state.error == "usage.json not found"
-    assert state.last_probe_time is not None
-
-
-async def test_probe_one_probe_raises_exception():
-    """_probe_one() handles exceptions from probe_usage_via_session without crashing."""
-    mgr = _make_manager()
-
-    with patch(f"{_UTIL_MOD}.probe_usage_via_session", new=AsyncMock(side_effect=RuntimeError("container down"))):
-        state = await mgr._probe_one("acct-err")
-
-    assert state.name == "acct-err"
-    assert "container down" in state.error
-    assert state.last_probe_time is not None

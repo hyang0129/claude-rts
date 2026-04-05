@@ -458,18 +458,33 @@
   .cred-detail-row:last-child { border-bottom: none; }
   .cred-detail-label { color: #a6adc8; }
   .cred-detail-value { color: #cdd6f4; font-family: monospace; }
-  .cred-reauth-btn {
-    background: #313244; border: 1px solid #45475a; color: #f9e2af;
-    padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;
-    margin-top: 6px;
+  .cred-detail-actions {
+    display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px;
   }
-  .cred-reauth-btn:hover { background: #45475a; }
+  .cred-probe-btn, .cred-check-btn, .cred-reauth-btn {
+    background: #313244; border: 1px solid #45475a;
+    padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;
+  }
+  .cred-probe-btn { color: #89b4fa; }
+  .cred-check-btn { color: #a6e3a1; }
+  .cred-reauth-btn { color: #f9e2af; }
+  .cred-probe-btn:hover, .cred-check-btn:hover, .cred-reauth-btn:hover { background: #45475a; }
+  .cred-probe-btn:disabled, .cred-check-btn:disabled, .cred-reauth-btn:disabled { opacity: 0.5; cursor: default; }
+  .cred-toolbar {
+    display: flex; align-items: center; gap: 8px;
+    margin-top: 8px; padding-top: 8px; border-top: 1px solid #313244;
+    flex-wrap: wrap;
+  }
+  .cred-probe-all-btn {
+    background: #313244; border: 1px solid #45475a; color: #89b4fa;
+    padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;
+    flex-shrink: 0;
+  }
+  .cred-probe-all-btn:hover { background: #45475a; }
+  .cred-probe-all-btn:disabled { opacity: 0.5; cursor: default; }
   .cred-add-form {
     display: flex;
     gap: 6px;
-    margin-top: 8px;
-    padding-top: 8px;
-    border-top: 1px solid #313244;
     align-items: center;
   }
   .cred-add-form input {
@@ -1524,8 +1539,64 @@ const WIDGET_REGISTRY = {
     label: 'Credential Manager',
     defaultRefreshInterval: 60000,
 
+    // ── Probe a single profile via a headless WebSocket session ──────────────
+    // Opens /ws/session/new with the claude-usage command (no container= so
+    // tmux-wrapping is skipped), buffers terminal output until the process
+    // exits, strips ANSI, extracts JSON, and POSTs to probe-result.
+    async probeOne(name, utilContainerName, statusEl) {
+      const cmd = `docker.exe exec -it ${utilContainerName} claude-usage --claude-dir /profiles/${name} --json`;
+      const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      // No container= param — prevents tmux wrapping, gives pexpect a real ConPTY
+      const wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}`;
+
+      if (statusEl) statusEl.textContent = `Probing ${name}…`;
+
+      const output = await new Promise((resolve) => {
+        const ws = new WebSocket(wsUrl);
+        ws.binaryType = 'arraybuffer';
+        const chunks = [];
+        const timeout = setTimeout(() => { ws.close(); resolve(chunks.join('')); }, 90000);
+        ws.addEventListener('message', (ev) => {
+          if (ev.data instanceof ArrayBuffer) {
+            chunks.push(new TextDecoder().decode(ev.data));
+          }
+          // Ignore text control frames (session_id, etc.)
+        });
+        ws.addEventListener('close', () => { clearTimeout(timeout); resolve(chunks.join('')); });
+        ws.addEventListener('error', () => { clearTimeout(timeout); resolve(chunks.join('')); });
+      });
+
+      // Strip ANSI escape sequences and carriage returns
+      const clean = output.replace(/\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '').replace(/\r/g, '').trim();
+      const jsonStart = clean.indexOf('{');
+      const jsonEnd = clean.lastIndexOf('}');
+      if (jsonStart < 0 || jsonEnd <= jsonStart) {
+        if (statusEl) statusEl.textContent = `Probe failed for ${name} (no JSON)`;
+        return null;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(clean.slice(jsonStart, jsonEnd + 1));
+      } catch {
+        if (statusEl) statusEl.textContent = `Probe failed for ${name} (bad JSON)`;
+        return null;
+      }
+
+      // POST result to backend cache
+      try {
+        await fetch(`/api/credentials/${encodeURIComponent(name)}/probe-result`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(parsed),
+        });
+      } catch (_) {}
+
+      return parsed;
+    },
+
     async render(body, card) {
       const ts = () => new Date().toLocaleTimeString();
+      const self = WIDGET_REGISTRY['credential-manager'];
 
       function burnColor(cls) {
         if (cls === 'overburning') return '#f38ba8';
@@ -1566,13 +1637,17 @@ const WIDGET_REGISTRY = {
         if (cred.account_id) rows.push(['Account ID', cred.account_id]);
         if (cred.health) rows.push(['Health', cred.health]);
         const ago = formatAgo(cred.data_timestamp);
-        if (ago) rows.push(['Data age', ago]);
+        if (ago) rows.push(['Data', ago]);
         let html = rows.map(([l, v]) =>
           `<div class="cred-detail-row"><span class="cred-detail-label">${l}</span><span class="cred-detail-value">${v}</span></div>`
         ).join('');
+        html += `<div class="cred-detail-actions">`;
+        html += `<button class="cred-probe-btn" data-cred-probe="${cred.name}">Probe usage</button>`;
+        html += `<button class="cred-check-btn" data-cred-check="${cred.name}">Health check</button>`;
         if (statusCls === 'stale') {
           html += `<button class="cred-reauth-btn" data-cred-reauth="${cred.name}">Re-authenticate</button>`;
         }
+        html += `</div>`;
         return html;
       }
 
@@ -1585,9 +1660,16 @@ const WIDGET_REGISTRY = {
         const data = await resp.json();
         const credentials = data.credentials || [];
         const maxDataAge = data.max_data_age || 300;
+        const utilContainerName = data.util_container_name || 'supreme-claudemander-util';
 
         if (credentials.length === 0) {
-          body.innerHTML = `<div class="usage-status">No credentials configured.</div>`;
+          body.innerHTML = `
+            <div class="usage-status">No credentials configured.</div>
+            <div class="cred-add-form">
+              <input type="text" class="cred-name-input" placeholder="Profile name…">
+              <button class="cred-add-btn">Add</button>
+            </div>
+            <div class="cred-footer-msg" style="display:none"></div>`;
           card.updateState('idle');
         } else {
           const enriched = credentials.map(cred => ({ ...cred, _burnStatus: getBurnStatus(cred) }));
@@ -1613,31 +1695,43 @@ const WIDGET_REGISTRY = {
             const agoClass = warnStale ? 'cred-stale-age warn' : 'cred-stale-age';
             const rowCls = ['cred-row', statusCls].filter(Boolean).join(' ');
             const safeId = cred.name.replace(/[^a-zA-Z0-9_-]/g, '_');
+            const noData = cred.data_timestamp == null;
 
             html += `<div class="${rowCls}" data-cred-toggle="${cred.name}">`;
             html += `<span class="cred-icon">${icon}</span>`;
             html += `<span class="cred-name" title="${cred.name}">${cred.name}</span>`;
             html += `<div class="cred-bar-wrap">`;
-            html += renderBurnBar(pct, statusCls);
-            html += `<div class="cred-stats"><span>${burnRateStr}</span><span>${resetStr}</span></div>`;
+            if (noData) {
+              html += `<div class="cred-burn-bar"><div class="cred-burn-bar-fill" style="width:0%;background:#585b70"></div></div>`;
+              html += `<div class="cred-stats"><span style="color:#585b70">no data — click to probe</span></div>`;
+            } else {
+              html += renderBurnBar(pct, statusCls);
+              html += `<div class="cred-stats"><span>${burnRateStr}</span><span>${resetStr}</span></div>`;
+            }
             html += `</div>`;
             if (ago) html += `<span class="${agoClass}">${ago}</span>`;
             html += `</div>`;
             if (tooStale) {
-              html += `<div class="cred-stale-banner">⚠ Usage data is ${Math.floor(dataAge / 60)}m old — values hidden until next probe.</div>`;
+              html += `<div class="cred-stale-banner">⚠ Usage data is ${Math.floor(dataAge / 60)}m old — click row to re-probe.</div>`;
             }
             html += `<div class="cred-detail" id="cred-detail-${safeId}" style="display:none">`;
             html += buildDetailHtml(cred, statusCls);
             html += `</div>`;
           }
           html += `</div>`;
-          html += `<div class="usage-status">Last updated: ${ts()}</div>`;
-          html += `<div class="cred-add-form"><input type="text" class="cred-name-input" placeholder="Profile name…"><button class="cred-add-btn">Add</button></div>`;
+          html += `<div class="cred-probe-status" style="min-height:1.2em;font-size:0.78em;color:#89b4fa;padding:2px 6px;"></div>`;
+          html += `<div class="cred-toolbar">`;
+          html += `<button class="cred-probe-all-btn">Probe all</button>`;
+          html += `<div class="cred-add-form" style="display:inline-flex"><input type="text" class="cred-name-input" placeholder="New profile name…"><button class="cred-add-btn">Add</button></div>`;
+          html += `</div>`;
           html += `<div class="cred-footer-msg" style="display:none"></div>`;
           body.innerHTML = html;
           card.updateState('working');
         }
 
+        const probeStatusEl = body.querySelector('.cred-probe-status');
+
+        // Toggle detail rows
         body.querySelectorAll('[data-cred-toggle]').forEach(row => {
           row.addEventListener('click', () => {
             const safeId = row.getAttribute('data-cred-toggle').replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -1646,15 +1740,57 @@ const WIDGET_REGISTRY = {
           });
         });
 
+        // Per-credential Probe button
+        body.querySelectorAll('[data-cred-probe]').forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const name = btn.getAttribute('data-cred-probe');
+            btn.disabled = true; btn.textContent = 'Probing…';
+            card.updateState('working');
+            await self.probeOne(name, utilContainerName, probeStatusEl);
+            await self.render(body, card);
+          });
+        });
+
+        // Per-credential health check button
+        body.querySelectorAll('[data-cred-check]').forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const name = btn.getAttribute('data-cred-check');
+            btn.disabled = true; btn.textContent = 'Checking…';
+            try { await fetch(`/api/credentials/${encodeURIComponent(name)}/check`, { method: 'POST' }); } catch (_) {}
+            await self.render(body, card);
+          });
+        });
+
+        // Re-auth button (stale credentials)
         body.querySelectorAll('[data-cred-reauth]').forEach(btn => {
           btn.addEventListener('click', async (e) => {
             e.stopPropagation();
             const name = btn.getAttribute('data-cred-reauth');
             btn.disabled = true; btn.textContent = 'Checking…';
             try { await fetch(`/api/credentials/${encodeURIComponent(name)}/check`, { method: 'POST' }); } catch (_) {}
-            await WIDGET_REGISTRY['credential-manager'].render(body, card);
+            await self.render(body, card);
           });
         });
+
+        // Probe all button — sequential to avoid hammering the util container
+        const probeAllBtn = body.querySelector('.cred-probe-all-btn');
+        if (probeAllBtn) {
+          probeAllBtn.addEventListener('click', async () => {
+            probeAllBtn.disabled = true; probeAllBtn.textContent = 'Probing…';
+            card.updateState('working');
+            const resp2 = await fetch('/api/credentials').catch(() => null);
+            const data2 = resp2 ? await resp2.json().catch(() => ({})) : {};
+            const names = (data2.credentials || []).map(c => c.name);
+            const util2 = data2.util_container_name || utilContainerName;
+            for (const name of names) {
+              await self.probeOne(name, util2, probeStatusEl);
+            }
+            if (probeStatusEl) probeStatusEl.textContent = `Probe complete — ${names.length} profile(s)`;
+            await self.render(body, card);
+          });
+        }
 
         const addBtn = body.querySelector('.cred-add-btn');
         const nameInput = body.querySelector('.cred-name-input');
@@ -1676,8 +1812,8 @@ const WIDGET_REGISTRY = {
                 addBtn.disabled = false; addBtn.textContent = 'Add';
                 return;
               }
-              if (footerMsg) { footerMsg.style.display = ''; footerMsg.style.color = '#a6e3a1'; footerMsg.textContent = `Profile "${name}" created.`; }
-              await WIDGET_REGISTRY['credential-manager'].render(body, card);
+              if (footerMsg) { footerMsg.style.display = ''; footerMsg.style.color = '#a6e3a1'; footerMsg.textContent = `Profile "${name}" created — run a probe to load usage data.`; }
+              await self.render(body, card);
             } catch (err) {
               if (footerMsg) { footerMsg.style.display = ''; footerMsg.style.color = '#f38ba8'; footerMsg.textContent = `Error: ${err.message}`; }
               addBtn.disabled = false; addBtn.textContent = 'Add';

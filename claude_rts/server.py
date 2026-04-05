@@ -484,15 +484,6 @@ async def credentials_list_handler(request: web.Request) -> web.Response:
 async def credentials_best_handler(request: web.Request) -> web.Response:
     """GET /api/credentials/best — return the healthy credential with the lowest burn rate."""
     cred_mgr: CredentialManager = request.app["credential_manager"]
-    if not cred_mgr.is_cache_ready():
-        return web.json_response(
-            {
-                "status": "error",
-                "error": "cache_cold",
-                "message": "Credential data not yet available. First probe cycle in progress.",
-            },
-            status=503,
-        )
     best = cred_mgr.get_best()
     if best is None:
         return web.json_response(
@@ -721,7 +712,6 @@ def create_app(test_mode: bool = False) -> web.Application:
     # Lifecycle hooks
     config = read_config()
     session_config = config.get("sessions", {})
-    cred_config = config.get("credentials", {})
 
     async def on_startup(app: web.Application) -> None:
         mgr = SessionManager(
@@ -751,17 +741,10 @@ def create_app(test_mode: bool = False) -> web.Application:
 
         app["usage_probe_task"] = asyncio.create_task(_usage_probe_loop(app))
 
-        cred_mgr = CredentialManager(
-            session_mgr=mgr,
-            probe_interval=cred_config.get("probe_interval", 1800),
-            health_check_interval=cred_config.get("health_check_interval", 900),
-        )
+        cred_mgr = CredentialManager()
         app["credential_manager"] = cred_mgr
-        await cred_mgr.start()
 
     async def on_shutdown(app: web.Application) -> None:
-        if "credential_manager" in app:
-            await app["credential_manager"].stop()
         if "usage_probe_task" in app:
             app["usage_probe_task"].cancel()
             try:
