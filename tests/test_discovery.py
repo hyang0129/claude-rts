@@ -1,7 +1,6 @@
 """Tests for hub discovery."""
 
-import asyncio
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -23,8 +22,7 @@ async def test_discover_hubs_parses_docker_output():
         b"cool_ramanujan|d:\\containers\\hub_3\n"
         b"suspicious_lichterman|d:\\containers\\hub_2\n"
     )
-    with patch("claude_rts.discovery.asyncio.create_subprocess_exec",
-               return_value=_mock_process(stdout)):
+    with patch("claude_rts.discovery.asyncio.create_subprocess_exec", return_value=_mock_process(stdout)):
         hubs = await discover_hubs()
 
     assert len(hubs) == 3
@@ -37,8 +35,7 @@ async def test_discover_hubs_parses_docker_output():
 @pytest.mark.asyncio
 async def test_discover_hubs_handles_forward_slashes():
     stdout = b"my_container|/mnt/d/containers/hub_5\n"
-    with patch("claude_rts.discovery.asyncio.create_subprocess_exec",
-               return_value=_mock_process(stdout)):
+    with patch("claude_rts.discovery.asyncio.create_subprocess_exec", return_value=_mock_process(stdout)):
         hubs = await discover_hubs()
 
     assert len(hubs) == 1
@@ -47,8 +44,7 @@ async def test_discover_hubs_handles_forward_slashes():
 
 @pytest.mark.asyncio
 async def test_discover_hubs_returns_empty_on_docker_failure():
-    with patch("claude_rts.discovery.asyncio.create_subprocess_exec",
-               return_value=_mock_process(b"", returncode=1)):
+    with patch("claude_rts.discovery.asyncio.create_subprocess_exec", return_value=_mock_process(b"", returncode=1)):
         hubs = await discover_hubs()
 
     assert hubs == []
@@ -56,8 +52,7 @@ async def test_discover_hubs_returns_empty_on_docker_failure():
 
 @pytest.mark.asyncio
 async def test_discover_hubs_returns_empty_on_no_containers():
-    with patch("claude_rts.discovery.asyncio.create_subprocess_exec",
-               return_value=_mock_process(b"")):
+    with patch("claude_rts.discovery.asyncio.create_subprocess_exec", return_value=_mock_process(b"")):
         hubs = await discover_hubs()
 
     assert hubs == []
@@ -65,14 +60,8 @@ async def test_discover_hubs_returns_empty_on_no_containers():
 
 @pytest.mark.asyncio
 async def test_discover_hubs_skips_malformed_lines():
-    stdout = (
-        b"good_container|d:\\containers\\hub_1\n"
-        b"bad_line_no_pipe\n"
-        b"|also_bad\n"
-        b"another_good|d:\\containers\\hub_2\n"
-    )
-    with patch("claude_rts.discovery.asyncio.create_subprocess_exec",
-               return_value=_mock_process(stdout)):
+    stdout = b"good_container|d:\\containers\\hub_1\nbad_line_no_pipe\n|also_bad\nanother_good|d:\\containers\\hub_2\n"
+    with patch("claude_rts.discovery.asyncio.create_subprocess_exec", return_value=_mock_process(stdout)):
         hubs = await discover_hubs()
 
     assert len(hubs) == 2
@@ -83,8 +72,7 @@ async def test_discover_hubs_skips_malformed_lines():
 @pytest.mark.asyncio
 async def test_discover_hubs_strips_whitespace():
     stdout = b"  spaced_container  |d:\\containers\\hub_1  \n"
-    with patch("claude_rts.discovery.asyncio.create_subprocess_exec",
-               return_value=_mock_process(stdout)):
+    with patch("claude_rts.discovery.asyncio.create_subprocess_exec", return_value=_mock_process(stdout)):
         hubs = await discover_hubs()
 
     assert len(hubs) == 1

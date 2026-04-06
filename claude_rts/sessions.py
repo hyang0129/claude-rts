@@ -46,7 +46,7 @@ class ScrollbackBuffer:
             return
         if n >= self._capacity:
             # Data larger than buffer — keep only the tail
-            data = data[-self._capacity:]
+            data = data[-self._capacity :]
             n = self._capacity
             self._buf[:] = data
             self._write_pos = 0
@@ -55,11 +55,11 @@ class ScrollbackBuffer:
 
         end = self._write_pos + n
         if end <= self._capacity:
-            self._buf[self._write_pos:end] = data
+            self._buf[self._write_pos : end] = data
         else:
             first = self._capacity - self._write_pos
-            self._buf[self._write_pos:] = data[:first]
-            self._buf[:n - first] = data[first:]
+            self._buf[self._write_pos :] = data[:first]
+            self._buf[: n - first] = data[first:]
         self._write_pos = end % self._capacity
         self._total_written += n
 
@@ -68,16 +68,17 @@ class ScrollbackBuffer:
         if self._total_written == 0:
             return b""
         if self._total_written < self._capacity:
-            return bytes(self._buf[:self._write_pos])
+            return bytes(self._buf[: self._write_pos])
         # Buffer is full or has wrapped
         if self._write_pos == 0:
-            return bytes(self._buf[:self._capacity])
-        return bytes(self._buf[self._write_pos:] + self._buf[:self._write_pos])
+            return bytes(self._buf[: self._capacity])
+        return bytes(self._buf[self._write_pos :] + self._buf[: self._write_pos])
 
 
 @dataclass
 class Session:
     """A persistent PTY session."""
+
     session_id: str
     cmd: str
     hub: Optional[str]
@@ -105,8 +106,7 @@ def _valid_container_name(name: str) -> bool:
 class SessionManager:
     """Registry of persistent PTY sessions."""
 
-    def __init__(self, orphan_timeout: float = 300, scrollback_size: int = 65536,
-                 tmux_enabled: bool = True):
+    def __init__(self, orphan_timeout: float = 300, scrollback_size: int = 65536, tmux_enabled: bool = True):
         self._sessions: dict[str, Session] = {}
         self.orphan_timeout = orphan_timeout
         self.scrollback_size = scrollback_size
@@ -131,7 +131,7 @@ class SessionManager:
 
         use_tmux = bool(container and self.tmux_enabled and self._tmux_cache.get(container))
         if use_tmux:
-            spawn_cmd = f'{_DOCKER} exec -it {container} tmux new-session -As {session_id}'
+            spawn_cmd = f"{_DOCKER} exec -it {container} tmux new-session -As {session_id}"
             logger.info("Using tmux persistence: {}", spawn_cmd)
         else:
             spawn_cmd = cmd
@@ -167,8 +167,12 @@ class SessionManager:
             session.clients.add(ws)
             session.last_client_time = time.monotonic()
 
-        logger.info("Session {}: client attached ({} total), scrollback={} bytes",
-                     session_id, len(session.clients), len(scrollback))
+        logger.info(
+            "Session {}: client attached ({} total), scrollback={} bytes",
+            session_id,
+            len(session.clients),
+            len(scrollback),
+        )
         return scrollback
 
     def detach(self, session_id: str, ws: web.WebSocketResponse) -> None:
@@ -178,8 +182,7 @@ class SessionManager:
             return
         session.clients.discard(ws)
         session.last_client_time = time.monotonic()
-        logger.info("Session {}: client detached ({} remaining)",
-                     session_id, len(session.clients))
+        logger.info("Session {}: client detached ({} remaining)", session_id, len(session.clients))
 
     def destroy_session(self, session_id: str, kill_tmux: bool = False) -> None:
         """Kill a session's PTY and remove it from the registry.
@@ -208,9 +211,15 @@ class SessionManager:
             return
         try:
             proc = await asyncio.create_subprocess_exec(
-                _DOCKER, "exec", session.container,
-                "tmux", "kill-session", "-t", session.session_id,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                _DOCKER,
+                "exec",
+                session.container,
+                "tmux",
+                "kill-session",
+                "-t",
+                session.session_id,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
             await proc.communicate()
             logger.info("Killed tmux session {} in container {}", session.session_id, session.container)
@@ -279,13 +288,16 @@ class SessionManager:
             await asyncio.sleep(30)
             now = time.monotonic()
             to_kill = [
-                sid for sid, s in self._sessions.items()
-                if len(s.clients) == 0
-                and (now - s.last_client_time) > self.orphan_timeout
+                sid
+                for sid, s in self._sessions.items()
+                if len(s.clients) == 0 and (now - s.last_client_time) > self.orphan_timeout
             ]
             for sid in to_kill:
-                logger.info("Orphan reaper: detaching session {} (no clients for {}s)",
-                            sid, int(now - self._sessions[sid].last_client_time))
+                logger.info(
+                    "Orphan reaper: detaching session {} (no clients for {}s)",
+                    sid,
+                    int(now - self._sessions[sid].last_client_time),
+                )
                 self.destroy_session(sid, kill_tmux=False)
 
     def stop_all(self) -> None:
@@ -306,8 +318,13 @@ class SessionManager:
             return self._tmux_cache[container]
         try:
             proc = await asyncio.create_subprocess_exec(
-                _DOCKER, "exec", container, "tmux", "-V",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                _DOCKER,
+                "exec",
+                container,
+                "tmux",
+                "-V",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
             await proc.communicate()
             available = proc.returncode == 0
@@ -327,9 +344,15 @@ class SessionManager:
             container = hub["container"]
             hub_name = hub["hub"]
             proc = await asyncio.create_subprocess_exec(
-                _DOCKER, "exec", container,
-                "tmux", "list-sessions", "-F", "#{session_name}",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                _DOCKER,
+                "exec",
+                container,
+                "tmux",
+                "list-sessions",
+                "-F",
+                "#{session_name}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
             stdout, _ = await proc.communicate()
             if proc.returncode != 0:
@@ -344,7 +367,7 @@ class SessionManager:
                 if session_name in self._sessions:
                     continue
 
-                tmux_cmd = f'{_DOCKER} exec -it {container} tmux attach-session -t {session_name}'
+                tmux_cmd = f"{_DOCKER} exec -it {container} tmux attach-session -t {session_name}"
                 try:
                     pty = PtyProcess.spawn(tmux_cmd, dimensions=(24, 80))
                 except Exception:
@@ -364,9 +387,18 @@ class SessionManager:
                 # Seed scrollback from tmux history
                 try:
                     cap_proc = await asyncio.create_subprocess_exec(
-                        _DOCKER, "exec", container,
-                        "tmux", "capture-pane", "-t", session_name, "-p", "-S", "-500",
-                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                        _DOCKER,
+                        "exec",
+                        container,
+                        "tmux",
+                        "capture-pane",
+                        "-t",
+                        session_name,
+                        "-p",
+                        "-S",
+                        "-500",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
                     )
                     cap_stdout, _ = await cap_proc.communicate()
                     if cap_proc.returncode == 0 and cap_stdout:

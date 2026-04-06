@@ -1,6 +1,5 @@
 """Tests for the startup module and API endpoint."""
 
-import json
 from unittest.mock import patch, AsyncMock
 
 import pytest
@@ -46,6 +45,7 @@ async def test_custom_script_not_found(tmp_path):
 @pytest.fixture
 def app():
     from claude_rts.server import create_app
+
     return create_app()
 
 
@@ -56,8 +56,10 @@ async def client(aiohttp_client, app):
 
 async def test_startup_api_success(client):
     mock_hubs = [{"hub": "hub_1", "container": "c1"}]
-    with patch("claude_rts.startup.discover_hubs", new_callable=AsyncMock, return_value=mock_hubs), \
-         patch("claude_rts.server.read_config", return_value={"startup_script": "discover-devcontainers"}):
+    with (
+        patch("claude_rts.startup.discover_hubs", new_callable=AsyncMock, return_value=mock_hubs),
+        patch("claude_rts.server.read_config", return_value={"startup_script": "discover-devcontainers"}),
+    ):
         resp = await client.get("/api/startup")
 
     assert resp.status == 200
@@ -79,8 +81,10 @@ async def test_startup_api_from_layout(client):
 
 
 async def test_startup_api_error_returns_500(client):
-    with patch("claude_rts.server.read_config", return_value={"startup_script": "nonexistent"}), \
-         patch("claude_rts.startup.STARTUP_DIR", __import__("pathlib").Path("/tmp/empty_startup_dir_1234")):
+    with (
+        patch("claude_rts.server.read_config", return_value={"startup_script": "nonexistent"}),
+        patch("claude_rts.startup.STARTUP_DIR", __import__("pathlib").Path("/tmp/empty_startup_dir_1234")),
+    ):
         resp = await client.get("/api/startup")
 
     assert resp.status == 500

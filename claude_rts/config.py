@@ -106,9 +106,7 @@ def write_config(data: dict) -> dict:
 def list_canvases() -> list[str]:
     """Return sorted list of saved canvas names (without .json extension)."""
     ensure_dirs()
-    names = sorted(
-        p.stem for p in CANVASES_DIR.glob("*.json") if p.is_file()
-    )
+    names = sorted(p.stem for p in CANVASES_DIR.glob("*.json") if p.is_file())
     logger.debug("Listed {} canvas(es)", len(names))
     return names
 

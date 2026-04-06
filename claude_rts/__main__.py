@@ -35,16 +35,19 @@ def main():
     logger.info("supreme-claudemander starting on http://localhost:{}", args.port)
 
     import os
+
     test_mode = args.test_mode or os.environ.get("CLAUDE_RTS_TEST_MODE", "").lower() in ("1", "true")
     app = create_app(test_mode=test_mode)
     if test_mode:
         logger.info("Test mode enabled — puppeting API available")
 
     if not args.no_browser:
+
         async def open_browser(app):
             url = f"http://localhost:{args.port}"
             logger.info("Opening browser: {}", url)
             webbrowser.open(url)
+
         app.on_startup.append(open_browser)
 
     logger.info("Press Ctrl+C to stop")

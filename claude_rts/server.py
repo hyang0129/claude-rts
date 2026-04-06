@@ -4,7 +4,6 @@ import asyncio
 import json
 import pathlib
 import platform
-import re
 import sys
 import time
 
@@ -14,11 +13,11 @@ from .pty_compat import PtyProcess
 
 _start_time = time.monotonic()
 
-from .config import read_config, write_config, list_canvases, read_canvas, write_canvas, delete_canvas
-from .discovery import discover_hubs
-from .startup import run_startup
-from .util_container import ensure_util_container
-from .sessions import SessionManager
+from .config import read_config, write_config, list_canvases, read_canvas, write_canvas, delete_canvas  # noqa: E402
+from .discovery import discover_hubs  # noqa: E402
+from .startup import run_startup  # noqa: E402
+from .util_container import ensure_util_container  # noqa: E402
+from .sessions import SessionManager  # noqa: E402
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
@@ -123,7 +122,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
     # Spawn docker exec via ConPTY for full terminal support
     _docker = "docker.exe" if sys.platform == "win32" else "docker"
-    cmd = f'{_docker} exec -it -u vscode -w /workspaces/{hub_name} {hub["container"]} bash -l'
+    cmd = f"{_docker} exec -it -u vscode -w /workspaces/{hub_name} {hub['container']} bash -l"
     logger.info("Spawning PTY process: {}", cmd)
 
     try:
@@ -406,11 +405,13 @@ async def test_session_read(request: web.Request) -> web.Response:
     if not session:
         raise web.HTTPNotFound(text="Session not found")
     data = session.scrollback.get_all()
-    return web.json_response({
-        "output": data.decode("utf-8", errors="replace"),
-        "size": len(data),
-        "total_written": session.scrollback.total_written,
-    })
+    return web.json_response(
+        {
+            "output": data.decode("utf-8", errors="replace"),
+            "size": len(data),
+            "total_written": session.scrollback.total_written,
+        }
+    )
 
 
 async def test_session_status(request: web.Request) -> web.Response:
@@ -420,14 +421,16 @@ async def test_session_status(request: web.Request) -> web.Response:
     if not session:
         raise web.HTTPNotFound(text="Session not found")
     now = time.monotonic()
-    return web.json_response({
-        "session_id": session.session_id,
-        "alive": session.alive,
-        "client_count": len(session.clients),
-        "scrollback_size": session.scrollback.size,
-        "age_seconds": int(now - session.created_at),
-        "idle_seconds": int(now - session.last_client_time),
-    })
+    return web.json_response(
+        {
+            "session_id": session.session_id,
+            "alive": session.alive,
+            "client_count": len(session.clients),
+            "scrollback_size": session.scrollback.size,
+            "age_seconds": int(now - session.created_at),
+            "idle_seconds": int(now - session.last_client_time),
+        }
+    )
 
 
 async def test_session_delete(request: web.Request) -> web.Response:

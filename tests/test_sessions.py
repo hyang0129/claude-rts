@@ -1,14 +1,11 @@
 """Tests for session persistence: ScrollbackBuffer, SessionManager, and session APIs."""
 
-import asyncio
-import json
 import time
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import patch, AsyncMock
 
 import pytest
-from aiohttp import web
 
-from claude_rts.sessions import ScrollbackBuffer, SessionManager, Session, _valid_container_name
+from claude_rts.sessions import ScrollbackBuffer, SessionManager, _valid_container_name
 from claude_rts.server import create_app
 
 
@@ -70,6 +67,7 @@ def test_scrollback_empty_append():
 
 class MockPty:
     """Mock PtyProcess for testing."""
+
     def __init__(self):
         self._alive = True
         self._output_queue = []
@@ -313,7 +311,7 @@ async def test_test_mode_disabled():
     """Test API should NOT be available when test_mode=False."""
     with patch("claude_rts.sessions.PtyProcess", MockPty):
         app = create_app(test_mode=False)
-    routes = [r.resource.canonical for r in app.router.routes() if hasattr(r, 'resource')]
+    routes = [r.resource.canonical for r in app.router.routes() if hasattr(r, "resource")]
     assert "/api/test/sessions" not in routes
     assert "/api/test/session/{id}/read" not in routes
 
@@ -322,7 +320,7 @@ async def test_app_has_session_routes():
     """Verify session WebSocket routes are registered."""
     with patch("claude_rts.sessions.PtyProcess", MockPty):
         app = create_app(test_mode=False)
-    routes = [r.resource.canonical for r in app.router.routes() if hasattr(r, 'resource')]
+    routes = [r.resource.canonical for r in app.router.routes() if hasattr(r, "resource")]
     assert "/ws/session/new" in routes
     assert "/ws/session/{session_id}" in routes
     assert "/api/sessions" in routes
@@ -443,7 +441,7 @@ async def test_tmux_disabled_via_config(monkeypatch):
     try:
         mgr = SessionManager(tmux_enabled=False)
         mgr._tmux_cache["my-container"] = True
-        session = mgr.create_session("bash -l", container="my-container")
+        mgr.create_session("bash -l", container="my-container")
         # Should use original command, not tmux
         assert spawned_cmds[-1] == "bash -l"
         mgr.stop_all()

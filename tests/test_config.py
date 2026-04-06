@@ -1,6 +1,5 @@
 """Tests for config module and API endpoints."""
 
-import json
 from unittest.mock import patch
 
 import pytest
@@ -28,10 +27,12 @@ def config_dir(tmp_path):
     cfg_file = cfg_dir / "config.json"
     canvases_dir = cfg_dir / "canvases"
     legacy_dir = tmp_path / ".claude-rts-nonexistent"
-    with patch("claude_rts.config.CONFIG_DIR", cfg_dir), \
-         patch("claude_rts.config.CONFIG_FILE", cfg_file), \
-         patch("claude_rts.config.CANVASES_DIR", canvases_dir), \
-         patch("claude_rts.config._LEGACY_CONFIG_DIR", legacy_dir):
+    with (
+        patch("claude_rts.config.CONFIG_DIR", cfg_dir),
+        patch("claude_rts.config.CONFIG_FILE", cfg_file),
+        patch("claude_rts.config.CANVASES_DIR", canvases_dir),
+        patch("claude_rts.config._LEGACY_CONFIG_DIR", legacy_dir),
+    ):
         yield cfg_dir, cfg_file, canvases_dir
 
 
@@ -166,7 +167,7 @@ async def test_put_config_invalid_json(client, config_dir):
     assert resp.status == 400
 
 
-async def test_list_canvases_empty(client, config_dir):
+async def test_list_canvases_empty_api(client, config_dir):
     resp = await client.get("/api/canvases")
     assert resp.status == 200
     data = await resp.json()
@@ -252,7 +253,7 @@ async def test_delete_main_canvas_forbidden(client, config_dir):
 
 
 async def test_app_has_config_and_canvas_routes(app):
-    routes = [r.resource.canonical for r in app.router.routes() if hasattr(r, 'resource')]
+    routes = [r.resource.canonical for r in app.router.routes() if hasattr(r, "resource")]
     assert "/api/config" in routes
     assert "/api/canvases" in routes
     assert "/api/canvases/{name}" in routes

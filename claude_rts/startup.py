@@ -9,7 +9,6 @@ Custom scripts: executable files in ~/.supreme-claudemander/startup/ that output
 
 import asyncio
 import json
-import pathlib
 
 from loguru import logger
 
@@ -49,12 +48,14 @@ async def _builtin_discover_devcontainers() -> list[dict]:
     hubs = await discover_hubs()
     result = []
     for h in hubs:
-        result.append({
-            "type": "terminal",
-            "name": h["hub"],
-            "container": h["container"],
-            "exec": f'docker.exe exec -it -u vscode -w /workspaces/{h["hub"]} {h["container"]} bash -l',
-        })
+        result.append(
+            {
+                "type": "terminal",
+                "name": h["hub"],
+                "container": h["container"],
+                "exec": f"docker.exe exec -it -u vscode -w /workspaces/{h['hub']} {h['container']} bash -l",
+            }
+        )
     logger.info("discover-devcontainers: found {} hub(s)", len(result))
     return result
 
@@ -71,7 +72,8 @@ async def _run_custom_script(script_name: str) -> list[dict]:
 
     # Security: only allow alphanumeric, hyphens, underscores in script names
     import re
-    if not re.match(r'^[a-zA-Z0-9_-]+$', script_name):
+
+    if not re.match(r"^[a-zA-Z0-9_-]+$", script_name):
         logger.error("Invalid startup script name: {!r}", script_name)
         raise ValueError(f"Invalid startup script name: {script_name!r}")
 

@@ -13,9 +13,9 @@ import time
 
 _DOCKER = "docker.exe" if sys.platform == "win32" else "docker"
 
-from loguru import logger
+from loguru import logger  # noqa: E402
 
-from .config import read_config
+from .config import read_config  # noqa: E402
 
 DOCKERFILE = pathlib.Path(__file__).parent / "Dockerfile.util"
 DEFAULT_CONTAINER_NAME = "supreme-claudemander-util"
@@ -53,9 +53,7 @@ async def _run(cmd: str, timeout: float = 30) -> tuple[int, str, str]:
 async def is_util_running() -> bool:
     """Check if the utility container is running."""
     cfg = _get_config()
-    rc, stdout, _ = await _run(
-        f'{_DOCKER} ps --filter "name=^/{cfg["name"]}$" --format "{{{{.Status}}}}"'
-    )
+    rc, stdout, _ = await _run(f'{_DOCKER} ps --filter "name=^/{cfg["name"]}$" --format "{{{{.Status}}}}"')
     return rc == 0 and "Up" in stdout
 
 
@@ -63,7 +61,7 @@ async def build_image() -> bool:
     """Build the utility container image if not already built."""
     cfg = _get_config()
     # Check if image exists
-    rc, stdout, _ = await _run(f'{_DOCKER} images -q {cfg["image"]}')
+    rc, stdout, _ = await _run(f"{_DOCKER} images -q {cfg['image']}")
     if rc == 0 and stdout.strip():
         logger.debug("Utility image {} already exists", cfg["image"])
         return True
@@ -104,10 +102,10 @@ async def start_container() -> bool:
             logger.warning("Mount source does not exist, skipping: {}", expanded)
 
     # Remove old stopped container if exists
-    await _run(f'{_DOCKER} rm -f {cfg["name"]}')
+    await _run(f"{_DOCKER} rm -f {cfg['name']}")
 
     # Start container
-    cmd = f'{_DOCKER} run -d --name {cfg["name"]}{mount_args} {cfg["image"]}'
+    cmd = f"{_DOCKER} run -d --name {cfg['name']}{mount_args} {cfg['image']}"
     logger.info("Starting utility container: {}", cmd)
     rc, stdout, stderr = await _run(cmd, timeout=60)
     if rc != 0:
@@ -121,11 +119,11 @@ async def start_container() -> bool:
 async def stop_container() -> bool:
     """Stop the utility container."""
     cfg = _get_config()
-    rc, _, stderr = await _run(f'{_DOCKER} stop {cfg["name"]}')
+    rc, _, stderr = await _run(f"{_DOCKER} stop {cfg['name']}")
     if rc != 0:
         logger.warning("Failed to stop utility container: {}", stderr)
         return False
-    await _run(f'{_DOCKER} rm {cfg["name"]}')
+    await _run(f"{_DOCKER} rm {cfg['name']}")
     logger.info("Utility container '{}' stopped", cfg["name"])
     return True
 
@@ -140,7 +138,7 @@ async def exec_in_util(cmd: str, timeout: float = 60) -> tuple[int, str]:
     if not await is_util_running():
         raise RuntimeError(f"Utility container '{cfg['name']}' is not running")
 
-    full_cmd = f'{_DOCKER} exec {cfg["name"]} {cmd}'
+    full_cmd = f"{_DOCKER} exec {cfg['name']} {cmd}"
     logger.debug("exec_in_util: {}", cmd)
     rc, stdout, stderr = await _run(full_cmd, timeout=timeout)
     if rc != 0:
@@ -161,7 +159,7 @@ async def exec_in_util_pty(cmd: str, timeout: float = 60) -> tuple[int, str]:
     if not await is_util_running():
         raise RuntimeError(f"Utility container '{cfg['name']}' is not running")
 
-    full_cmd = f'{_DOCKER} exec -it {cfg["name"]} {cmd}'
+    full_cmd = f"{_DOCKER} exec -it {cfg['name']} {cmd}"
     logger.debug("exec_in_util_pty: {}", cmd)
 
     loop = asyncio.get_event_loop()
@@ -183,7 +181,7 @@ async def exec_in_util_pty(cmd: str, timeout: float = 60) -> tuple[int, str]:
                         output.append(data.decode("utf-8", errors="replace"))
                         # Early exit: if we see a complete JSON object, we're done
                         combined = "".join(output)
-                        if '{\n' in combined and combined.rstrip().endswith('}'):
+                        if "{\n" in combined and combined.rstrip().endswith("}"):
                             logger.debug("exec_in_util_pty: detected complete JSON, exiting early")
                             break
                 except EOFError:
@@ -218,4 +216,3 @@ async def ensure_util_container() -> bool:
         logger.info("Utility container auto_start disabled, skipping")
         return False
     return await start_container()
-
