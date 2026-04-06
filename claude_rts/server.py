@@ -211,62 +211,6 @@ async def widget_system_info_handler(request: web.Request) -> web.Response:
     return web.json_response(data)
 
 
-# ── Claude usage widget ──────────────────────────────────────────────────────
-
-async def widget_claude_usage_handler(request: web.Request) -> web.Response:
-    """Return Claude usage data for all profiles.
-
-    Data is populated exclusively by the frontend credential-manager widget, which
-    runs claude-usage inside the utility container via a headed xterm.js WebSocket
-    session and POSTs the parsed JSON to /api/credentials/{name}/probe-result.
-
-    This endpoint never probes directly — it only reads from CredentialManager cache.
-    """
-    if not await is_util_running():
-        return web.json_response({
-            "status": "error",
-            "error": "Utility container not running. Start it from config.",
-            "profiles": [],
-        })
-
-    profiles = await list_profiles()
-    if not profiles:
-        return web.json_response({
-            "status": "ok",
-            "profiles": [],
-            "message": "No profiles found in /profiles/. Mount ~/.claude-profiles/ to the utility container.",
-        })
-
-    cred_mgr: CredentialManager = request.app["credential_manager"]
-    results = []
-    for profile in profiles:
-        state = cred_mgr.get(profile)
-        if state:
-            results.append({
-                "profile": profile,
-                "five_hour_pct": state.usage_5hr_pct,
-                "five_hour_resets": state.five_hour_resets,
-                "seven_day_pct": state.usage_daily_pct,
-                "seven_day_resets": state.seven_day_resets,
-                "cached": state.data_timestamp is not None,
-            })
-        else:
-            results.append({"profile": profile, "cached": False})
-
-    return web.json_response({"status": "ok", "profiles": results})
-
-
-async def widget_claude_usage_status_handler(request: web.Request) -> web.Response:
-    """Lightweight status check: is utility container running, how many profiles."""
-    running = await is_util_running()
-    profiles = await list_profiles() if running else []
-    return web.json_response({
-        "util_running": running,
-        "profile_count": len(profiles),
-        "profiles": profiles,
-    })
-
-
 async def exec_websocket_handler(request: web.Request) -> web.WebSocketResponse:
     """WebSocket handler that spawns a PTY for an arbitrary command."""
     cmd = request.query.get("cmd", "").strip()
@@ -643,8 +587,6 @@ def create_app(test_mode: bool = False) -> web.Application:
     app.router.add_put("/api/canvases/{name}", canvas_put_handler)
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
     app.router.add_get("/api/widgets/system-info", widget_system_info_handler)
-    app.router.add_get("/api/widgets/claude-usage", widget_claude_usage_handler)
-    app.router.add_get("/api/widgets/claude-usage/status", widget_claude_usage_status_handler)
 
     # Credential Manager routes — /best must be registered before /{name} catch-all
     app.router.add_get("/api/credentials", credentials_list_handler)
