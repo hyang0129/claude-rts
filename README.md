@@ -146,24 +146,31 @@ pytest tests/ -v
 ```
 claude_rts/
   __init__.py
-  __main__.py       # CLI entry point
-  server.py         # aiohttp routes + WebSocket-to-PTY bridge
-  discovery.py      # docker container discovery
+  __main__.py          # CLI entry point
+  server.py            # aiohttp routes, WebSocket handlers, widget endpoints
+  sessions.py          # SessionManager, ScrollbackBuffer — PTY persistence
+  discovery.py         # docker container discovery
+  config.py            # file-based config and canvas layout persistence
+  startup.py           # pluggable startup scripts
+  util_container.py    # supreme-claudemander-util container management
+  profile_manager.py   # CredentialManager, burn rate, usage cache
+  Dockerfile.util      # utility container image (Python + Node.js + claude CLI)
   static/
-    index.html      # entire frontend (inline JS/CSS)
+    index.html         # entire frontend (inline JS/CSS, ~2400 lines)
 tests/
-  test_discovery.py # hub discovery parsing
-  test_server.py    # HTTP + WebSocket endpoints
-  test_main.py      # CLI argument handling
+  test_discovery.py         # hub discovery parsing
+  test_server.py            # HTTP + WebSocket endpoints
+  test_main.py              # CLI argument handling
+  test_config.py            # config and canvas CRUD
+  test_startup.py           # startup scripts
+  test_sessions.py          # PTY session management
+  test_server_credentials.py # credential endpoints
+  test_profile_manager.py   # burn rate and usage cache
 ```
 
 ### Logging
 
 Server operations are logged via loguru to stderr (colored) and `supreme-claudemander.log` (rotating, 10 MB). Terminal I/O is intentionally not logged.
-
-## Roadmap
-
-See [ROADMAP.md](ROADMAP.md) for detailed milestones. M0–M4 are complete.
 
 ## License
 
