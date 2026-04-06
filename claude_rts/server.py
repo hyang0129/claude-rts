@@ -520,6 +520,7 @@ def create_app(test_mode: bool = False) -> web.Application:
         util_name = util_cfg.get("name", "supreme-claudemander-util")
         probe_interval = config.get("probe_interval", 1800)
         for profile in config.get("probe_profiles", []):
+
             def _log_usage(result, _p=profile):
                 logger.info(
                     "claude-usage [{}]: 5hr={}% burn={}/hr resets={}",
@@ -528,10 +529,14 @@ def create_app(test_mode: bool = False) -> web.Application:
                     result.get("burn_rate"),
                     result.get("five_hour_resets"),
                 )
+
             try:
                 await registry.subscribe(
-                    "claude-usage", profile, _log_usage,
-                    container=util_name, interval_seconds=probe_interval,
+                    "claude-usage",
+                    profile,
+                    _log_usage,
+                    container=util_name,
+                    interval_seconds=probe_interval,
                 )
             except Exception:
                 logger.exception("Failed to start claude-usage probe for profile '{}'", profile)

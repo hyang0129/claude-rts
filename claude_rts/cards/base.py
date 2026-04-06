@@ -1,4 +1,5 @@
 """BaseCard: minimal abstract base class for all card types."""
+
 import abc
 import uuid
 

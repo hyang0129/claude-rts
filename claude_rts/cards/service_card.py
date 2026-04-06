@@ -1,4 +1,5 @@
 """ServiceCard: abstract base for server-side headed PTY probe runners."""
+
 import abc
 import asyncio
 import inspect
@@ -88,7 +89,9 @@ class ServiceCard(BaseCard):
             if asyncio.get_running_loop().time() >= deadline:
                 logger.warning(
                     "ServiceCard {}/{}: probe timed out after {}s",
-                    self.card_type, self.identity, self._probe_timeout,
+                    self.card_type,
+                    self.identity,
+                    self._probe_timeout,
                 )
                 self._session_manager.destroy_session(session.session_id)
                 return None
@@ -104,13 +107,18 @@ class ServiceCard(BaseCard):
         except Exception:
             logger.exception(
                 "ServiceCard {}/{}: parse_output raised, probe failed",
-                self.card_type, self.identity,
+                self.card_type,
+                self.identity,
             )
             return None
 
         self._last_result = result
-        logger.info("ServiceCard {}/{}: probe succeeded, notifying {} subscriber(s)",
-                    self.card_type, self.identity, len(self._subscribers))
+        logger.info(
+            "ServiceCard {}/{}: probe succeeded, notifying {} subscriber(s)",
+            self.card_type,
+            self.identity,
+            len(self._subscribers),
+        )
         await self._notify_subscribers(result)
         return result
 

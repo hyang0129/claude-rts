@@ -1,15 +1,16 @@
 """ClaudeUsageCard: service card that probes claude-usage-plz in the utility container."""
+
 import json
 import re
 import sys
 from .service_card import ServiceCard
 
 _DOCKER = "docker.exe" if sys.platform == "win32" else "docker"
-_ANSI_ESCAPE = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-_RESET_HOURS = re.compile(r'(\d+)h\s*(\d+)?m?')
-_RESET_MINUTES_ONLY = re.compile(r'(\d+)m')
-_AUTH_REQUIRED = re.compile(r'Select login method|Claude Code can be used with your Claude subscription', re.IGNORECASE)
-_SAFE_IDENTIFIER = re.compile(r'^[a-zA-Z0-9._-]+$')
+_ANSI_ESCAPE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_RESET_HOURS = re.compile(r"(\d+)h\s*(\d+)?m?")
+_RESET_MINUTES_ONLY = re.compile(r"(\d+)m")
+_AUTH_REQUIRED = re.compile(r"Select login method|Claude Code can be used with your Claude subscription", re.IGNORECASE)
+_SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z0-9._-]+$")
 
 
 def _hours_until_reset(reset_str: str) -> float | None:
@@ -44,18 +45,13 @@ class ClaudeUsageCard(ServiceCard):
         util = self._container or "supreme-claudemander-util"
         if not _SAFE_IDENTIFIER.match(self.identity):
             raise ValueError(
-                f"ClaudeUsageCard: identity {self.identity!r} contains invalid characters; "
-                "must match ^[a-zA-Z0-9._-]+$"
+                f"ClaudeUsageCard: identity {self.identity!r} contains invalid characters; must match ^[a-zA-Z0-9._-]+$"
             )
         if not _SAFE_IDENTIFIER.match(util):
             raise ValueError(
-                f"ClaudeUsageCard: container {util!r} contains invalid characters; "
-                "must match ^[a-zA-Z0-9._-]+$"
+                f"ClaudeUsageCard: container {util!r} contains invalid characters; must match ^[a-zA-Z0-9._-]+$"
             )
-        return (
-            f"{_DOCKER} exec -it {util} "
-            f"claude-usage --claude-dir /profiles/{self.identity} --json"
-        )
+        return f"{_DOCKER} exec -it {util} claude-usage --claude-dir /profiles/{self.identity} --json"
 
     def parse_output(self, output: str) -> dict:
         clean = _ANSI_ESCAPE.sub("", output).replace("\r", "").strip()
@@ -65,7 +61,7 @@ class ClaudeUsageCard(ServiceCard):
         end = clean.rfind("}")
         if start < 0 or end <= start:
             raise ValueError(f"No JSON in probe output: {clean[:200]!r}")
-        data = json.loads(clean[start:end + 1])
+        data = json.loads(clean[start : end + 1])
 
         if data.get("seven_day_resets") is None:
             raise ValueError(f"claude-usage: profile '{self.identity}' is not authenticated (seven_day_resets is null)")

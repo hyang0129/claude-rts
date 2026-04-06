@@ -1,4 +1,5 @@
 """ServiceCardRegistry: singleton that manages ServiceCard instances with subscribe-or-reuse semantics."""
+
 import inspect
 from typing import Callable, Type
 from loguru import logger
@@ -44,12 +45,15 @@ class ServiceCardRegistry:
         if key in self._cards:
             card = self._cards[key]
             card.subscribe(callback)
-            logger.info("ServiceCardRegistry: reused existing card '{}', now {} subscriber(s)", key, card.subscriber_count)
+            logger.info(
+                "ServiceCardRegistry: reused existing card '{}', now {} subscriber(s)", key, card.subscriber_count
+            )
             if card.last_result is not None:
                 try:
                     ret = callback(card.last_result)
                     if inspect.isawaitable(ret):
                         import asyncio
+
                         task = asyncio.create_task(ret)
                         card._pending_tasks.add(task)
                         task.add_done_callback(card._pending_tasks.discard)
