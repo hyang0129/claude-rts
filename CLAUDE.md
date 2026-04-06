@@ -36,8 +36,6 @@ CLAUDE_RTS_TEST_MODE=1 python -m claude_rts   # enables puppeting API at /api/te
 | `test_config.py` | 23 | Config CRUD, canvas CRUD, API endpoints |
 | `test_startup.py` | 7 | Startup scripts, API endpoint |
 | `test_sessions.py` | 30 | ScrollbackBuffer, SessionManager, test puppeting API |
-| `test_server_credentials.py` | 25 | Credential CRUD, probe-result ingest, auth endpoints |
-| `test_profile_manager.py` | 35 | CredentialState, burn rate, CredentialManager cache |
 
 Tests use `MockPty` to avoid needing Docker.
 
@@ -52,7 +50,6 @@ Tests use `MockPty` to avoid needing Docker.
 | GET/PUT/DELETE | `/api/canvases/{name}` | Canvas layout CRUD |
 | GET | `/api/sessions` | List active sessions |
 | GET | `/api/widgets/system-info` | System info widget data |
-| GET | `/api/widgets/claude-usage` | Claude usage per profile (cached, 60s TTL) |
 | WS | `/ws/session/new?cmd=...` | Create persistent PTY session |
 | WS | `/ws/session/{session_id}` | Reconnect to existing session |
 
@@ -87,10 +84,3 @@ Every widget requires exactly three coordinated changes:
 
 Do not create standalone pages, inline fetch calls outside `WIDGET_REGISTRY`, or ad-hoc refresh logic. The `WidgetCard` lifecycle (auto-refresh, state tracking, drag/resize, serialization) only works through the registry.
 
-## Usage Probe
-
-**The `credential-manager` WidgetCard is the sole probe initiator.** There is no backend probe.
-
-- **New widgets must NOT call `probe_usage()` or any probe function.** Probes are expensive (docker exec into the util container) and must not be duplicated.
-- **Read from the cache instead.** `CredentialManager` already holds `usage_5hr_pct`, `burn_rate`, `burn_class`, and `health` per profile. New widgets that display usage data must read from that in-memory cache.
-- **`/api/widgets/claude-usage` is the canonical usage data source.** Other widgets needing usage data should call it (or share its cache object), not re-implement probe logic.

@@ -39,11 +39,6 @@ DEFAULT_CONFIG = {
         "scrollback_size": 65536,
         "tmux_persistence": True,
     },
-    "credentials": {
-        "probe_interval": 1800,       # seconds between full probe cycles
-        "health_check_interval": 900, # seconds between health checks
-        "max_data_age": 300,          # beyond this, data is too stale to display
-    },
 }
 
 # Allowed canvas name pattern: alphanumeric, hyphens, underscores

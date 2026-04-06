@@ -15,15 +15,12 @@ from .pty_compat import PtyProcess
 _start_time = time.monotonic()
 
 from .config import read_config, write_config, list_canvases, read_canvas, write_canvas, delete_canvas
-from .profile_manager import CredentialManager
 from .discovery import discover_hubs
 from .startup import run_startup
 from .util_container import ensure_util_container
 from .sessions import SessionManager
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
-
-_VALID_PROFILE_NAME = re.compile(r'^[a-zA-Z0-9_-]+$')
 
 
 async def index_handler(request: web.Request) -> web.FileResponse:
@@ -374,132 +371,6 @@ async def sessions_list_handler(request: web.Request) -> web.Response:
     return web.json_response(mgr.list_sessions())
 
 
-# ── Credential Manager API handlers ──────────────────────────────────────────
-
-
-async def credentials_list_handler(request: web.Request) -> web.Response:
-    """GET /api/credentials — return all cached credential states."""
-    cred_mgr: CredentialManager = request.app["credential_manager"]
-    states = cred_mgr.get_all()
-    config = read_config()
-    util_name = config.get("util_container", {}).get("name", "supreme-claudemander-util")
-    max_data_age = config.get("credentials", {}).get("max_data_age", 300)
-    return web.json_response({
-        "credentials": [s.to_dict() for s in states],
-        "util_container_name": util_name,
-        "max_data_age": max_data_age,
-    })
-
-
-async def credentials_best_handler(request: web.Request) -> web.Response:
-    """GET /api/credentials/best — return the healthy credential with the lowest burn rate."""
-    cred_mgr: CredentialManager = request.app["credential_manager"]
-    best = cred_mgr.get_best()
-    if best is None:
-        return web.json_response(
-            {
-                "status": "error",
-                "error": "none_available",
-                "message": "No healthy credentials available.",
-            },
-            status=503,
-        )
-    return web.json_response(
-        {
-            "profile": best.name,
-            "burn_rate": best.burn_rate,
-            "burn_class": best.burn_class,
-            "usage_5hr_pct": best.usage_5hr_pct,
-            "health": best.health,
-        }
-    )
-
-
-async def credentials_get_handler(request: web.Request) -> web.Response:
-    """GET /api/credentials/{name} — return a single credential state."""
-    name = request.match_info["name"]
-    if not _VALID_PROFILE_NAME.match(name):
-        return web.json_response({"error": "Invalid profile name"}, status=400)
-    cred_mgr: CredentialManager = request.app["credential_manager"]
-    state = cred_mgr.get(name)
-    if state is None:
-        raise web.HTTPNotFound(text=f"Credential '{name}' not found")
-    return web.json_response(state.to_dict())
-
-
-async def credentials_create_handler(request: web.Request) -> web.Response:
-    """POST /api/credentials — create a new credential profile directory."""
-    try:
-        body = await request.json()
-    except json.JSONDecodeError:
-        raise web.HTTPBadRequest(text="Invalid JSON")
-    name = body.get("name", "").strip()
-    if not name or not _VALID_PROFILE_NAME.match(name):
-        return web.json_response({"error": "Invalid name. Must match [a-zA-Z0-9_-]+"}, status=400)
-    cred_mgr: CredentialManager = request.app["credential_manager"]
-    if cred_mgr.get(name) is not None:
-        return web.json_response(
-            {"success": False, "error": f"Profile '{name}' already exists"},
-            status=409,
-        )
-    result = await cred_mgr.create_profile(name)
-    if not result.get("success"):
-        return web.json_response(result, status=400)
-    return web.json_response(result)
-
-
-async def credentials_delete_handler(request: web.Request) -> web.Response:
-    """DELETE /api/credentials/{name} — remove a credential profile directory."""
-    name = request.match_info["name"]
-    if not _VALID_PROFILE_NAME.match(name):
-        return web.json_response({"error": "Invalid profile name"}, status=400)
-    cred_mgr: CredentialManager = request.app["credential_manager"]
-    if cred_mgr.get(name) is None:
-        raise web.HTTPNotFound(text=f"Credential '{name}' not found")
-    success = await cred_mgr.delete_profile(name)
-    if not success:
-        return web.json_response(
-            {"success": False, "error": "Failed to delete profile directory"},
-            status=500,
-        )
-    return web.json_response({"success": True})
-
-
-async def credentials_probe_handler(request: web.Request) -> web.Response:
-    """POST /api/credentials/{name}/probe — trigger an immediate usage probe."""
-    name = request.match_info["name"]
-    if not _VALID_PROFILE_NAME.match(name):
-        return web.json_response({"error": "Invalid profile name"}, status=400)
-    cred_mgr: CredentialManager = request.app["credential_manager"]
-    state = await cred_mgr.force_probe(name)
-    return web.json_response(state.to_dict())
-
-
-async def credentials_check_handler(request: web.Request) -> web.Response:
-    """POST /api/credentials/{name}/check — trigger an immediate health check."""
-    name = request.match_info["name"]
-    if not _VALID_PROFILE_NAME.match(name):
-        return web.json_response({"error": "Invalid profile name"}, status=400)
-    cred_mgr: CredentialManager = request.app["credential_manager"]
-    state = await cred_mgr.force_health_check(name)
-    return web.json_response(state.to_dict())
-
-
-async def credentials_probe_result_handler(request: web.Request) -> web.Response:
-    """POST /api/credentials/{name}/probe-result — ingest probe data from the frontend PTY probe."""
-    name = request.match_info["name"]
-    if not _VALID_PROFILE_NAME.match(name):
-        return web.json_response({"error": "Invalid profile name"}, status=400)
-    try:
-        data = await request.json()
-    except Exception:
-        return web.json_response({"error": "Invalid JSON body"}, status=400)
-    cred_mgr: CredentialManager = request.app["credential_manager"]
-    state = cred_mgr.ingest_probe_result(name, data)
-    logger.info("Ingested probe result for '{}': usage_5hr={}", name, state.usage_5hr_pct)
-    return web.json_response(state.to_dict())
-
-
 # ── Test puppeting API (test_mode only) ──────────────────────────────────────
 
 
@@ -589,16 +460,6 @@ def create_app(test_mode: bool = False) -> web.Application:
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
     app.router.add_get("/api/widgets/system-info", widget_system_info_handler)
 
-    # Credential Manager routes — /best must be registered before /{name} catch-all
-    app.router.add_get("/api/credentials", credentials_list_handler)
-    app.router.add_get("/api/credentials/best", credentials_best_handler)
-    app.router.add_get("/api/credentials/{name}", credentials_get_handler)
-    app.router.add_post("/api/credentials", credentials_create_handler)
-    app.router.add_delete("/api/credentials/{name}", credentials_delete_handler)
-    app.router.add_post("/api/credentials/{name}/probe", credentials_probe_handler)
-    app.router.add_post("/api/credentials/{name}/check", credentials_check_handler)
-    app.router.add_post("/api/credentials/{name}/probe-result", credentials_probe_result_handler)
-
     # Session routes (must be before /ws/{hub} catch-all)
     app.router.add_get("/api/sessions", sessions_list_handler)
     app.router.add_get("/ws/session/new", session_new_handler)
@@ -646,9 +507,6 @@ def create_app(test_mode: bool = False) -> web.Application:
             await ensure_util_container()
         except Exception:
             logger.warning("Failed to start utility container (non-fatal)")
-
-        cred_mgr = CredentialManager()
-        app["credential_manager"] = cred_mgr
 
     async def on_shutdown(app: web.Application) -> None:
         if "session_manager" in app:
