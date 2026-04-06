@@ -640,6 +640,35 @@ const CARD_W = 720;
 const CARD_H = 480;
 const CARD_GAP = 40;
 
+// Snapping
+const SNAP_GRID = 20;  // matches the background minor grid
+const SNAP_EDGE = 14;  // px threshold for card-edge snapping (canvas coords)
+
+function snapGrid(v) { return Math.round(v / SNAP_GRID) * SNAP_GRID; }
+
+function snapAxis(pos, size, lo, hi) {
+  if (Math.abs(pos - hi) < SNAP_EDGE)          return hi;
+  if (Math.abs(pos + size - lo) < SNAP_EDGE)   return lo - size;
+  if (Math.abs(pos - lo) < SNAP_EDGE)          return lo;
+  if (Math.abs(pos + size - hi) < SNAP_EDGE)   return hi - size;
+  return pos;
+}
+
+function snapEdges(x, y, w, h, excludeId) {
+  let sx = x, sy = y;
+  for (const card of cards.values()) {
+    if (card.id === excludeId) continue;
+    sx = snapAxis(x, w, card.x, card.x + card.w);
+    sy = snapAxis(y, h, card.y, card.y + card.h);
+  }
+  return [sx, sy];
+}
+
+function snapPos(x, y, w, h, excludeId) {
+  const [ex, ey] = snapEdges(x, y, w, h, excludeId);
+  return [snapGrid(ex), snapGrid(ey)];
+}
+
 // Hub symbols: each hub gets a unique letter
 const HUB_SYMBOLS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 
@@ -872,10 +901,15 @@ function showContextMenu(sx, sy) {
 
   // Host terminal section
   html += '<div class="ctx-header">Host terminal</div>';
-  const hostShells = [
+  const isWin = navigator.platform.startsWith('Win') || navigator.userAgent.includes('Windows');
+  const hostShells = isWin ? [
     { id: 'powershell', label: 'PowerShell', cmd: 'powershell.exe' },
     { id: 'cmd', label: 'Command Prompt', cmd: 'cmd.exe' },
     { id: 'util', label: 'Utility Container', cmd: 'docker.exe exec -it supreme-claudemander-util bash' },
+  ] : [
+    { id: 'zsh', label: 'zsh', cmd: '/bin/zsh -l' },
+    { id: 'bash', label: 'bash', cmd: '/bin/bash -l' },
+    { id: 'util', label: 'Utility Container', cmd: 'docker exec -it supreme-claudemander-util bash' },
   ];
   for (const shell of hostShells) {
     html += `<div class="ctx-item" data-host-shell="${shell.id}" data-host-cmd="${shell.cmd}">
@@ -1101,8 +1135,9 @@ class Card {
     let startX, startY, origX, origY;
 
     const onMove = (e) => {
-      this.x = origX + (e.clientX - startX) / zoom;
-      this.y = origY + (e.clientY - startY) / zoom;
+      const rawX = origX + (e.clientX - startX) / zoom;
+      const rawY = origY + (e.clientY - startY) / zoom;
+      [this.x, this.y] = snapEdges(rawX, rawY, this.w, this.h, this.id);
       this.el.style.left = this.x + 'px';
       this.el.style.top = this.y + 'px';
       drawMinimap();
@@ -1110,6 +1145,9 @@ class Card {
     const onUp = () => {
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
+      [this.x, this.y] = snapPos(this.x, this.y, this.w, this.h, this.id);
+      this.el.style.left = this.x + 'px';
+      this.el.style.top = this.y + 'px';
       saveLayout();
     };
 
@@ -1136,8 +1174,8 @@ class Card {
     let startX, startY, origW, origH;
 
     const onMove = (e) => {
-      this.w = Math.max(300, origW + (e.clientX - startX) / zoom);
-      this.h = Math.max(200, origH + (e.clientY - startY) / zoom);
+      this.w = snapGrid(Math.max(300, origW + (e.clientX - startX) / zoom));
+      this.h = snapGrid(Math.max(200, origH + (e.clientY - startY) / zoom));
       this.el.style.width = this.w + 'px';
       this.el.style.height = this.h + 'px';
       drawMinimap();
@@ -1253,7 +1291,8 @@ class TerminalCard extends Card {
       wsUrl = `${wsProto}//${location.host}/ws/session/${this.sessionId}`;
     } else {
       // Create new persistent session
-      const cmd = this.execCmd || `docker.exe exec -it -u vscode -w /workspaces/${this.hub} ${this.container} bash -l`;
+      const _docker = (navigator.platform.startsWith('Win') || navigator.userAgent.includes('Windows')) ? 'docker.exe' : 'docker';
+      const cmd = this.execCmd || `${_docker} exec -it -u vscode -w /workspaces/${this.hub} ${this.container} bash -l`;
       wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}`;
     }
     this.ws = new WebSocket(wsUrl);

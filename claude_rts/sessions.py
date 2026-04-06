@@ -13,9 +13,13 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
+import sys
+
 from aiohttp import web
 from loguru import logger
-from winpty import PtyProcess
+from .pty_compat import PtyProcess
+
+_DOCKER = "docker.exe" if sys.platform == "win32" else "docker"
 
 
 class ScrollbackBuffer:
@@ -127,7 +131,7 @@ class SessionManager:
 
         use_tmux = bool(container and self.tmux_enabled and self._tmux_cache.get(container))
         if use_tmux:
-            spawn_cmd = f'docker.exe exec -it {container} tmux new-session -As {session_id}'
+            spawn_cmd = f'{_DOCKER} exec -it {container} tmux new-session -As {session_id}'
             logger.info("Using tmux persistence: {}", spawn_cmd)
         else:
             spawn_cmd = cmd
@@ -204,7 +208,7 @@ class SessionManager:
             return
         try:
             proc = await asyncio.create_subprocess_exec(
-                "docker.exe", "exec", session.container,
+                _DOCKER, "exec", session.container,
                 "tmux", "kill-session", "-t", session.session_id,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
@@ -241,7 +245,7 @@ class SessionManager:
                     data = await loop.run_in_executor(None, session.pty.read)
                     if not data:
                         continue
-                    raw = data.encode("utf-8", errors="replace")
+                    raw = data
 
                     async with session._lock:
                         session.scrollback.append(raw)
@@ -302,7 +306,7 @@ class SessionManager:
             return self._tmux_cache[container]
         try:
             proc = await asyncio.create_subprocess_exec(
-                "docker.exe", "exec", container, "tmux", "-V",
+                _DOCKER, "exec", container, "tmux", "-V",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             await proc.communicate()
@@ -323,7 +327,7 @@ class SessionManager:
             container = hub["container"]
             hub_name = hub["hub"]
             proc = await asyncio.create_subprocess_exec(
-                "docker.exe", "exec", container,
+                _DOCKER, "exec", container,
                 "tmux", "list-sessions", "-F", "#{session_name}",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
@@ -340,7 +344,7 @@ class SessionManager:
                 if session_name in self._sessions:
                     continue
 
-                tmux_cmd = f'docker.exe exec -it {container} tmux attach-session -t {session_name}'
+                tmux_cmd = f'{_DOCKER} exec -it {container} tmux attach-session -t {session_name}'
                 try:
                     pty = PtyProcess.spawn(tmux_cmd, dimensions=(24, 80))
                 except Exception:
@@ -360,7 +364,7 @@ class SessionManager:
                 # Seed scrollback from tmux history
                 try:
                     cap_proc = await asyncio.create_subprocess_exec(
-                        "docker.exe", "exec", container,
+                        _DOCKER, "exec", container,
                         "tmux", "capture-pane", "-t", session_name, "-p", "-S", "-500",
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                     )
