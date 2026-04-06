@@ -19,6 +19,7 @@ from .startup import run_startup  # noqa: E402
 from .util_container import ensure_util_container  # noqa: E402
 from .sessions import SessionManager  # noqa: E402
 from .cards import ServiceCardRegistry, ClaudeUsageCard  # noqa: E402
+from claude_rts import cred_store  # noqa: E402
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
@@ -448,6 +449,81 @@ async def test_sessions_list(request: web.Request) -> web.Response:
     return web.json_response(mgr.list_sessions())
 
 
+async def credentials_list_handler(request: web.Request) -> web.Response:
+    """GET /api/credentials — list credentials ranked by burn rate."""
+    return web.json_response(cred_store.get_credentials_response())
+
+
+async def credentials_add_handler(request: web.Request) -> web.Response:
+    """POST /api/credentials — add a new credential."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    label = body.get("label", "").strip()
+    key = body.get("key", "").strip()
+    profile = body.get("profile") or None
+
+    if not label or not key:
+        return web.json_response({"error": "label and key are required"}, status=400)
+
+    try:
+        cred = cred_store.add_credential(label, key, profile)
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+
+    return web.json_response(cred, status=201)
+
+
+async def credentials_delete_handler(request: web.Request) -> web.Response:
+    """DELETE /api/credentials/{id} — remove a credential."""
+    cred_id = request.match_info["id"]
+    found = cred_store.delete_credential(cred_id)
+    if not found:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response({"deleted": cred_id})
+
+
+async def credentials_priority_get_handler(request: web.Request) -> web.Response:
+    """GET /api/credentials/priority — return the priority credential."""
+    cred = cred_store.get_priority()
+    if cred is None:
+        return web.json_response({"error": "no priority credential set"}, status=404)
+    return web.json_response(cred)
+
+
+async def credentials_priority_set_handler(request: web.Request) -> web.Response:
+    """PUT /api/credentials/priority — set the priority credential."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    cred_id = body.get("id", "").strip()
+    if not cred_id:
+        return web.json_response({"error": "id is required"}, status=400)
+
+    found = cred_store.set_priority(cred_id)
+    if not found:
+        return web.json_response({"error": "credential not found"}, status=404)
+    return web.json_response({"priority": cred_id})
+
+
+async def credentials_usage_update_handler(request: web.Request) -> web.Response:
+    """PUT /api/credentials/{id}/usage — update usage stats for a credential."""
+    cred_id = request.match_info["id"]
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    found = cred_store.update_credential_usage(cred_id, body)
+    if not found:
+        return web.json_response({"error": "credential not found"}, status=404)
+    return web.json_response({"updated": cred_id})
+
+
 def create_app(test_mode: bool = False) -> web.Application:
     app = web.Application()
     app["test_mode"] = test_mode
@@ -463,6 +539,14 @@ def create_app(test_mode: bool = False) -> web.Application:
     app.router.add_put("/api/canvases/{name}", canvas_put_handler)
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
     app.router.add_get("/api/widgets/system-info", widget_system_info_handler)
+
+    # Credential routes (priority routes must be before {id} wildcard routes)
+    app.router.add_get("/api/credentials", credentials_list_handler)
+    app.router.add_post("/api/credentials", credentials_add_handler)
+    app.router.add_get("/api/credentials/priority", credentials_priority_get_handler)
+    app.router.add_put("/api/credentials/priority", credentials_priority_set_handler)
+    app.router.add_delete("/api/credentials/{id}", credentials_delete_handler)
+    app.router.add_put("/api/credentials/{id}/usage", credentials_usage_update_handler)
 
     # Session routes (must be before /ws/{hub} catch-all)
     app.router.add_get("/api/sessions", sessions_list_handler)
@@ -519,6 +603,15 @@ def create_app(test_mode: bool = False) -> web.Application:
         util_cfg = config.get("util_container", {})
         util_name = util_cfg.get("name", "supreme-claudemander-util")
         probe_interval = config.get("probe_interval", 1800)
+
+        def _update_cred_usage(profile_name: str, result: dict) -> None:
+            """Update credential usage stats from a service card probe result."""
+            data = cred_store.read_credentials()
+            for cred in data.get("credentials", []):
+                if cred.get("profile") == profile_name:
+                    cred_store.update_credential_usage(cred["id"], result)
+                    break
+
         for profile in config.get("probe_profiles", []):
 
             def _log_usage(result, _p=profile):
@@ -530,11 +623,18 @@ def create_app(test_mode: bool = False) -> web.Application:
                     result.get("five_hour_resets"),
                 )
 
+            def _usage_callback(result, _p=profile):
+                _update_cred_usage(_p, result)
+
+            def _combined_callback(result, _log=_log_usage, _usage=_usage_callback):
+                _log(result)
+                _usage(result)
+
             try:
                 await registry.subscribe(
                     "claude-usage",
                     profile,
-                    _log_usage,
+                    _combined_callback,
                     container=util_name,
                     interval_seconds=probe_interval,
                 )

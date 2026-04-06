@@ -419,6 +419,126 @@
   .usage-status { color: #585b70; font-size: 11px; text-align: center; padding: 8px 0; }
 
 
+  /* ── Credential Manager widget ── */
+  .cred-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 10px;
+  }
+  .cred-empty {
+    color: #585b70;
+    font-size: 12px;
+    padding: 8px 0;
+    text-align: center;
+  }
+  .cred-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 6px;
+    border-radius: 4px;
+    background: #181825;
+    border: 1px solid #313244;
+    font-size: 12px;
+  }
+  .cred-row.cred-priority {
+    border-color: #f9e2af;
+    background: rgba(249, 226, 175, 0.06);
+  }
+  .cred-label {
+    font-weight: 600;
+    color: #cdd6f4;
+    min-width: 70px;
+    flex-shrink: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cred-hint {
+    color: #585b70;
+    font-family: monospace;
+    font-size: 11px;
+    min-width: 60px;
+    flex-shrink: 0;
+  }
+  .cred-burn-bar {
+    flex: 1;
+    height: 6px;
+    background: #313244;
+    border-radius: 3px;
+    overflow: hidden;
+    min-width: 40px;
+  }
+  .cred-burn-fill {
+    height: 100%;
+    background: #a6e3a1;
+    border-radius: 3px;
+    transition: width 0.3s ease;
+  }
+  .cred-burn-pct {
+    color: #a6adc8;
+    font-family: monospace;
+    font-size: 11px;
+    min-width: 32px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+  .cred-reset {
+    color: #585b70;
+    font-size: 11px;
+    min-width: 48px;
+    flex-shrink: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cred-btn-priority, .cred-btn-delete {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    padding: 0 2px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    line-height: 1;
+  }
+  .cred-btn-priority { color: #a6adc8; }
+  .cred-btn-priority:hover { color: #f9e2af; }
+  .cred-row.cred-priority .cred-btn-priority { color: #f9e2af; }
+  .cred-btn-delete { color: #585b70; }
+  .cred-btn-delete:hover { color: #f38ba8; }
+  .cred-add-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding-top: 8px;
+    border-top: 1px solid #313244;
+    margin-top: 4px;
+  }
+  .cred-add-form input {
+    background: #181825;
+    border: 1px solid #45475a;
+    color: #cdd6f4;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 12px;
+    flex: 1;
+    min-width: 80px;
+  }
+  .cred-add-form input:focus { outline: 1px solid #cba6f7; }
+  .cred-add-form button {
+    background: #313244;
+    border: 1px solid #45475a;
+    color: #cdd6f4;
+    border-radius: 4px;
+    padding: 4px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .cred-add-form button:hover { background: #45475a; }
+
   /* ── Control group badge ── */
   .control-group-badge {
     font-size: 10px;
@@ -1385,6 +1505,13 @@ class LoaderCard {
 }
 
 // ════════════════════════════════════════════
+// Utility helpers
+// ════════════════════════════════════════════
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ════════════════════════════════════════════
 // Widget registry
 // ════════════════════════════════════════════
 const WIDGET_REGISTRY = {
@@ -1411,6 +1538,107 @@ const WIDGET_REGISTRY = {
         card.updateState('working');
       } catch (err) {
         body.innerHTML = `<div class="widget-row"><span class="widget-label" style="color:#f38ba8">Error: ${err.message}</span></div>`;
+        card.updateState('dead');
+      }
+    },
+  },
+  'credential-manager': {
+    label: 'Credential Manager',
+    defaultRefreshInterval: 15000,
+    async render(body, card) {
+      try {
+        const resp = await fetch('/api/credentials');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        const creds = data.credentials || [];
+        const priorityId = data.priority;
+
+        let html = '<div class="cred-list">';
+
+        if (creds.length === 0) {
+          html += '<div class="cred-empty">No credentials stored. Add one below.</div>';
+        }
+
+        for (const c of creds) {
+          const isPriority = c.id === priorityId;
+          const burnPct = c.five_hour_pct != null ? Math.min(100, Math.round(c.five_hour_pct)) : null;
+          const burnDisplay = burnPct != null ? `${burnPct}%` : '—';
+          const resetDisplay = c.five_hour_resets || '—';
+          const priorityClass = isPriority ? ' cred-priority' : '';
+
+          html += `
+            <div class="cred-row${priorityClass}" data-id="${escapeHtml(String(c.id))}">
+              <div class="cred-label">${escapeHtml(c.label)}</div>
+              <div class="cred-hint">${escapeHtml(c.key_hint || '')}</div>
+              <div class="cred-burn-bar"><div class="cred-burn-fill" style="width:${burnPct ?? 0}%"></div></div>
+              <div class="cred-burn-pct">${burnDisplay}</div>
+              <div class="cred-reset">${escapeHtml(resetDisplay)}</div>
+              <button class="cred-btn-priority" data-id="${escapeHtml(String(c.id))}">${isPriority ? '★' : '☆'}</button>
+              <button class="cred-btn-delete" data-id="${escapeHtml(String(c.id))}">✕</button>
+            </div>`;
+        }
+
+        html += `</div>
+          <form class="cred-add-form" id="cred-add-form-${card.id}">
+            <input type="text" name="label" placeholder="Label" required />
+            <input type="password" name="key" placeholder="API Key" required />
+            <input type="text" name="profile" placeholder="Profile (optional)" />
+            <button type="submit">Add</button>
+          </form>`;
+
+        body.innerHTML = html;
+
+        // Wire up delete buttons
+        body.querySelectorAll('.cred-btn-delete').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const id = btn.dataset.id;
+            await fetch(`/api/credentials/${encodeURIComponent(id)}`, { method: 'DELETE' });
+            card.render();
+          });
+        });
+
+        // Wire up priority buttons
+        body.querySelectorAll('.cred-btn-priority').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const id = btn.dataset.id;
+            await fetch('/api/credentials/priority', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id }),
+            });
+            card.render();
+          });
+        });
+
+        // Wire up add form
+        const form = body.querySelector(`#cred-add-form-${card.id}`);
+        if (form) {
+          form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const fd = new FormData(form);
+            const payload = {
+              label: fd.get('label'),
+              key: fd.get('key'),
+              profile: fd.get('profile') || null,
+            };
+            const r = await fetch('/api/credentials', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+            });
+            if (r.ok) {
+              form.reset();
+              card.render();
+            } else {
+              const err = await r.json();
+              alert(`Error: ${err.error || 'Failed to add credential'}`);
+            }
+          });
+        }
+
+        card.updateState('working');
+      } catch (err) {
+        body.innerHTML = `<div class="widget-error">Error: ${escapeHtml(err.message)}</div>`;
         card.updateState('dead');
       }
     },

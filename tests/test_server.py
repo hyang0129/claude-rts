@@ -91,3 +91,7 @@ async def test_app_has_all_routes(app):
     assert "/api/widgets/system-info" in routes
     assert "/ws/exec" in routes
     assert "/ws/{hub}" in routes
+    assert "/api/credentials" in routes
+    assert "/api/credentials/priority" in routes
+    assert "/api/credentials/{id}" in routes
+    assert "/api/credentials/{id}/usage" in routes
