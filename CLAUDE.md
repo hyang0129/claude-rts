@@ -2,6 +2,16 @@
 
 RTS-style terminal canvas — a web-based multiplexer where devcontainer shells live as draggable, resizable cards on a pannable/zoomable 4K canvas.
 
+## Server Rule
+
+**Never run more than one server instance at a time.** Before starting a server, kill any existing one:
+
+```bash
+netstat -ano | grep "LISTENING" | grep -E ":300[0-9] " | awk '{print $NF}' | sort -u | while read pid; do taskkill //F //PID $pid 2>/dev/null; done
+```
+
+Verify the port is free before starting. Running multiple instances causes port conflicts, confusing log output, and stale probe sessions that are hard to attribute to the right run.
+
 ## Quick Start
 
 ```bash
@@ -142,6 +152,10 @@ Stored in `~/.supreme-claudemander/config.json`. Key fields:
 ```
 
 Canvas layouts stored in `~/.supreme-claudemander/canvases/{name}.json`.
+
+## Usage Probe
+
+**The `credential-manager` WidgetCard is the sole probe initiator.** There is no backend probe. See [docs/feature-testing-guide.md](docs/feature-testing-guide.md) (Probing Rule section) and [docs/cards-and-canvas.md](docs/cards-and-canvas.md) (Probe Debug Canvas section).
 
 ## Roadmap
 

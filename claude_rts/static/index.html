@@ -1539,10 +1539,11 @@ const WIDGET_REGISTRY = {
     label: 'Credential Manager',
     defaultRefreshInterval: 60000,
 
-    // ── Probe a single profile via a headless WebSocket session ──────────────
+    // ── Probe a single profile via a headed WebSocket session ────────────────
     // Opens /ws/session/new with the claude-usage command (no container= so
-    // tmux-wrapping is skipped), buffers terminal output until the process
-    // exits, strips ANSI, extracts JSON, and POSTs to probe-result.
+    // tmux-wrapping is skipped). xterm.js IS the terminal — it responds to the
+    // capability queries claude-usage sends on startup. Buffers output until
+    // the process exits, strips ANSI, extracts JSON, POSTs to probe-result.
     async probeOne(name, utilContainerName, statusEl) {
       const cmd = `docker.exe exec -it ${utilContainerName} claude-usage --claude-dir /profiles/${name} --json`;
       const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1597,6 +1598,7 @@ const WIDGET_REGISTRY = {
     async render(body, card) {
       const ts = () => new Date().toLocaleTimeString();
       const self = WIDGET_REGISTRY['credential-manager'];
+      if (!card._probingProfiles) card._probingProfiles = new Set();
 
       function burnColor(cls) {
         if (cls === 'overburning') return '#f38ba8';
@@ -1659,7 +1661,7 @@ const WIDGET_REGISTRY = {
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         const credentials = data.credentials || [];
-        const maxDataAge = data.max_data_age || 300;
+        const maxDataAge = data.max_data_age || 900;
         const utilContainerName = data.util_container_name || 'supreme-claudemander-util';
 
         if (credentials.length === 0) {
@@ -1702,8 +1704,9 @@ const WIDGET_REGISTRY = {
             html += `<span class="cred-name" title="${cred.name}">${cred.name}</span>`;
             html += `<div class="cred-bar-wrap">`;
             if (noData) {
+              const isAutoProbing = card._probingProfiles.has(cred.name);
               html += `<div class="cred-burn-bar"><div class="cred-burn-bar-fill" style="width:0%;background:#585b70"></div></div>`;
-              html += `<div class="cred-stats"><span style="color:#585b70">no data — click to probe</span></div>`;
+              html += `<div class="cred-stats"><span style="color:#585b70">${isAutoProbing ? 'probing…' : 'no data'}</span></div>`;
             } else {
               html += renderBurnBar(pct, statusCls);
               html += `<div class="cred-stats"><span>${burnRateStr}</span><span>${resetStr}</span></div>`;
@@ -1711,9 +1714,6 @@ const WIDGET_REGISTRY = {
             html += `</div>`;
             if (ago) html += `<span class="${agoClass}">${ago}</span>`;
             html += `</div>`;
-            if (tooStale) {
-              html += `<div class="cred-stale-banner">⚠ Usage data is ${Math.floor(dataAge / 60)}m old — click row to re-probe.</div>`;
-            }
             html += `<div class="cred-detail" id="cred-detail-${safeId}" style="display:none">`;
             html += buildDetailHtml(cred, statusCls);
             html += `</div>`;
@@ -1812,7 +1812,7 @@ const WIDGET_REGISTRY = {
                 addBtn.disabled = false; addBtn.textContent = 'Add';
                 return;
               }
-              if (footerMsg) { footerMsg.style.display = ''; footerMsg.style.color = '#a6e3a1'; footerMsg.textContent = `Profile "${name}" created — run a probe to load usage data.`; }
+              if (footerMsg) { footerMsg.style.display = ''; footerMsg.style.color = '#a6e3a1'; footerMsg.textContent = `Profile "${name}" created — probing automatically.`; }
               await self.render(body, card);
             } catch (err) {
               if (footerMsg) { footerMsg.style.display = ''; footerMsg.style.color = '#f38ba8'; footerMsg.textContent = `Error: ${err.message}`; }
@@ -1820,6 +1820,24 @@ const WIDGET_REGISTRY = {
             }
           });
           nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') addBtn.click(); });
+        }
+
+        // Auto-probe: fire probes for profiles with no data or stale data (>15 min).
+        // The service card is the sole probe initiator — no other card ever calls probeOne().
+        // Probes are fire-and-forget; guard with card._probingProfiles to prevent re-entrant probes.
+        const AUTO_PROBE_STALE_SEC = 15 * 60;
+        const nowForProbe = Date.now() / 1000;
+        const toProbe = credentials.filter(cred =>
+          !card._probingProfiles.has(cred.name) &&
+          (cred.data_timestamp == null || (nowForProbe - cred.data_timestamp) > AUTO_PROBE_STALE_SEC)
+        );
+        for (const cred of toProbe) {
+          card._probingProfiles.add(cred.name);
+          (async () => {
+            await self.probeOne(cred.name, utilContainerName, probeStatusEl);
+            card._probingProfiles.delete(cred.name);
+            await self.render(body, card);
+          })();
         }
 
       } catch (err) {
