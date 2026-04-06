@@ -18,7 +18,7 @@ from .discovery import discover_hubs  # noqa: E402
 from .startup import run_startup  # noqa: E402
 from .util_container import ensure_util_container  # noqa: E402
 from .sessions import SessionManager  # noqa: E402
-from .cards import ServiceCardRegistry  # noqa: E402
+from .cards import ServiceCardRegistry, ClaudeUsageCard  # noqa: E402
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
@@ -494,6 +494,7 @@ def create_app(test_mode: bool = False) -> web.Application:
         )
         app["session_manager"] = mgr
         registry = ServiceCardRegistry(session_manager=mgr)
+        registry.register_type("claude-usage", ClaudeUsageCard)
         app["service_card_registry"] = registry
         mgr.start_orphan_reaper()
 
@@ -513,6 +514,27 @@ def create_app(test_mode: bool = False) -> web.Application:
             await ensure_util_container()
         except Exception:
             logger.warning("Failed to start utility container (non-fatal)")
+
+        # Start claude-usage probes after util container is ready
+        util_cfg = config.get("util_container", {})
+        util_name = util_cfg.get("name", "supreme-claudemander-util")
+        probe_interval = config.get("probe_interval", 1800)
+        for profile in config.get("probe_profiles", []):
+            def _log_usage(result, _p=profile):
+                logger.info(
+                    "claude-usage [{}]: 5hr={}% burn={}/hr resets={}",
+                    _p,
+                    result.get("five_hour_pct"),
+                    result.get("burn_rate"),
+                    result.get("five_hour_resets"),
+                )
+            try:
+                await registry.subscribe(
+                    "claude-usage", profile, _log_usage,
+                    container=util_name, interval_seconds=probe_interval,
+                )
+            except Exception:
+                logger.exception("Failed to start claude-usage probe for profile '{}'", profile)
 
     async def on_shutdown(app: web.Application) -> None:
         if "service_card_registry" in app:

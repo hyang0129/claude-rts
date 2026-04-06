@@ -1,0 +1,26 @@
+{
+  "name": "m6-qa",
+  "canvas_size": [3840, 2160],
+  "cards": [
+    {
+      "hub": "rts-test-a",
+      "container": "rts-test-a",
+      "x": 80,
+      "y": 300,
+      "w": 1720,
+      "h": 960,
+      "type": "terminal",
+      "exec": "docker.exe exec -it rts-test-a bash"
+    },
+    {
+      "hub": "rts-test-b",
+      "container": "rts-test-b",
+      "x": 1880,
+      "y": 300,
+      "w": 1720,
+      "h": 960,
+      "type": "terminal",
+      "exec": "docker.exe exec -it rts-test-b bash"
+    }
+  ]
+}

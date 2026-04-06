@@ -23,6 +23,7 @@ class ServiceCard(BaseCard):
         session_manager,  # SessionManager — typed loosely to avoid circular import
         container: str | None = None,
         probe_timeout: float = 60.0,
+        interval_seconds: int = 900,
         card_id: str | None = None,
     ):
         super().__init__(card_id=card_id)
@@ -34,7 +35,7 @@ class ServiceCard(BaseCard):
         self._probe_task: asyncio.Task | None = None
         self._pending_tasks: set[asyncio.Task] = set()
         self._last_result: dict | None = None
-        self._interval_seconds: int = 900
+        self._interval_seconds: int = interval_seconds
 
     @abc.abstractmethod
     def probe_command(self) -> str:
@@ -75,7 +76,7 @@ class ServiceCard(BaseCard):
             session = self._session_manager.create_session(
                 cmd,
                 hub=None,
-                container=self._container,
+                container=None,  # Probes are one-shot; bypass tmux wrapping
             )
         except Exception:
             logger.exception("ServiceCard {}/{}: failed to create session", self.card_type, self.identity)
@@ -125,9 +126,8 @@ class ServiceCard(BaseCard):
             except Exception:
                 logger.exception("ServiceCard {}/{}: subscriber callback raised", self.card_type, self.identity)
 
-    async def start(self, interval_seconds: int = 900) -> None:
+    async def start(self) -> None:
         """Run an initial probe immediately, then start the periodic probe loop."""
-        self._interval_seconds = interval_seconds
         # Run initial probe
         await self.run_probe()
         # Start periodic loop
@@ -158,4 +158,13 @@ class ServiceCard(BaseCard):
             except asyncio.CancelledError:
                 pass
         self._probe_task = None
+        # Cancel any in-flight subscriber notification tasks
+        for task in list(self._pending_tasks):
+            task.cancel()
+        for task in list(self._pending_tasks):
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._pending_tasks.clear()
         logger.info("ServiceCard {}/{}: stopped", self.card_type, self.identity)
