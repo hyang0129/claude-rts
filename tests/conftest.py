@@ -2,7 +2,7 @@
 
 Plain classes (not fixtures) so that test files can import them directly:
 
-    from conftest import ProbeCard, MockScrollback, MockSession, MockSessionManager
+    from tests.conftest import ProbeCard, MockScrollback, MockSession, MockSessionManager
 """
 
 from claude_rts.cards.service_card import ServiceCard

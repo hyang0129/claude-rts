@@ -1,7 +1,6 @@
 """Tests for ServiceCard: run_probe, subscriber notifications, start/stop lifecycle."""
 
 import asyncio
-import pytest
 
 from claude_rts.cards.service_card import ServiceCard
 from tests.conftest import ProbeCard, MockSession, MockSessionManager

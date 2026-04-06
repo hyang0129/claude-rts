@@ -1,6 +1,5 @@
 """Tests for ServiceCardRegistry: subscribe-or-reuse semantics, auto-stop, stop_all."""
 
-import asyncio
 import pytest
 
 from claude_rts.cards.registry import ServiceCardRegistry
@@ -49,6 +48,8 @@ async def test_subscribe_reuse():
 
     assert card_a is card_b
     assert card_a.subscriber_count == 2
+    # The second subscribe should immediately deliver the cached last_result to calls_b.
+    assert len(calls_b) >= 1
 
     await registry.stop_all()
 

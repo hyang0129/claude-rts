@@ -50,7 +50,9 @@ class ServiceCardRegistry:
                     ret = callback(card.last_result)
                     if inspect.isawaitable(ret):
                         import asyncio
-                        asyncio.create_task(ret)
+                        task = asyncio.create_task(ret)
+                        card._pending_tasks.add(task)
+                        task.add_done_callback(card._pending_tasks.discard)
                 except Exception:
                     logger.exception("ServiceCardRegistry: immediate last_result delivery to new subscriber raised")
             return card
