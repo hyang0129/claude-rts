@@ -641,30 +641,29 @@ const CARD_H = 480;
 const CARD_GAP = 40;
 
 // Snapping
-const SNAP_GRID = 20;      // matches the background minor grid
-const SNAP_EDGE = 14;      // px threshold for card-edge snapping (canvas coords)
+const SNAP_GRID = 20;  // matches the background minor grid
+const SNAP_EDGE = 14;  // px threshold for card-edge snapping (canvas coords)
 
 function snapGrid(v) { return Math.round(v / SNAP_GRID) * SNAP_GRID; }
 
-// Edge-only snap — smooth drag until close to another card's edge
+function snapAxis(pos, size, lo, hi) {
+  if (Math.abs(pos - hi) < SNAP_EDGE)          return hi;
+  if (Math.abs(pos + size - lo) < SNAP_EDGE)   return lo - size;
+  if (Math.abs(pos - lo) < SNAP_EDGE)          return lo;
+  if (Math.abs(pos + size - hi) < SNAP_EDGE)   return hi - size;
+  return pos;
+}
+
 function snapEdges(x, y, w, h, excludeId) {
   let sx = x, sy = y;
   for (const card of cards.values()) {
     if (card.id === excludeId) continue;
-    const cx = card.x, cy = card.y, cw = card.w, ch = card.h;
-    if (Math.abs(x - (cx + cw)) < SNAP_EDGE)      sx = cx + cw;
-    else if (Math.abs((x + w) - cx) < SNAP_EDGE)  sx = cx - w;
-    else if (Math.abs(x - cx) < SNAP_EDGE)         sx = cx;
-    else if (Math.abs((x + w) - (cx + cw)) < SNAP_EDGE) sx = cx + cw - w;
-    if (Math.abs(y - (cy + ch)) < SNAP_EDGE)       sy = cy + ch;
-    else if (Math.abs((y + h) - cy) < SNAP_EDGE)   sy = cy - h;
-    else if (Math.abs(y - cy) < SNAP_EDGE)          sy = cy;
-    else if (Math.abs((y + h) - (cy + ch)) < SNAP_EDGE) sy = cy + ch - h;
+    sx = snapAxis(x, w, card.x, card.x + card.w);
+    sy = snapAxis(y, h, card.y, card.y + card.h);
   }
   return [sx, sy];
 }
 
-// Grid + edge snap applied on drop
 function snapPos(x, y, w, h, excludeId) {
   const [ex, ey] = snapEdges(x, y, w, h, excludeId);
   return [snapGrid(ex), snapGrid(ey)];
@@ -1146,7 +1145,6 @@ class Card {
     const onUp = () => {
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
-      // Snap to grid on release
       [this.x, this.y] = snapPos(this.x, this.y, this.w, this.h, this.id);
       this.el.style.left = this.x + 'px';
       this.el.style.top = this.y + 'px';
