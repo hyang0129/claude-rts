@@ -18,6 +18,7 @@ from .discovery import discover_hubs  # noqa: E402
 from .startup import run_startup  # noqa: E402
 from .util_container import ensure_util_container  # noqa: E402
 from .sessions import SessionManager  # noqa: E402
+from .cards import ServiceCardRegistry  # noqa: E402
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
@@ -492,6 +493,8 @@ def create_app(test_mode: bool = False) -> web.Application:
             tmux_enabled=session_config.get("tmux_persistence", True),
         )
         app["session_manager"] = mgr
+        registry = ServiceCardRegistry(session_manager=mgr)
+        app["service_card_registry"] = registry
         mgr.start_orphan_reaper()
 
         # Probe tmux availability and recover existing sessions
@@ -512,6 +515,8 @@ def create_app(test_mode: bool = False) -> web.Application:
             logger.warning("Failed to start utility container (non-fatal)")
 
     async def on_shutdown(app: web.Application) -> None:
+        if "service_card_registry" in app:
+            await app["service_card_registry"].stop_all()
         if "session_manager" in app:
             app["session_manager"].stop_all()
 
