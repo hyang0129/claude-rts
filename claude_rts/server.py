@@ -18,7 +18,7 @@ from .config import read_config, write_config, list_canvases, read_canvas, write
 from .profile_manager import CredentialManager
 from .discovery import discover_hubs
 from .startup import run_startup
-from .util_container import ensure_util_container, is_util_running, list_profiles, probe_usage_via_session
+from .util_container import ensure_util_container, is_util_running, list_profiles
 from .sessions import SessionManager
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
@@ -213,45 +213,15 @@ async def widget_system_info_handler(request: web.Request) -> web.Response:
 
 # ── Claude usage widget ──────────────────────────────────────────────────────
 
-# Cache: {profile_name: {data: {...}, timestamp: float}}
-_usage_cache: dict[str, dict] = {}
-_USAGE_CACHE_TTL = 3600      # 1 hour — usage endpoint is rate-limited
-_USAGE_PROBE_INTERVAL = 1800  # background probe every 30 minutes
-
-
-async def _usage_probe_loop(app: web.Application) -> None:
-    """Background task: probe all profiles every 30 minutes."""
-    await asyncio.sleep(5)  # stagger so startup isn't blocked
-    while True:
-        try:
-            mgr: SessionManager = app["session_manager"]
-            if await is_util_running():
-                profiles = await list_profiles()
-                now = time.monotonic()
-                for profile in profiles:
-                    try:
-                        usage = await probe_usage_via_session(profile, mgr)
-                        if usage:
-                            _usage_cache[profile] = {"data": usage, "timestamp": now}
-                            logger.info("Background probe updated cache for profile '{}'", profile)
-                        else:
-                            logger.warning("Background probe returned no data for profile '{}'", profile)
-                    except Exception:
-                        logger.exception("Background probe failed for profile '{}'", profile)
-        except Exception:
-            logger.exception("Usage probe loop error")
-        await asyncio.sleep(_USAGE_PROBE_INTERVAL)
-
-
 async def widget_claude_usage_handler(request: web.Request) -> web.Response:
     """Return Claude usage data for all profiles.
 
-    Cache is populated by a background probe loop every 30 minutes.
-    Cached data is served for up to 1 hour (rate-limited usage endpoint).
-    On cache miss or force refresh, probes on-demand via ConPTY session.
-    """
-    force = request.query.get("force", "").lower() in ("1", "true")
+    Data is populated exclusively by the frontend credential-manager widget, which
+    runs claude-usage inside the utility container via a headed xterm.js WebSocket
+    session and POSTs the parsed JSON to /api/credentials/{name}/probe-result.
 
+    This endpoint never probes directly — it only reads from CredentialManager cache.
+    """
     if not await is_util_running():
         return web.json_response({
             "status": "error",
@@ -267,26 +237,21 @@ async def widget_claude_usage_handler(request: web.Request) -> web.Response:
             "message": "No profiles found in /profiles/. Mount ~/.claude-profiles/ to the utility container.",
         })
 
-    now = time.monotonic()
-    mgr: SessionManager = request.app["session_manager"]
+    cred_mgr: CredentialManager = request.app["credential_manager"]
     results = []
-
     for profile in profiles:
-        cached = _usage_cache.get(profile)
-        if cached and not force and (now - cached["timestamp"]) < _USAGE_CACHE_TTL:
-            results.append({"profile": profile, **cached["data"], "cached": True})
-            continue
-
-        # Cache miss or force refresh — probe now (background loop normally handles this)
-        usage = await probe_usage_via_session(profile, mgr)
-        if usage:
-            _usage_cache[profile] = {"data": usage, "timestamp": now}
-            results.append({"profile": profile, **usage, "cached": False})
-        elif cached:
-            # Return stale data rather than an error
-            results.append({"profile": profile, **cached["data"], "cached": True, "stale": True})
+        state = cred_mgr.get(profile)
+        if state:
+            results.append({
+                "profile": profile,
+                "five_hour_pct": state.usage_5hr_pct,
+                "five_hour_resets": state.five_hour_resets,
+                "seven_day_pct": state.usage_daily_pct,
+                "seven_day_resets": state.seven_day_resets,
+                "cached": state.data_timestamp is not None,
+            })
         else:
-            results.append({"profile": profile, "error": "probe failed", "cached": False})
+            results.append({"profile": profile, "cached": False})
 
     return web.json_response({"status": "ok", "profiles": results})
 
@@ -739,18 +704,10 @@ def create_app(test_mode: bool = False) -> web.Application:
         except Exception:
             logger.warning("Failed to start utility container (non-fatal)")
 
-        app["usage_probe_task"] = asyncio.create_task(_usage_probe_loop(app))
-
         cred_mgr = CredentialManager()
         app["credential_manager"] = cred_mgr
 
     async def on_shutdown(app: web.Application) -> None:
-        if "usage_probe_task" in app:
-            app["usage_probe_task"].cancel()
-            try:
-                await app["usage_probe_task"]
-            except asyncio.CancelledError:
-                pass
         if "session_manager" in app:
             app["session_manager"].stop_all()
 

@@ -234,121 +234,12 @@ async def list_profiles() -> list[str]:
     cfg = _get_config()
     # Only return subdirs that contain .credentials.json (actual profiles)
     rc, stdout, _ = await _run(
-        f'docker.exe exec {cfg["name"]} bash -c "for d in /profiles/*/; do [ -f \\"$d/.credentials.json\\" ] && basename \\"$d\\"; done"',
+        f'docker.exe exec {cfg["name"]} bash -c "for d in /profiles/*/; do [ -f \\"$d/.credentials.json\\" ] && basename \\"$d\\"; done; exit 0"',
         timeout=10,
     )
     if rc != 0:
         return []
     return [name.strip() for name in stdout.split("\n") if name.strip()]
-
-
-async def probe_usage(claude_dir: str, timeout: float = 60) -> dict | None:
-    """Run claude-usage inside the utility container for a specific config dir.
-
-    Uses `script -qc` to provide a PTY (required by claude-usage-plz/pexpect).
-    Returns parsed JSON dict or None on failure.
-    """
-    cfg = _get_config()
-
-    if not await is_util_running():
-        return None
-
-    # Write a temp probe script to disk, docker cp it in, then execute.
-    # This avoids Windows -> docker -> bash quoting nightmares.
-    inner_timeout = max(timeout - 5, 10)
-    import tempfile
-    script_content = f"#!/bin/bash\nscript -qc 'timeout {inner_timeout} claude-usage --claude-dir {claude_dir} --json' /dev/null 2>/dev/null\n"
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False, newline='\n') as f:
-        f.write(script_content)
-        tmp_path = f.name
-    try:
-        await _run(f'docker.exe cp "{tmp_path}" {cfg["name"]}:/tmp/_probe.sh', timeout=5)
-        cmd = f'docker.exe exec {cfg["name"]} bash /tmp/_probe.sh'
-    finally:
-        import os
-        os.unlink(tmp_path)
-    logger.debug("probe_usage: {}", cmd)
-    rc, stdout, stderr = await _run(cmd, timeout=timeout)
-
-    if rc != 0:
-        logger.warning("claude-usage probe failed for {} (rc={}): {}", claude_dir, rc, stderr[:200] if stderr else "")
-        return None
-
-    clean = stdout.replace('\r', '').strip()
-    json_start = clean.find('{')
-    json_end = clean.rfind('}')
-    if json_start < 0 or json_end <= json_start:
-        logger.warning("No JSON found in probe output for {}: {}", claude_dir, clean[:200])
-        return None
-
-    try:
-        return json.loads(clean[json_start:json_end + 1])
-    except json.JSONDecodeError as exc:
-        logger.warning("claude-usage returned invalid JSON for {}: {}", claude_dir, exc)
-        return None
-
-
-_ANSI_ESCAPE = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-
-
-def parse_json_from_output(output: str) -> dict | None:
-    """Extract and parse a JSON object from raw PTY/ANSI output."""
-    clean = _ANSI_ESCAPE.sub('', output).replace('\r', '').strip()
-    json_start = clean.find('{')
-    json_end = clean.rfind('}')
-    if json_start < 0 or json_end <= json_start:
-        return None
-    try:
-        return json.loads(clean[json_start:json_end + 1])
-    except json.JSONDecodeError:
-        return None
-
-
-async def probe_usage_via_session(
-    name: str,
-    session_mgr,
-    container_name: str | None = None,
-    timeout: float = 90,
-) -> dict | None:
-    """Run claude-usage inside the utility container via a real ConPTY session.
-
-    Uses SessionManager.create_session() without a container= argument so that
-    tmux-wrapping is NOT triggered — the full docker exec command is passed
-    directly, giving pexpect the genuine Windows ConPTY it requires.
-
-    Each probe takes 30-60s; the background probe loop staggers calls.
-    """
-    if container_name is None:
-        cfg = _get_config()
-        container_name = cfg["name"]
-
-    cmd = f'docker.exe exec -it {container_name} claude-usage --claude-dir /profiles/{name} --json'
-    logger.info("probe_usage_via_session: name={} container={}", name, container_name)
-
-    try:
-        session = session_mgr.create_session(cmd)
-    except Exception as exc:
-        logger.error("probe_usage_via_session: failed to create session for {}: {}", name, exc)
-        return None
-
-    try:
-        deadline = time.monotonic() + timeout
-        while session.alive and time.monotonic() < deadline:
-            await asyncio.sleep(1)
-
-        if time.monotonic() >= deadline:
-            logger.warning("probe_usage_via_session: timed out after {}s for name={}", timeout, name)
-
-        output = session.scrollback.get_all().decode("utf-8", errors="replace")
-        result = parse_json_from_output(output)
-        if result is None:
-            logger.warning(
-                "probe_usage_via_session: no JSON found for name={}; raw={!r}",
-                name, output[:200],
-            )
-        return result
-    finally:
-        session_mgr.destroy_session(session.session_id)
 
 
 async def health_check_profile(name: str) -> bool:
