@@ -5,3 +5,6 @@ dist/
 build/
 .venv/
 supreme-claudemander.log
+claude-rts.log
+claude-usage-debug.log
+uv.lock
