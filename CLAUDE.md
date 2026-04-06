@@ -29,7 +29,7 @@ python -m claude_rts --test-mode              # enable test puppeting API
 - **Terminal bridge**: WebSocket → SessionManager → pywinpty ConPTY → docker exec
 - **Session persistence**: PTY sessions survive browser refresh; scrollback ring buffer for replay
 - **Container discovery**: `docker.exe ps` with devcontainer label filtering
-- **Utility container**: Lightweight Linux container for ops tasks (claude-usage probing, etc.)
+- **Utility container**: Lightweight Linux container for ops tasks
 
 ## File Structure
 
@@ -44,7 +44,6 @@ claude_rts/
   startup.py           # Pluggable startup scripts (discover-devcontainers, custom)
   util_container.py    # Manage the supreme-claudemander-util container (build, start, exec)
   Dockerfile.util      # Utility container image (Python + Node.js + claude CLI)
-  probe_loop.sh        # Background usage probe script for utility container
   static/
     index.html         # Entire frontend (JS/CSS inline, ~2400 lines)
 ```
@@ -68,7 +67,7 @@ claude_rts/
 ### Testing
 
 ```bash
-# Run all tests (72 tests)
+# Run all tests (137 tests)
 python -m pytest tests/ -v
 
 # Run specific test file
@@ -85,12 +84,13 @@ CLAUDE_RTS_TEST_MODE=1 python -m claude_rts
 | File | Tests | What it covers |
 |------|-------|----------------|
 | `test_discovery.py` | 6 | Docker hub discovery parsing |
-| `test_server.py` | 9 | HTTP routes, widget endpoints, route registration |
+| `test_server.py` | 7 | HTTP routes, widget endpoints, route registration |
 | `test_main.py` | 4 | CLI argument handling |
 | `test_config.py` | 23 | Config CRUD, canvas CRUD, API endpoints |
 | `test_startup.py` | 7 | Startup scripts, API endpoint |
-| `test_util_container.py` | 6 | Claude-usage widget API, util container status |
-| `test_sessions.py` | 19 | ScrollbackBuffer, SessionManager, test puppeting API |
+| `test_sessions.py` | 30 | ScrollbackBuffer, SessionManager, test puppeting API |
+| `test_server_credentials.py` | 25 | Credential CRUD, probe-result ingest, auth endpoints |
+| `test_profile_manager.py` | 35 | CredentialState, burn rate, CredentialManager cache |
 
 #### Test puppeting API
 
@@ -126,7 +126,6 @@ Terminal data (stdout bytes) is intentionally NOT logged.
 | GET/PUT/DELETE | `/api/canvases/{name}` | Canvas layout CRUD |
 | GET | `/api/sessions` | List active sessions |
 | GET | `/api/widgets/system-info` | System info widget data |
-| GET | `/api/widgets/claude-usage` | Claude usage per profile |
 | WS | `/ws/session/new?cmd=...` | Create persistent session |
 | WS | `/ws/session/{session_id}` | Reconnect to existing session |
 | WS | `/ws/exec?cmd=...` | Legacy: one-shot exec (no persistence) |

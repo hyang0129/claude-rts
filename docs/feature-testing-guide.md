@@ -187,7 +187,6 @@ credential-manager widget (frontend)
   → claude-usage runs, outputs JSON
   → frontend parses JSON, POSTs to /api/credentials/{name}/probe-result
   → CredentialManager stores result
-  → GET /api/widgets/claude-usage reads from CredentialManager cache
 ```
 
 This applies everywhere — QA scripts, agent automation, test fixtures. If you need probe data in a test context, render the credential-manager widget or call `POST /api/credentials/{name}/probe-result` directly with fixture data. Never call `probe_usage` or `probe_usage_via_session` — those functions have been removed.

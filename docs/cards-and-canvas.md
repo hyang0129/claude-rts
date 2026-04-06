@@ -125,7 +125,7 @@ The `probe-debug` canvas is the **canonical minimal environment for troubleshoot
 
 - Usage probe returns stale or incorrect data
 - `claude-usage` output not parsing correctly
-- Background probe loop not firing
+- Auto-probe not triggering (15-minute stale threshold)
 - Burn rate calculations look wrong
 - Any issue where you need to watch the probe cycle in isolation
 

@@ -1472,69 +1472,6 @@ const WIDGET_REGISTRY = {
       }
     },
   },
-  'claude-usage': {
-    label: 'Claude Usage',
-    defaultRefreshInterval: 60000,
-    async render(body, card) {
-      function usageColor(pct) {
-        if (pct == null) return '#585b70';
-        if (pct < 50) return '#a6e3a1';
-        if (pct < 80) return '#f9e2af';
-        return '#f38ba8';
-      }
-      function renderBar(pct) {
-        const color = usageColor(pct);
-        const width = pct != null ? Math.min(100, Math.max(0, pct)) : 0;
-        return `<div class="usage-bar-container"><div class="usage-bar" style="width:${width}%;background:${color}"></div></div>`;
-      }
-      function renderMetric(label, pct, resets) {
-        const pctStr = pct != null ? `${pct}%` : 'N/A';
-        const resetStr = resets ? `<span class="usage-reset">resets ${resets}</span>` : '';
-        return `<div class="usage-metric"><span class="usage-metric-label">${label}</span><span class="usage-metric-value">${pctStr}</span></div>${renderBar(pct)}${resetStr ? `<div style="text-align:right">${resetStr}</div>` : ''}`;
-      }
-      const ts = () => new Date().toLocaleTimeString();
-      try {
-        body.innerHTML = `<div class="usage-status">Fetching usage data... (${ts()})</div>`;
-        card.updateState('connecting');
-        const resp = await fetch('/api/widgets/claude-usage');
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
-        if (data.status === 'error') {
-          body.innerHTML = `<div class="usage-status" style="color:#f38ba8">${data.error}</div><div class="usage-status">${ts()}</div>`;
-          card.updateState('dead');
-          return;
-        }
-        if (!data.profiles || data.profiles.length === 0) {
-          body.innerHTML = `<div class="usage-status">${data.message || 'No profiles found.'}<br><br>Mount ~/.claude-profiles/ to the utility container.</div><div class="usage-status">${ts()}</div>`;
-          card.updateState('idle');
-          return;
-        }
-        let html = '';
-        for (const p of data.profiles) {
-          html += `<div class="usage-profile">`;
-          html += `<div class="usage-profile-name">${p.profile}${p.cached ? ' <span class="usage-reset">(cached)</span>' : ''}</div>`;
-          if (p.error) {
-            html += `<div class="usage-metric"><span class="usage-metric-label" style="color:#f38ba8">${p.error}</span></div>`;
-          } else {
-            html += renderMetric('5h window', p.five_hour_pct, p.five_hour_resets);
-            html += renderMetric('7d window', p.seven_day_pct, p.seven_day_resets);
-            if (p.sonnet_week_pct != null) {
-              html += renderMetric('Sonnet weekly', p.sonnet_week_pct, p.sonnet_week_resets);
-            }
-          }
-          html += `</div>`;
-        }
-        html += `<div class="usage-status">Last updated: ${ts()}</div>`;
-        html += `<button class="usage-refresh-btn" onclick="this.closest('[data-card-id]')||void 0;fetch('/api/widgets/claude-usage?force=1').then(()=>{const c=cards.find(c=>c.widgetType==='claude-usage');if(c)c.render();})">Refresh now</button>`;
-        body.innerHTML = html;
-        card.updateState('working');
-      } catch (err) {
-        body.innerHTML = `<div class="widget-row"><span class="widget-label" style="color:#f38ba8">Error: ${err.message}</span></div><div class="usage-status">${ts()}</div>`;
-        card.updateState('dead');
-      }
-    },
-  },
-
   'credential-manager': {
     label: 'Credential Manager',
     defaultRefreshInterval: 60000,
