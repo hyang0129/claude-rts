@@ -15,7 +15,7 @@ CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"
 DEFAULT_CREDENTIALS: dict = {"priority": None, "credentials": []}
 
 # Protects all read-modify-write sequences on the credentials file.
-_lock = threading.Lock()
+_lock = threading.RLock()
 
 _USAGE_FIELDS = (
     "five_hour_pct",
@@ -33,14 +33,15 @@ _USAGE_FIELDS = (
 
 def read_credentials() -> dict:
     """Read credentials from disk, returning defaults if missing or corrupt."""
-    if CREDENTIALS_FILE.exists():
-        try:
-            data = json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8"))
-            logger.debug("Loaded credentials from {}", CREDENTIALS_FILE)
-            return data
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Failed to read credentials, using defaults: {}", exc)
-    return {**DEFAULT_CREDENTIALS, "credentials": []}
+    with _lock:
+        if CREDENTIALS_FILE.exists():
+            try:
+                data = json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8"))
+                logger.debug("Loaded credentials from {}", CREDENTIALS_FILE)
+                return data
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning("Failed to read credentials, using defaults: {}", exc)
+        return {**DEFAULT_CREDENTIALS, "credentials": []}
 
 
 def write_credentials(data: dict) -> dict:
@@ -194,6 +195,32 @@ def update_credential_usage(cred_id: str, usage_data: dict) -> bool:
                 return True
 
     logger.debug("update_credential_usage: id={} not found", cred_id)
+    return False
+
+
+def update_usage_by_profile(profile_name: str, usage_data: dict) -> bool:
+    """Atomically look up a credential by profile name and update its usage stats.
+
+    Combines the profile→id lookup and the usage update under a single lock
+    acquisition to avoid TOCTOU races.
+
+    Returns True if a matching credential was found and updated, False otherwise.
+    """
+    with _lock:
+        data = read_credentials()
+        for cred in data.get("credentials", []):
+            if cred.get("profile") == profile_name:
+                for field in _USAGE_FIELDS:
+                    if field in usage_data:
+                        cred[field] = usage_data[field]
+                write_credentials(data)
+                logger.debug(
+                    "Updated usage for credential with profile={}", profile_name
+                )
+                return True
+    logger.debug(
+        "update_usage_by_profile: no credential with profile={}", profile_name
+    )
     return False
 
 

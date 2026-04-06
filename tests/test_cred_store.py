@@ -1,5 +1,6 @@
 """Tests for the cred_store module."""
 
+import json
 import pytest
 from unittest.mock import patch
 
@@ -137,8 +138,13 @@ def test_list_credentials_no_raw_key(creds_file):
     """No returned record contains the raw 'key' field."""
     add_credential("Cred A", "sk-ant-api03-credAkeyvalue123456")
     add_credential("Cred B", "sk-ant-api03-credBkeyvalue123456")
-    for cred in list_credentials_ranked():
+    result = list_credentials_ranked()
+    for cred in result:
         assert "key" not in cred
+    # Also verify the raw key values themselves do not appear anywhere in serialized output
+    serialized = json.dumps(result)
+    assert "sk-ant-api03-credAkeyvalue123456" not in serialized, "Raw key value must not appear in list output"
+    assert "sk-ant-api03-credBkeyvalue123456" not in serialized, "Raw key value must not appear in list output"
 
 
 def test_list_credentials_has_is_priority(creds_file):

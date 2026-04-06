@@ -449,6 +449,9 @@ async def test_sessions_list(request: web.Request) -> web.Response:
     return web.json_response(mgr.list_sessions())
 
 
+# Note: credential handlers return JSON error bodies {"error": "..."} rather than
+# raising HTTPBadRequest with plain text (the pattern used by config/canvas handlers).
+# This is intentional — clients parsing credential errors expect JSON.
 async def credentials_list_handler(request: web.Request) -> web.Response:
     """GET /api/credentials — list credentials ranked by burn rate."""
     return web.json_response(cred_store.get_credentials_response())
@@ -606,11 +609,7 @@ def create_app(test_mode: bool = False) -> web.Application:
 
         def _update_cred_usage(profile_name: str, result: dict) -> None:
             """Update credential usage stats from a service card probe result."""
-            data = cred_store.read_credentials()
-            for cred in data.get("credentials", []):
-                if cred.get("profile") == profile_name:
-                    cred_store.update_credential_usage(cred["id"], result)
-                    break
+            cred_store.update_usage_by_profile(profile_name, result)
 
         for profile in config.get("probe_profiles", []):
 
