@@ -4,7 +4,7 @@ import pytest
 
 from claude_rts.cards.registry import ServiceCardRegistry
 from claude_rts.cards.service_card import ServiceCard
-from tests.conftest import ProbeCard, MockSession, MockSessionManager
+from tests.conftest import ProbeCard, MockSessionManager
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
