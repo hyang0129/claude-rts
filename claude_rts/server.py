@@ -10,7 +10,7 @@ import time
 
 from aiohttp import web
 from loguru import logger
-from winpty import PtyProcess
+from .pty_compat import PtyProcess
 
 _start_time = time.monotonic()
 
@@ -125,7 +125,8 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     logger.info("WebSocket established: {} -> container '{}'", hub_name, hub["container"])
 
     # Spawn docker exec via ConPTY for full terminal support
-    cmd = f'docker.exe exec -it -u vscode -w /workspaces/{hub_name} {hub["container"]} bash -l'
+    _docker = "docker.exe" if sys.platform == "win32" else "docker"
+    cmd = f'{_docker} exec -it -u vscode -w /workspaces/{hub_name} {hub["container"]} bash -l'
     logger.info("Spawning PTY process: {}", cmd)
 
     try:
@@ -146,7 +147,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 try:
                     data = await loop.run_in_executor(None, pty.read)
                     if data:
-                        await ws.send_bytes(data.encode("utf-8", errors="replace"))
+                        await ws.send_bytes(data)
                 except EOFError:
                     logger.info("PTY EOF for hub '{}'", hub_name)
                     break
@@ -243,7 +244,7 @@ async def exec_websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 try:
                     data = await loop.run_in_executor(None, pty.read)
                     if data:
-                        await ws.send_bytes(data.encode("utf-8", errors="replace"))
+                        await ws.send_bytes(data)
                 except EOFError:
                     logger.info("PTY EOF for cmd={!r}", cmd)
                     break

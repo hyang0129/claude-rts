@@ -872,10 +872,15 @@ function showContextMenu(sx, sy) {
 
   // Host terminal section
   html += '<div class="ctx-header">Host terminal</div>';
-  const hostShells = [
+  const isWin = navigator.platform.startsWith('Win') || navigator.userAgent.includes('Windows');
+  const hostShells = isWin ? [
     { id: 'powershell', label: 'PowerShell', cmd: 'powershell.exe' },
     { id: 'cmd', label: 'Command Prompt', cmd: 'cmd.exe' },
     { id: 'util', label: 'Utility Container', cmd: 'docker.exe exec -it supreme-claudemander-util bash' },
+  ] : [
+    { id: 'zsh', label: 'zsh', cmd: '/bin/zsh -l' },
+    { id: 'bash', label: 'bash', cmd: '/bin/bash -l' },
+    { id: 'util', label: 'Utility Container', cmd: 'docker exec -it supreme-claudemander-util bash' },
   ];
   for (const shell of hostShells) {
     html += `<div class="ctx-item" data-host-shell="${shell.id}" data-host-cmd="${shell.cmd}">
@@ -1253,7 +1258,8 @@ class TerminalCard extends Card {
       wsUrl = `${wsProto}//${location.host}/ws/session/${this.sessionId}`;
     } else {
       // Create new persistent session
-      const cmd = this.execCmd || `docker.exe exec -it -u vscode -w /workspaces/${this.hub} ${this.container} bash -l`;
+      const _docker = (navigator.platform.startsWith('Win') || navigator.userAgent.includes('Windows')) ? 'docker.exe' : 'docker';
+      const cmd = this.execCmd || `${_docker} exec -it -u vscode -w /workspaces/${this.hub} ${this.container} bash -l`;
       wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}`;
     }
     this.ws = new WebSocket(wsUrl);
