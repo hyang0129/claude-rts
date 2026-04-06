@@ -7,6 +7,7 @@ from .service_card import ServiceCard
 _DOCKER = "docker.exe" if sys.platform == "win32" else "docker"
 _ANSI_ESCAPE = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 _RESET_HOURS = re.compile(r'(\d+)h\s*(\d+)?m?')
+_AUTH_REQUIRED = re.compile(r'Select login method|Claude Code can be used with your Claude subscription', re.IGNORECASE)
 
 
 def _hours_until_reset(reset_str: str) -> float | None:
@@ -43,11 +44,16 @@ class ClaudeUsageCard(ServiceCard):
 
     def parse_output(self, output: str) -> dict:
         clean = _ANSI_ESCAPE.sub("", output).replace("\r", "").strip()
+        if _AUTH_REQUIRED.search(clean):
+            raise ValueError(f"claude-usage: profile '{self.identity}' is not authenticated")
         start = clean.find("{")
         end = clean.rfind("}")
         if start < 0 or end <= start:
             raise ValueError(f"No JSON in probe output: {clean[:200]!r}")
         data = json.loads(clean[start:end + 1])
+
+        if data.get("seven_day_resets") is None:
+            raise ValueError(f"claude-usage: profile '{self.identity}' is not authenticated (seven_day_resets is null)")
 
         five_hr_pct = data.get("five_hour_pct")
         five_hr_resets = data.get("five_hour_resets")

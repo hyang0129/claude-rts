@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npm install -g @anthropic-ai/claude-code
 
 # Install claude-usage-plz
-RUN pip install --no-cache-dir claude-usage-plz
+RUN pip install --no-cache-dir claude-usage-plz==0.3.0
 
 # Create profiles mount point
 RUN mkdir -p /profiles
