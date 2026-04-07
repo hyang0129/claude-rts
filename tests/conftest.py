@@ -5,8 +5,17 @@ Plain classes (not fixtures) so that test files can import them directly:
     from tests.conftest import ProbeCard, MockScrollback, MockSession, MockSessionManager
 """
 
+from unittest.mock import patch
+
 import pytest
 from claude_rts.cards.service_card import ServiceCard
+
+
+@pytest.fixture(autouse=True)
+def _no_legacy_migration(tmp_path):
+    """Prevent migration from real ~/.claude-rts into test temp dirs."""
+    with patch("claude_rts.config._LEGACY_CONFIG_DIR", tmp_path / ".claude-rts-nonexistent"):
+        yield
 
 
 @pytest.fixture(autouse=True)

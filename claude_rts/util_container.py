@@ -15,16 +15,16 @@ _DOCKER = "docker.exe" if sys.platform == "win32" else "docker"
 
 from loguru import logger  # noqa: E402
 
-from .config import read_config  # noqa: E402
+from .config import AppConfig, read_config  # noqa: E402
 
 DOCKERFILE = pathlib.Path(__file__).parent / "Dockerfile.util"
 DEFAULT_CONTAINER_NAME = "supreme-claudemander-util"
 DEFAULT_IMAGE_NAME = "supreme-claudemander-util:latest"
 
 
-def _get_config() -> dict:
+def _get_config(app_config: AppConfig) -> dict:
     """Get utility container config with defaults."""
-    config = read_config()
+    config = read_config(app_config)
     util = config.get("util_container", {})
     return {
         "name": util.get("name", DEFAULT_CONTAINER_NAME),
@@ -50,16 +50,16 @@ async def _run(cmd: str, timeout: float = 30) -> tuple[int, str, str]:
     return proc.returncode, stdout.decode(errors="replace").strip(), stderr.decode(errors="replace").strip()
 
 
-async def is_util_running() -> bool:
+async def is_util_running(app_config: AppConfig) -> bool:
     """Check if the utility container is running."""
-    cfg = _get_config()
+    cfg = _get_config(app_config)
     rc, stdout, _ = await _run(f'{_DOCKER} ps --filter "name=^/{cfg["name"]}$" --format "{{{{.Status}}}}"')
     return rc == 0 and "Up" in stdout
 
 
-async def build_image() -> bool:
+async def build_image(app_config: AppConfig) -> bool:
     """Build the utility container image if not already built."""
-    cfg = _get_config()
+    cfg = _get_config(app_config)
     # Check if image exists
     rc, stdout, _ = await _run(f"{_DOCKER} images -q {cfg['image']}")
     if rc == 0 and stdout.strip():
@@ -78,16 +78,16 @@ async def build_image() -> bool:
     return True
 
 
-async def start_container() -> bool:
+async def start_container(app_config: AppConfig) -> bool:
     """Start the utility container. Builds image if needed."""
-    cfg = _get_config()
+    cfg = _get_config(app_config)
 
-    if await is_util_running():
+    if await is_util_running(app_config):
         logger.debug("Utility container '{}' already running", cfg["name"])
         return True
 
     # Build image if needed
-    if not await build_image():
+    if not await build_image(app_config):
         return False
 
     # Build mount args
@@ -116,9 +116,9 @@ async def start_container() -> bool:
     return True
 
 
-async def stop_container() -> bool:
+async def stop_container(app_config: AppConfig) -> bool:
     """Stop the utility container."""
-    cfg = _get_config()
+    cfg = _get_config(app_config)
     rc, _, stderr = await _run(f"{_DOCKER} stop {cfg['name']}")
     if rc != 0:
         logger.warning("Failed to stop utility container: {}", stderr)
@@ -128,14 +128,14 @@ async def stop_container() -> bool:
     return True
 
 
-async def exec_in_util(cmd: str, timeout: float = 60) -> tuple[int, str]:
+async def exec_in_util(app_config: AppConfig, cmd: str, timeout: float = 60) -> tuple[int, str]:
     """Execute a command in the utility container.
 
     Returns (returncode, stdout). Raises RuntimeError if container not running.
     """
-    cfg = _get_config()
+    cfg = _get_config(app_config)
 
-    if not await is_util_running():
+    if not await is_util_running(app_config):
         raise RuntimeError(f"Utility container '{cfg['name']}' is not running")
 
     full_cmd = f"{_DOCKER} exec {cfg['name']} {cmd}"
@@ -146,7 +146,7 @@ async def exec_in_util(cmd: str, timeout: float = 60) -> tuple[int, str]:
     return rc, stdout
 
 
-async def exec_in_util_pty(cmd: str, timeout: float = 60) -> tuple[int, str]:
+async def exec_in_util_pty(app_config: AppConfig, cmd: str, timeout: float = 60) -> tuple[int, str]:
     """Execute a command in the utility container using a real PTY.
 
     Required for commands that need a TTY (e.g., claude-usage-plz which uses pexpect).
@@ -154,9 +154,9 @@ async def exec_in_util_pty(cmd: str, timeout: float = 60) -> tuple[int, str]:
     """
     from .pty_compat import PtyProcess
 
-    cfg = _get_config()
+    cfg = _get_config(app_config)
 
-    if not await is_util_running():
+    if not await is_util_running(app_config):
         raise RuntimeError(f"Utility container '{cfg['name']}' is not running")
 
     full_cmd = f"{_DOCKER} exec -it {cfg['name']} {cmd}"
@@ -206,13 +206,13 @@ async def exec_in_util_pty(cmd: str, timeout: float = 60) -> tuple[int, str]:
     return rc, stdout
 
 
-async def ensure_util_container() -> bool:
+async def ensure_util_container(app_config: AppConfig) -> bool:
     """Ensure the utility container is running. Start if needed.
 
     Called during server startup if auto_start is enabled.
     """
-    cfg = _get_config()
+    cfg = _get_config(app_config)
     if not cfg["auto_start"]:
         logger.info("Utility container auto_start disabled, skipping")
         return False
-    return await start_container()
+    return await start_container(app_config)

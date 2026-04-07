@@ -4,6 +4,7 @@ from unittest.mock import patch, AsyncMock
 
 import pytest
 
+from claude_rts import config
 from claude_rts.server import create_app
 
 
@@ -14,8 +15,9 @@ MOCK_HUBS = [
 
 
 @pytest.fixture
-def app():
-    return create_app()
+def app(tmp_path):
+    app_config = config.load(tmp_path / ".sc")
+    return create_app(app_config)
 
 
 @pytest.fixture

@@ -13,7 +13,7 @@ from .pty_compat import PtyProcess
 
 _start_time = time.monotonic()
 
-from .config import read_config, write_config, list_canvases, read_canvas, write_canvas, delete_canvas  # noqa: E402
+from .config import AppConfig, read_config, write_config, list_canvases, read_canvas, write_canvas, delete_canvas  # noqa: E402
 from .discovery import discover_hubs  # noqa: E402
 from .startup import run_startup  # noqa: E402
 from .util_container import ensure_util_container  # noqa: E402
@@ -37,10 +37,11 @@ async def hubs_handler(request: web.Request) -> web.Response:
 
 async def startup_handler(request: web.Request) -> web.Response:
     logger.info("Startup requested by {}", request.remote)
-    config = read_config()
+    app_config: AppConfig = request.app["app_config"]
+    config = read_config(app_config)
     script_name = config.get("startup_script", "util-terminal")
     try:
-        result = await run_startup(script_name)
+        result = await run_startup(script_name, app_config)
         logger.info("Startup script '{}' returned {} card(s)", script_name, len(result))
         return web.json_response({"status": "ok", "script": script_name, "cards": result})
     except Exception as exc:
@@ -53,30 +54,34 @@ async def startup_handler(request: web.Request) -> web.Response:
 
 async def config_get_handler(request: web.Request) -> web.Response:
     logger.debug("Config read requested by {}", request.remote)
-    data = read_config()
+    app_config: AppConfig = request.app["app_config"]
+    data = read_config(app_config)
     return web.json_response(data)
 
 
 async def config_put_handler(request: web.Request) -> web.Response:
     logger.info("Config update requested by {}", request.remote)
+    app_config: AppConfig = request.app["app_config"]
     try:
         body = await request.json()
     except json.JSONDecodeError:
         raise web.HTTPBadRequest(text="Invalid JSON")
-    saved = write_config(body)
+    saved = write_config(app_config, body)
     return web.json_response(saved)
 
 
 async def canvases_list_handler(request: web.Request) -> web.Response:
     logger.debug("Canvas list requested by {}", request.remote)
-    names = list_canvases()
+    app_config: AppConfig = request.app["app_config"]
+    names = list_canvases(app_config)
     return web.json_response(names)
 
 
 async def canvas_get_handler(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     logger.debug("Canvas '{}' read requested by {}", name, request.remote)
-    data = read_canvas(name)
+    app_config: AppConfig = request.app["app_config"]
+    data = read_canvas(app_config, name)
     if data is None:
         raise web.HTTPNotFound(text=f"Canvas '{name}' not found")
     return web.json_response(data)
@@ -85,11 +90,12 @@ async def canvas_get_handler(request: web.Request) -> web.Response:
 async def canvas_put_handler(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     logger.info("Canvas '{}' save requested by {}", name, request.remote)
+    app_config: AppConfig = request.app["app_config"]
     try:
         body = await request.json()
     except json.JSONDecodeError:
         raise web.HTTPBadRequest(text="Invalid JSON")
-    ok = write_canvas(name, body)
+    ok = write_canvas(app_config, name, body)
     if not ok:
         raise web.HTTPBadRequest(text=f"Invalid canvas name '{name}'")
     return web.json_response({"status": "ok", "name": name})
@@ -100,7 +106,8 @@ async def canvas_delete_handler(request: web.Request) -> web.Response:
     logger.info("Canvas '{}' delete requested by {}", name, request.remote)
     if name == "main":
         raise web.HTTPBadRequest(text="Cannot delete the 'main' canvas")
-    ok = delete_canvas(name)
+    app_config: AppConfig = request.app["app_config"]
+    ok = delete_canvas(app_config, name)
     if not ok:
         raise web.HTTPNotFound(text=f"Canvas '{name}' not found")
     return web.json_response({"status": "ok", "name": name})
@@ -473,8 +480,9 @@ async def claude_usage_handler(request: web.Request) -> web.Response:
     if not profile:
         raise web.HTTPBadRequest(text="'profile' field required in request body")
 
+    app_config: AppConfig = request.app["app_config"]
     registry: ServiceCardRegistry = request.app["service_card_registry"]
-    config = read_config()
+    config = read_config(app_config)
     util_cfg = config.get("util_container", {})
     util_name = util_cfg.get("name", "supreme-claudemander-util")
     probe_interval = config.get("probe_interval", 1800)
@@ -516,8 +524,9 @@ async def probe_claude_usage_handler(request: web.Request) -> web.Response:
     if not profile:
         raise web.HTTPBadRequest(text="profile query parameter required")
 
+    app_config: AppConfig = request.app["app_config"]
     mgr: SessionManager = request.app["session_manager"]
-    config = read_config()
+    config = read_config(app_config)
     util_cfg = config.get("util_container", {})
     util_name = util_cfg.get("name", "supreme-claudemander-util")
     probe_timeout = float(config.get("probe_timeout", 90))
@@ -541,8 +550,9 @@ async def probe_claude_usage_handler(request: web.Request) -> web.Response:
     return web.json_response({"session_id": session_id, "profile": profile})
 
 
-def create_app(test_mode: bool = False) -> web.Application:
+def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Application:
     app = web.Application()
+    app["app_config"] = app_config
     app["test_mode"] = test_mode
 
     # Static + API routes
@@ -578,10 +588,11 @@ def create_app(test_mode: bool = False) -> web.Application:
     app.router.add_get("/ws/{hub}", websocket_handler)
 
     # Lifecycle hooks
-    config = read_config()
+    config = read_config(app_config)
     session_config = config.get("sessions", {})
 
     async def on_startup(app: web.Application) -> None:
+        app_config: AppConfig = app["app_config"]
         mgr = SessionManager(
             orphan_timeout=session_config.get("orphan_timeout", 300),
             scrollback_size=session_config.get("scrollback_size", 65536),
@@ -606,11 +617,12 @@ def create_app(test_mode: bool = False) -> web.Application:
                 logger.warning("Failed to recover tmux sessions on startup (non-fatal)")
 
         try:
-            await ensure_util_container()
+            await ensure_util_container(app_config)
         except Exception:
             logger.warning("Failed to start utility container (non-fatal)")
 
         # Probe tmux availability in the util container
+        config = read_config(app_config)
         util_cfg = config.get("util_container", {})
         util_name = util_cfg.get("name", "supreme-claudemander-util")
         if mgr.tmux_enabled:

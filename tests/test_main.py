@@ -11,7 +11,9 @@ def test_default_port():
         patch("sys.argv", ["supreme-claudemander"]),
         patch("claude_rts.__main__.web") as mock_web,
         patch("claude_rts.__main__.create_app") as mock_create,
+        patch("claude_rts.__main__.config") as mock_config,
     ):
+        mock_config.load.return_value = MagicMock()
         mock_create.return_value = MagicMock()
         try:
             main()
@@ -29,7 +31,9 @@ def test_custom_port():
         patch("sys.argv", ["supreme-claudemander", "--port", "4000"]),
         patch("claude_rts.__main__.web") as mock_web,
         patch("claude_rts.__main__.create_app") as mock_create,
+        patch("claude_rts.__main__.config") as mock_config,
     ):
+        mock_config.load.return_value = MagicMock()
         mock_create.return_value = MagicMock()
         try:
             main()
@@ -45,7 +49,9 @@ def test_no_browser_flag():
         patch("sys.argv", ["supreme-claudemander", "--no-browser"]),
         patch("claude_rts.__main__.web") as _mock_web,
         patch("claude_rts.__main__.create_app") as mock_create,
+        patch("claude_rts.__main__.config") as mock_config,
     ):
+        mock_config.load.return_value = MagicMock()
         mock_app = MagicMock()
         mock_app.on_startup = []
         mock_create.return_value = mock_app
@@ -63,7 +69,9 @@ def test_browser_opens_by_default():
         patch("sys.argv", ["supreme-claudemander"]),
         patch("claude_rts.__main__.web") as _mock_web,
         patch("claude_rts.__main__.create_app") as mock_create,
+        patch("claude_rts.__main__.config") as mock_config,
     ):
+        mock_config.load.return_value = MagicMock()
         mock_app = MagicMock()
         mock_app.on_startup = []
         mock_create.return_value = mock_app

@@ -8,6 +8,7 @@ import webbrowser
 from aiohttp import web
 from loguru import logger
 
+from . import config
 from .server import create_app
 
 
@@ -26,14 +27,17 @@ def main():
 
     import os
 
+    # Build AppConfig early, before anything reads config from disk
     if args.dev_config:
         from .dev_config import setup_dev_config
 
         dev_dir = setup_dev_config()
-        os.environ["SUPREME_CLAUDEMANDER_CONFIG_DIR"] = str(dev_dir)
+        app_config = config.load(dev_dir)
         logger.info("Dev config active: {}", dev_dir)
     elif args.config_dir:
-        os.environ["SUPREME_CLAUDEMANDER_CONFIG_DIR"] = str(pathlib.Path(args.config_dir).resolve())
+        app_config = config.load(pathlib.Path(args.config_dir).resolve())
+    else:
+        app_config = config.load()
 
     # Configure loguru: remove default handler, add our own
     logger.remove()
@@ -53,7 +57,7 @@ def main():
     logger.info("supreme-claudemander starting on http://localhost:{}", args.port)
 
     test_mode = args.test_mode or os.environ.get("CLAUDE_RTS_TEST_MODE", "").lower() in ("1", "true")
-    app = create_app(test_mode=test_mode)
+    app = create_app(app_config, test_mode=test_mode)
     if test_mode:
         logger.info("Test mode enabled — puppeting API available")
 

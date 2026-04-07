@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from claude_rts import config
 from claude_rts.server import create_app
 
 
@@ -25,8 +26,8 @@ _FAKE_RESULT = {
 
 
 @pytest.fixture
-def app():
-    return create_app()
+def app(tmp_path):
+    return create_app(config.load(tmp_path / ".sc"))
 
 
 @pytest.fixture

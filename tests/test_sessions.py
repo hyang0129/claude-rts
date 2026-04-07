@@ -6,6 +6,7 @@ from unittest.mock import patch, AsyncMock
 import pytest
 
 from claude_rts.sessions import ScrollbackBuffer, SessionManager, _valid_container_name
+from claude_rts import config
 from claude_rts.server import create_app
 
 
@@ -226,9 +227,10 @@ async def test_session_manager_stop_all(monkeypatch):
 
 
 @pytest.fixture
-def app(monkeypatch):
+def app(monkeypatch, tmp_path):
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
-    return create_app(test_mode=True)
+    app_config = config.load(tmp_path / ".sc")
+    return create_app(app_config, test_mode=True)
 
 
 @pytest.fixture
@@ -307,19 +309,19 @@ async def test_sessions_list_api(client):
     assert isinstance(data, list)
 
 
-async def test_test_mode_disabled():
+async def test_test_mode_disabled(tmp_path):
     """Test API should NOT be available when test_mode=False."""
     with patch("claude_rts.sessions.PtyProcess", MockPty):
-        app = create_app(test_mode=False)
+        app = create_app(config.load(tmp_path / ".sc"), test_mode=False)
     routes = [r.resource.canonical for r in app.router.routes() if hasattr(r, "resource")]
     assert "/api/test/sessions" not in routes
     assert "/api/test/session/{id}/read" not in routes
 
 
-async def test_app_has_session_routes():
+async def test_app_has_session_routes(tmp_path):
     """Verify session WebSocket routes are registered."""
     with patch("claude_rts.sessions.PtyProcess", MockPty):
-        app = create_app(test_mode=False)
+        app = create_app(config.load(tmp_path / ".sc"), test_mode=False)
     routes = [r.resource.canonical for r in app.router.routes() if hasattr(r, "resource")]
     assert "/ws/session/new" in routes
     assert "/ws/session/{session_id}" in routes
