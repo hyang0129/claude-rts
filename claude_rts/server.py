@@ -455,6 +455,71 @@ async def test_sessions_list(request: web.Request) -> web.Response:
     return web.json_response(mgr.list_sessions())
 
 
+async def profiles_list_handler(request: web.Request) -> web.Response:
+    """GET /api/profiles — list all probe profiles with latest usage data."""
+    app_config: AppConfig = request.app["app_config"]
+    registry: ServiceCardRegistry = request.app["service_card_registry"]
+    config = read_config(app_config)
+    probe_profiles = config.get("probe_profiles", [])
+    priority_profile = config.get("priority_profile")
+
+    profiles = []
+    for profile in probe_profiles:
+        card = registry.get("claude-usage", profile)
+        entry = {"profile": profile, "is_priority": profile == priority_profile}
+        if card and card.last_result:
+            r = card.last_result
+            entry.update({
+                "five_hour_pct": r.get("five_hour_pct"),
+                "five_hour_resets": r.get("five_hour_resets"),
+                "seven_day_pct": r.get("seven_day_pct"),
+                "seven_day_resets": r.get("seven_day_resets"),
+                "burn_rate": r.get("burn_rate"),
+                "probe_available": True,
+            })
+        else:
+            entry.update({
+                "five_hour_pct": None,
+                "five_hour_resets": None,
+                "seven_day_pct": None,
+                "seven_day_resets": None,
+                "burn_rate": None,
+                "probe_available": False,
+            })
+        profiles.append(entry)
+
+    # Sort by burn_rate ascending, nulls last
+    profiles.sort(key=lambda p: (p["burn_rate"] is None, p["burn_rate"] or 0))
+    return web.json_response(profiles)
+
+
+async def priority_get_handler(request: web.Request) -> web.Response:
+    """GET /api/profiles/priority — return the current priority profile."""
+    app_config: AppConfig = request.app["app_config"]
+    config = read_config(app_config)
+    return web.json_response({"priority_profile": config.get("priority_profile")})
+
+
+async def priority_put_handler(request: web.Request) -> web.Response:
+    """PUT /api/profiles/priority — set the priority profile."""
+    app_config: AppConfig = request.app["app_config"]
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="Invalid JSON")
+
+    priority = body.get("priority_profile")
+    config = read_config(app_config)
+    if priority is not None:
+        probe_profiles = config.get("probe_profiles", [])
+        if priority not in probe_profiles:
+            raise web.HTTPBadRequest(text=f"Profile '{priority}' not in probe_profiles")
+
+    config["priority_profile"] = priority
+    write_config(app_config, config)
+    return web.json_response({"priority_profile": priority})
+
+
 async def claude_usage_handler(request: web.Request) -> web.Response:
     """POST /api/claude-usage
 
@@ -566,6 +631,9 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_put("/api/canvases/{name}", canvas_put_handler)
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
     app.router.add_get("/api/widgets/system-info", widget_system_info_handler)
+    app.router.add_get("/api/profiles", profiles_list_handler)
+    app.router.add_get("/api/profiles/priority", priority_get_handler)
+    app.router.add_put("/api/profiles/priority", priority_put_handler)
     app.router.add_post("/api/claude-usage", claude_usage_handler)
     app.router.add_post("/api/probe/claude-usage", probe_claude_usage_handler)
 

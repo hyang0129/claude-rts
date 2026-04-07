@@ -1448,6 +1448,94 @@ const WIDGET_REGISTRY = {
       }
     },
   },
+  'profiles': {
+    label: 'Profile Manager',
+    defaultRefreshInterval: 30000,
+    async render(body, card) {
+      try {
+        const resp = await fetch('/api/profiles');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const profiles = await resp.json();
+
+        if (profiles.length === 0) {
+          body.innerHTML = '<div class="widget-row"><span class="widget-label" style="color:#a6adc8">No probe profiles configured</span></div>';
+          card.updateState('idle');
+          return;
+        }
+
+        const esc = (s) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+        const pctColor = (pct) => {
+          if (pct == null) return '#a6adc8';
+          if (pct < 50) return '#a6e3a1';
+          if (pct < 80) return '#f9e2af';
+          return '#f38ba8';
+        };
+
+        const pctBar = (pct) => {
+          if (pct == null) return '<span style="color:#a6adc8">—</span>';
+          const color = pctColor(pct);
+          const width = Math.min(100, Math.max(0, pct));
+          return `<div style="display:inline-flex;align-items:center;gap:6px;width:100%">
+            <div style="flex:1;height:6px;background:#313244;border-radius:3px;overflow:hidden">
+              <div style="width:${width}%;height:100%;background:${color};border-radius:3px"></div>
+            </div>
+            <span style="color:${color};min-width:36px;text-align:right">${pct.toFixed(0)}%</span>
+          </div>`;
+        };
+
+        let html = '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+        html += '<tr style="color:#a6adc8;border-bottom:1px solid #313244">';
+        html += '<th style="text-align:left;padding:4px 6px">Profile</th>';
+        html += '<th style="text-align:left;padding:4px 6px">5h</th>';
+        html += '<th style="text-align:left;padding:4px 6px">7d</th>';
+        html += '<th style="text-align:right;padding:4px 6px">Burn/hr</th>';
+        html += '<th style="text-align:right;padding:4px 6px">Resets</th>';
+        html += '<th style="text-align:center;padding:4px 6px">Priority</th>';
+        html += '</tr>';
+
+        for (const p of profiles) {
+          const rowStyle = p.is_priority ? 'background:#1e1e2e' : '';
+          html += `<tr style="${rowStyle};border-bottom:1px solid #181825">`;
+          html += `<td style="padding:4px 6px;font-weight:${p.is_priority ? 'bold' : 'normal'}">${esc(p.profile)}</td>`;
+          if (p.probe_available) {
+            html += `<td style="padding:4px 6px">${pctBar(p.five_hour_pct)}</td>`;
+            html += `<td style="padding:4px 6px">${pctBar(p.seven_day_pct)}</td>`;
+            html += `<td style="padding:4px 6px;text-align:right;color:#cdd6f4">${p.burn_rate != null ? p.burn_rate.toFixed(1) : '—'}</td>`;
+            html += `<td style="padding:4px 6px;text-align:right;color:#a6adc8;font-size:11px">${esc(p.five_hour_resets || '—')}</td>`;
+          } else {
+            html += '<td colspan="4" style="padding:4px 6px;color:#a6adc8;font-style:italic">Probing…</td>';
+          }
+          if (p.is_priority) {
+            html += '<td style="padding:4px 6px;text-align:center;color:#a6e3a1">★</td>';
+          } else {
+            html += `<td style="padding:4px 6px;text-align:center"><button data-set-priority="${esc(p.profile)}" style="background:none;border:1px solid #45475a;color:#cdd6f4;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px">Set</button></td>`;
+          }
+          html += '</tr>';
+        }
+        html += '</table>';
+        body.innerHTML = html;
+
+        body.querySelectorAll('[data-set-priority]').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const profile = btn.getAttribute('data-set-priority');
+            const r = await fetch('/api/profiles/priority', {
+              method: 'PUT',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({priority_profile: profile}),
+            });
+            if (!r.ok) console.error('Failed to set priority:', r.status);
+            card.render();
+          });
+        });
+
+        card.updateState('working');
+      } catch (err) {
+        body.innerHTML = `<div class="widget-row"><span class="widget-label" style="color:#f38ba8">Error: ${err.message}</span></div>`;
+        card.updateState('dead');
+      }
+    },
+  },
 };
 
 // ════════════════════════════════════════════
