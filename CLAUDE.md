@@ -12,6 +12,8 @@ netstat -ano | grep "LISTENING" | grep -E ":300[0-9] " | awk '{print $NF}' | sor
 
 Verify the port is free before starting. Running multiple instances causes port conflicts, confusing log output, and stale probe sessions.
 
+**Use `--electron` for manual/QA testing.** Launch via `python -m claude_rts --electron` to run in the Electron shell instead of a browser tab.
+
 ## Key Design Decisions
 
 - **pywinpty for ConPTY**: `asyncio.create_subprocess_exec` only gives pipes (no PTY), so `docker.exe exec -it` fails or has no echo. pywinpty provides a real Windows ConPTY.
@@ -61,6 +63,8 @@ CLAUDE_RTS_TEST_MODE=1 python -m claude_rts   # enables puppeting API at /api/te
 ```
 
 **Always run `ruff format` before committing.** CI enforces formatting via `ruff format --check`.
+
+**Wait for CI to pass before merging PRs.** All GitHub Actions checks (lint, format, tests) must be green.
 
 | File | Tests | What it covers |
 |------|-------|----------------|
