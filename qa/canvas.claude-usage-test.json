@@ -1,0 +1,14 @@
+{
+  "name": "claude-usage-test",
+  "canvas_size": [1920, 1080],
+  "cards": [
+    {
+      "type": "widget",
+      "widgetType": "claude-usage",
+      "x": 80,
+      "y": 80,
+      "w": 800,
+      "h": 500
+    }
+  ]
+}

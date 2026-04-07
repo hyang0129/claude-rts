@@ -6,13 +6,15 @@ Canvas layouts: ~/.supreme-claudemander/canvases/{name}.json
 """
 
 import json
+import os
 import pathlib
 import re
 import shutil
 
 from loguru import logger
 
-CONFIG_DIR = pathlib.Path.home() / ".supreme-claudemander"
+_override = os.environ.get("SUPREME_CLAUDEMANDER_CONFIG_DIR")
+CONFIG_DIR = pathlib.Path(_override) if _override else pathlib.Path.home() / ".supreme-claudemander"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 CANVASES_DIR = CONFIG_DIR / "canvases"
 
