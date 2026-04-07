@@ -16,7 +16,7 @@ _start_time = time.monotonic()
 from .config import AppConfig, read_config, write_config, list_canvases, read_canvas, write_canvas, delete_canvas  # noqa: E402
 from .discovery import discover_hubs  # noqa: E402
 from .startup import run_startup  # noqa: E402
-from .util_container import ensure_util_container  # noqa: E402
+from .util_container import ensure_util_container, discover_profiles  # noqa: E402
 from .sessions import SessionManager  # noqa: E402
 from .cards import ServiceCardRegistry, ClaudeUsageCard  # noqa: E402
 
@@ -455,13 +455,25 @@ async def test_sessions_list(request: web.Request) -> web.Response:
     return web.json_response(mgr.list_sessions())
 
 
+async def profiles_discover_handler(request: web.Request) -> web.Response:
+    """GET /api/profiles/discover — re-scan /profiles in the util container."""
+    app_config: AppConfig = request.app["app_config"]
+    discovered = await discover_profiles(app_config)
+    request.app["discovered_profiles"] = discovered
+    return web.json_response({"profiles": discovered})
+
+
 async def profiles_list_handler(request: web.Request) -> web.Response:
     """GET /api/profiles — list all probe profiles with latest usage data."""
     app_config: AppConfig = request.app["app_config"]
     registry: ServiceCardRegistry = request.app["service_card_registry"]
     config = read_config(app_config)
-    probe_profiles = config.get("probe_profiles", [])
     priority_profile = config.get("priority_profile")
+
+    # Merge discovered profiles with any manually configured ones
+    discovered = request.app.get("discovered_profiles", [])
+    config_profiles = config.get("probe_profiles", [])
+    probe_profiles = sorted(set(discovered + config_profiles))
 
     profiles = []
     for profile in probe_profiles:
@@ -511,9 +523,11 @@ async def priority_put_handler(request: web.Request) -> web.Response:
     priority = body.get("priority_profile")
     config = read_config(app_config)
     if priority is not None:
-        probe_profiles = config.get("probe_profiles", [])
-        if priority not in probe_profiles:
-            raise web.HTTPBadRequest(text=f"Profile '{priority}' not in probe_profiles")
+        discovered = request.app.get("discovered_profiles", [])
+        config_profiles = config.get("probe_profiles", [])
+        all_profiles = set(discovered + config_profiles)
+        if priority not in all_profiles:
+            raise web.HTTPBadRequest(text=f"Profile '{priority}' not found in discovered or configured profiles")
 
     config["priority_profile"] = priority
     write_config(app_config, config)
@@ -632,6 +646,7 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
     app.router.add_get("/api/widgets/system-info", widget_system_info_handler)
     app.router.add_get("/api/profiles", profiles_list_handler)
+    app.router.add_get("/api/profiles/discover", profiles_discover_handler)
     app.router.add_get("/api/profiles/priority", priority_get_handler)
     app.router.add_put("/api/profiles/priority", priority_put_handler)
     app.router.add_post("/api/claude-usage", claude_usage_handler)
@@ -694,9 +709,20 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
         if mgr.tmux_enabled:
             await mgr.probe_tmux(util_name)
 
-        # Start claude-usage probes after util container is ready
+        # Discover profiles from util container
+        try:
+            discovered = await discover_profiles(app_config)
+            app["discovered_profiles"] = discovered
+            logger.info("Auto-discovered {} profile(s): {}", len(discovered), discovered)
+        except Exception:
+            logger.warning("Profile discovery failed (non-fatal)")
+            app["discovered_profiles"] = []
+
+        # Start claude-usage probes for discovered + configured profiles
         probe_interval = config.get("probe_interval", 1800)
-        for profile in config.get("probe_profiles", []):
+        config_profiles = config.get("probe_profiles", [])
+        all_profiles = sorted(set(app["discovered_profiles"] + config_profiles))
+        for profile in all_profiles:
 
             def _log_usage(result, _p=profile):
                 logger.info(
