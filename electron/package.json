@@ -1,0 +1,15 @@
+{
+  "name": "supreme-claudemander",
+  "version": "0.1.0",
+  "description": "Electron shell for Supreme Claudemander — standalone RTS window with full hotkey control",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:dev": "electron . --dev"
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}
