@@ -18,7 +18,7 @@ from .discovery import discover_hubs  # noqa: E402
 from .startup import run_startup  # noqa: E402
 from .util_container import ensure_util_container, discover_profiles  # noqa: E402
 from .sessions import SessionManager  # noqa: E402
-from .cards import ServiceCardRegistry, ClaudeUsageCard  # noqa: E402
+from .cards import ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegistry  # noqa: E402
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
@@ -319,7 +319,11 @@ async def _session_ws_input_loop(ws: web.WebSocketResponse, session, mgr: Sessio
 
 
 async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
-    """Create a new persistent session and attach via WebSocket."""
+    """Create a new persistent session and attach via WebSocket.
+
+    Creates a TerminalCard, registers it in the CardRegistry, starts
+    the PTY, then bridges the WebSocket to the session.
+    """
     cmd = request.query.get("cmd", "").strip()
     hub = request.query.get("hub", "")
     container = request.query.get("container", "").strip()
@@ -327,18 +331,27 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
         raise web.HTTPBadRequest(text="Missing 'cmd' query parameter")
 
     mgr: SessionManager = request.app["session_manager"]
+    card_registry: CardRegistry = request.app["card_registry"]
 
     ws = web.WebSocketResponse()
     await ws.prepare(request)
 
     try:
-        session = mgr.create_session(cmd, hub=hub or None, container=container or None)
+        card = TerminalCard(
+            session_manager=mgr,
+            cmd=cmd,
+            hub=hub or None,
+            container=container or None,
+        )
+        await card.start()
+        card_registry.register(card)
     except Exception:
         logger.exception("Failed to create session for cmd={!r}", cmd)
         await ws.send_str(json.dumps({"error": "Failed to spawn terminal"}))
         await ws.close()
         return ws
 
+    session = card.session
     await ws.send_str(json.dumps({"session_id": session.session_id, "tmux": session.tmux_backed}))
     await mgr.attach(session.session_id, ws)
 
@@ -348,12 +361,24 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
 
 
 async def session_attach_handler(request: web.Request) -> web.WebSocketResponse:
-    """Attach to an existing persistent session via WebSocket."""
+    """Attach to an existing persistent session via WebSocket.
+
+    Looks up the TerminalCard in the CardRegistry first, falling back
+    to a plain SessionManager lookup for legacy sessions.
+    """
     session_id = request.match_info["session_id"]
     mgr: SessionManager = request.app["session_manager"]
+    card_registry: CardRegistry = request.app["card_registry"]
 
     ws = web.WebSocketResponse()
     await ws.prepare(request)
+
+    # Try CardRegistry first, then fall back to SessionManager
+    card = card_registry.get_terminal(session_id)
+    if card and not card.alive:
+        # Card exists but PTY died — unregister stale card
+        card_registry.unregister(session_id)
+        card = None
 
     scrollback = await mgr.attach(session_id, ws)
     if scrollback is None:
@@ -688,6 +713,7 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
         registry = ServiceCardRegistry(session_manager=mgr)
         registry.register_type("claude-usage", ClaudeUsageCard)
         app["service_card_registry"] = registry
+        app["card_registry"] = CardRegistry()
         mgr.start_orphan_reaper()
 
         # Probe tmux availability and recover existing sessions
@@ -753,6 +779,8 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
             asyncio.create_task(_start_probe())
 
     async def on_shutdown(app: web.Application) -> None:
+        if "card_registry" in app:
+            await app["card_registry"].stop_all()
         if "service_card_registry" in app:
             await app["service_card_registry"].stop_all()
         if "session_manager" in app:
