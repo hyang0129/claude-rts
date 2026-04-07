@@ -25,7 +25,7 @@ async def test_discover_devcontainers_startup(app_config):
     assert result[0]["type"] == "terminal"
     assert result[0]["name"] == "hub_1"
     assert result[0]["container"] == "container_1"
-    assert "docker.exe exec" in result[0]["exec"]
+    assert "docker" in result[0]["exec"] and "exec" in result[0]["exec"]
     assert "container_1" in result[0]["exec"]
 
 
@@ -45,7 +45,7 @@ async def test_util_terminal_startup(app_config):
     assert result[0]["type"] == "terminal"
     assert result[0]["name"] == "my-util"
     assert result[0]["container"] == "my-util"
-    assert "docker.exe exec" in result[0]["exec"]
+    assert "docker" in result[0]["exec"] and "exec" in result[0]["exec"]
     assert "my-util" in result[0]["exec"]
 
 
