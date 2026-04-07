@@ -40,7 +40,7 @@ npx electron . --port 3001
 
 ## What the shell does
 
-- Loads `http://localhost:3000` in a frameless maximized window
+- Loads `http://localhost:3000` in a maximized window (no browser chrome)
 - Suppresses all Chromium keyboard shortcuts (Ctrl+W, Ctrl+R, Ctrl+T, F5, etc.)
 - Blocks the right-click context menu
 - Blocks middle-click auto-scroll

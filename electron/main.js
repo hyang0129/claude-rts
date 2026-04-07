@@ -5,9 +5,13 @@ const path = require("path");
 const args = process.argv.slice(2);
 const isDev = args.includes("--dev");
 const portArgIndex = args.indexOf("--port");
-const port =
+const parsedPort =
   portArgIndex !== -1 && args[portArgIndex + 1]
     ? parseInt(args[portArgIndex + 1], 10)
+    : 3000;
+const port =
+  Number.isFinite(parsedPort) && parsedPort >= 1 && parsedPort <= 65535
+    ? parsedPort
     : 3000;
 const backendUrl = `http://localhost:${port}`;
 
@@ -31,7 +35,6 @@ function createWindow() {
       contextIsolation: true,
       // Disable features not needed for an RTS
       spellcheck: false,
-      enableWebSQL: false,
     },
   });
 
@@ -71,8 +74,8 @@ function createWindow() {
       if (isDev && input.key === "F12") {
         return; // allow DevTools in dev mode
       }
-      // Allow F11 for fullscreen toggle
-      if (input.key === "F11") {
+      // F11 toggles fullscreen — only on keyDown to avoid double-toggle
+      if (input.key === "F11" && input.type === "keyDown") {
         mainWindow.setFullScreen(!mainWindow.isFullScreen());
         _event.preventDefault();
         return;
@@ -107,6 +110,24 @@ function createWindow() {
   // Block new window creation (e.g. target="_blank" links)
   mainWindow.webContents.setWindowOpenHandler(() => {
     return { action: "deny" };
+  });
+
+  // Show a friendly error page if the backend is not reachable
+  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDesc) => {
+    const errorHtml = `
+      <html><body style="background:#1a1a2e;color:#e0e0e0;font-family:monospace;
+        display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+        <div style="text-align:center;max-width:500px">
+          <h1 style="color:#ff6b6b">Backend Unreachable</h1>
+          <p>Could not connect to <code>${backendUrl}</code></p>
+          <p style="color:#888">${errorDesc} (${errorCode})</p>
+          <p style="margin-top:2em">Start the backend first:</p>
+          <code style="background:#2a2a3e;padding:8px 16px;border-radius:4px">
+            python -m claude_rts
+          </code>
+        </div>
+      </body></html>`;
+    mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(errorHtml)}`);
   });
 
   // Load the backend URL
