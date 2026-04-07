@@ -229,13 +229,12 @@ async def test_delete_canvas_not_found_via_api(client, app_config):
     assert resp.status == 404
 
 
-async def test_delete_main_canvas_forbidden(client, app_config):
-    """DELETE returns 400 when trying to delete 'main' canvas."""
-    # Create main canvas first
-    layout = {"name": "main", "canvas_size": [3840, 2160], "cards": []}
-    await client.put("/api/canvases/main", json=layout)
+async def test_delete_default_canvas_forbidden(client, app_config):
+    """DELETE returns 400 when trying to delete 'probe-qa' canvas."""
+    layout = {"name": "probe-qa", "canvas_size": [3840, 2160], "cards": []}
+    await client.put("/api/canvases/probe-qa", json=layout)
 
-    resp = await client.delete("/api/canvases/main")
+    resp = await client.delete("/api/canvases/probe-qa")
     assert resp.status == 400
 
 

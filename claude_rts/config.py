@@ -46,9 +46,9 @@ DEFAULT_CONFIG = {
     "paste": "ctrl-shift-v",
     "rightclick": "paste",
     "idle_threshold": 5,
-    "default_canvas": "main",
+    "default_canvas": "probe-qa",
     "theme": "catppuccin-mocha",
-    "startup_script": "discover-devcontainers",
+    "startup_script": "util-terminal",
     "util_container": {
         "name": "supreme-claudemander-util",
         "image": "supreme-claudemander-util:latest",

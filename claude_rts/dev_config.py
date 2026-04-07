@@ -25,7 +25,10 @@ _FIXTURE_CONFIG = {
         "tmux_persistence": True,
     },
     "util_container": {
+        "name": "supreme-claudemander-util",
+        "image": "supreme-claudemander-util:latest",
         "auto_start": True,
+        "auto_stop": False,
         "mounts": {
             "~/.claude-profiles": "/profiles",
         },

@@ -9,11 +9,14 @@ Custom scripts: executable files in ~/.supreme-claudemander/startup/ that output
 
 import asyncio
 import json
+import sys
 
 from loguru import logger
 
 from .config import AppConfig, read_config
 from .discovery import discover_hubs
+
+_DOCKER = "docker.exe" if sys.platform == "win32" else "docker"
 
 # Built-in script names
 BUILTIN_SCRIPTS = {"discover-devcontainers", "from-layout", "util-terminal"}
@@ -54,7 +57,7 @@ async def _builtin_discover_devcontainers() -> list[dict]:
                 "type": "terminal",
                 "name": h["hub"],
                 "container": h["container"],
-                "exec": f"docker.exe exec -it -u vscode -w /workspaces/{h['hub']} {h['container']} bash -l",
+                "exec": f"{_DOCKER} exec -it -u vscode -w /workspaces/{h['hub']} {h['container']} bash -l",
             }
         )
     logger.info("discover-devcontainers: found {} hub(s)", len(result))
@@ -71,7 +74,7 @@ async def _builtin_util_terminal(app_config: AppConfig) -> list[dict]:
             "type": "terminal",
             "name": util_name,
             "container": util_name,
-            "exec": f"docker.exe exec -it {util_name} bash -l",
+            "exec": f"{_DOCKER} exec -it {util_name} bash -l",
         }
     ]
 

@@ -1219,6 +1219,7 @@ class TerminalCard extends Card {
   }
 
   connectWs() {
+    this._intentionalClose = false;
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     let wsUrl;
     if (this.sessionId) {

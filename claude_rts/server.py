@@ -104,8 +104,8 @@ async def canvas_put_handler(request: web.Request) -> web.Response:
 async def canvas_delete_handler(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     logger.info("Canvas '{}' delete requested by {}", name, request.remote)
-    if name == "main":
-        raise web.HTTPBadRequest(text="Cannot delete the 'main' canvas")
+    if name == "probe-qa":
+        raise web.HTTPBadRequest(text="Cannot delete the 'probe-qa' canvas")
     app_config: AppConfig = request.app["app_config"]
     ok = delete_canvas(app_config, name)
     if not ok:
@@ -588,11 +588,9 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_get("/ws/{hub}", websocket_handler)
 
     # Lifecycle hooks
-    config = read_config(app_config)
-    session_config = config.get("sessions", {})
-
     async def on_startup(app: web.Application) -> None:
-        app_config: AppConfig = app["app_config"]
+        config = read_config(app_config)
+        session_config = config.get("sessions", {})
         mgr = SessionManager(
             orphan_timeout=session_config.get("orphan_timeout", 300),
             scrollback_size=session_config.get("scrollback_size", 65536),
