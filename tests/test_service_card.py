@@ -1,6 +1,7 @@
 """Tests for ServiceCard: run_probe, subscriber notifications, start/stop lifecycle."""
 
 import asyncio
+import time
 
 from claude_rts.cards.service_card import ServiceCard
 from tests.conftest import ProbeCard, MockSession, MockSessionManager
@@ -199,3 +200,112 @@ async def test_run_probe_destroys_session_on_success():
     await card.run_probe()
 
     assert mgr.destroyed == ["mock-session-01"]
+
+
+# ── Cooldown tests ─────────────────────────────────────────────────────────
+
+
+async def test_cooldown_first_probe_allowed():
+    """First probe for a credential runs normally (no cooldown in effect)."""
+    # Clear class-level cooldown state
+    ServiceCard._probe_cooldowns.clear()
+
+    session = MockSession(data=b"first probe\n", alive=False)
+    mgr = MockSessionManager(session)
+    card = ProbeCard("cooldown-test-1", mgr, probe_timeout=5.0)
+
+    result = await card.run_probe()
+
+    assert result is not None
+    assert result == {"raw": "first probe\n", "parsed": True}
+    assert "cooldown-test-1" in ServiceCard._probe_cooldowns
+
+
+async def test_cooldown_second_probe_within_window_skipped():
+    """Second probe within cooldown window returns cached result without spawning a PTY."""
+    ServiceCard._probe_cooldowns.clear()
+
+    session = MockSession(data=b"probe output\n", alive=False)
+    mgr = MockSessionManager(session)
+    card = ProbeCard("cooldown-test-2", mgr, probe_timeout=5.0)
+
+    # First probe: runs normally
+    result1 = await card.run_probe()
+    assert result1 is not None
+    assert len(mgr.destroyed) == 1  # session was created and destroyed
+
+    # Second probe: should be skipped (cooldown active)
+    result2 = await card.run_probe()
+    assert result2 == result1  # returns cached result
+    # No additional session was created/destroyed
+    assert len(mgr.destroyed) == 1
+
+
+async def test_cooldown_probe_after_window_expires_allowed():
+    """After cooldown expires, the next probe runs normally."""
+    ServiceCard._probe_cooldowns.clear()
+
+    session = MockSession(data=b"fresh probe\n", alive=False)
+    mgr = MockSessionManager(session)
+    card = ProbeCard("cooldown-test-3", mgr, probe_timeout=5.0)
+
+    # First probe
+    result1 = await card.run_probe()
+    assert result1 is not None
+    assert len(mgr.destroyed) == 1
+
+    # Simulate cooldown expiry by backdating the timestamp
+    ServiceCard._probe_cooldowns["cooldown-test-3"] = (
+        time.monotonic() - ServiceCard.PROBE_COOLDOWN_SECONDS - 1
+    )
+
+    # Probe again: should run because cooldown has expired
+    result2 = await card.run_probe()
+    assert result2 is not None
+    assert len(mgr.destroyed) == 2  # second session was created and destroyed
+
+
+async def test_cooldown_shared_across_instances():
+    """Two card instances with the same identity share the same cooldown window."""
+    ServiceCard._probe_cooldowns.clear()
+
+    session1 = MockSession(data=b"card1 output\n", alive=False)
+    mgr1 = MockSessionManager(session1)
+    card1 = ProbeCard("shared-identity", mgr1, probe_timeout=5.0)
+
+    session2 = MockSession(data=b"card2 output\n", alive=False)
+    mgr2 = MockSessionManager(session2)
+    card2 = ProbeCard("shared-identity", mgr2, probe_timeout=5.0)
+
+    # First card probes successfully
+    result1 = await card1.run_probe()
+    assert result1 is not None
+    assert len(mgr1.destroyed) == 1
+
+    # Second card with same identity: should be skipped (cooldown from card1)
+    result2 = await card2.run_probe()
+    # card2 never ran a probe, so it returns its own _last_result (None)
+    assert result2 is None  # card2._last_result is None since it never ran
+    assert len(mgr2.destroyed) == 0  # no session was created
+
+
+async def test_cooldown_different_identities_independent():
+    """Cooldown for one identity does not affect a different identity."""
+    ServiceCard._probe_cooldowns.clear()
+
+    session_a = MockSession(data=b"output a\n", alive=False)
+    mgr_a = MockSessionManager(session_a)
+    card_a = ProbeCard("identity-a", mgr_a, probe_timeout=5.0)
+
+    session_b = MockSession(data=b"output b\n", alive=False)
+    mgr_b = MockSessionManager(session_b)
+    card_b = ProbeCard("identity-b", mgr_b, probe_timeout=5.0)
+
+    # Probe identity-a
+    result_a = await card_a.run_probe()
+    assert result_a is not None
+
+    # Probe identity-b: should run despite identity-a cooldown
+    result_b = await card_b.run_probe()
+    assert result_b is not None
+    assert len(mgr_b.destroyed) == 1  # session was created and destroyed

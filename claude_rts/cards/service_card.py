@@ -3,6 +3,7 @@
 import abc
 import asyncio
 import inspect
+import time
 from typing import Callable
 from loguru import logger
 from .base import BaseCard
@@ -17,6 +18,14 @@ class ServiceCard(BaseCard):
 
     card_type: str = "service"
     hidden: bool = True  # Never visible in canvas UI or serialized
+
+    # Per-credential probe cooldown (seconds). Probes for the same identity
+    # within this window return the cached result instead of spawning a new PTY.
+    PROBE_COOLDOWN_SECONDS: float = 300.0
+
+    # Class-level dict: credential identity → monotonic timestamp of last probe.
+    # Shared across all instances so two cards with the same identity share a cooldown.
+    _probe_cooldowns: dict[str, float] = {}
 
     def __init__(
         self,
@@ -70,7 +79,22 @@ class ServiceCard(BaseCard):
         """Spawn a headed PTY, run probe_command(), collect output, parse, notify subscribers.
 
         Returns parsed result dict, or None on failure/timeout.
+        Skips the probe and returns cached result if the same credential identity
+        was probed within PROBE_COOLDOWN_SECONDS.
         """
+        # Per-credential cooldown check
+        last_probe_time = ServiceCard._probe_cooldowns.get(self.identity)
+        if last_probe_time is not None:
+            elapsed = time.monotonic() - last_probe_time
+            if elapsed < self.PROBE_COOLDOWN_SECONDS:
+                logger.debug(
+                    "ServiceCard {}/{}: probe skipped — cooldown active ({:.0f}s remaining)",
+                    self.card_type,
+                    self.identity,
+                    self.PROBE_COOLDOWN_SECONDS - elapsed,
+                )
+                return self._last_result
+
         cmd = self.probe_command()
         logger.info("ServiceCard {}/{}: starting probe cmd={!r}", self.card_type, self.identity, cmd)
         try:
@@ -113,6 +137,7 @@ class ServiceCard(BaseCard):
             return None
 
         self._last_result = result
+        ServiceCard._probe_cooldowns[self.identity] = time.monotonic()
         logger.info(
             "ServiceCard {}/{}: probe succeeded, notifying {} subscriber(s)",
             self.card_type,
