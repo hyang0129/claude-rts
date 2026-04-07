@@ -21,6 +21,36 @@ Verify the port is free before starting. Running multiple instances causes port 
 - **No container lifecycle management**: supreme-claudemander only attaches to running containers. Starting/stopping is out of scope.
 - **docker.exe not docker**: On Windows, `docker` (no extension) is a shell script that `CreateProcessW` can't execute. Always use `docker.exe`.
 
+## Dev Config Presets
+
+`--dev-config [PRESET]` starts the server with an isolated config directory (`~/.supreme-claudemander-dev/`) that is wiped and rebuilt on every startup. Useful for testing specific features without touching the real user config.
+
+```bash
+python -m claude_rts --dev-config              # uses 'default' preset
+python -m claude_rts --dev-config profiles     # uses 'profiles' preset
+```
+
+Presets are stored as JSON fixture files in `claude_rts/dev_presets/<name>/`:
+
+```
+claude_rts/dev_presets/
+├── default/
+│   ├── config.json
+│   └── canvases/
+│       └── probe-qa.json
+└── profiles/
+    ├── config.json
+    └── canvases/
+        └── profiles-dev.json
+```
+
+To add a new preset: create a directory under `dev_presets/` with a `config.json` and at least one canvas in `canvases/`. The preset is auto-discovered by name.
+
+| Preset | Purpose |
+|--------|---------|
+| `default` | Bare util-terminal + empty probe-qa canvas |
+| `profiles` | Profile Manager widget pre-placed on canvas |
+
 ## Testing
 
 ```bash
@@ -35,6 +65,7 @@ CLAUDE_RTS_TEST_MODE=1 python -m claude_rts   # enables puppeting API at /api/te
 | `test_main.py` | 4 | CLI argument handling |
 | `test_config.py` | 23 | Config CRUD, canvas CRUD, API endpoints |
 | `test_startup.py` | 7 | Startup scripts, API endpoint |
+| `test_server_profiles.py` | 9 | Profile manager API endpoints |
 | `test_sessions.py` | 30 | ScrollbackBuffer, SessionManager, test puppeting API |
 
 Tests use `MockPty` to avoid needing Docker.
@@ -50,6 +81,8 @@ Tests use `MockPty` to avoid needing Docker.
 | GET/PUT/DELETE | `/api/canvases/{name}` | Canvas layout CRUD |
 | GET | `/api/sessions` | List active sessions |
 | GET | `/api/widgets/system-info` | System info widget data |
+| GET | `/api/profiles` | Probe profiles with usage data, sorted by burn rate |
+| GET/PUT | `/api/profiles/priority` | Read/set priority profile |
 | WS | `/ws/session/new?cmd=...` | Create persistent PTY session |
 | WS | `/ws/session/{session_id}` | Reconnect to existing session |
 
