@@ -243,7 +243,7 @@ def get_usage(
 
             # Log screen state every 5s
             if time.time() - last_screen_log >= 5:
-                visible = [l for l in t.split("\n") if l.strip()]
+                visible = [ln for ln in t.split("\n") if ln.strip()]
                 _log(f"t={elapsed:.1f}s screen ({len(visible)} lines):")
                 for line in visible[:10]:
                     _log(f"  | {line}")
@@ -284,7 +284,7 @@ def get_usage(
 
         if not at_prompt:
             t = text()
-            visible = [l for l in t.split("\n") if l.strip()]
+            visible = [ln for ln in t.split("\n") if ln.strip()]
             _log(f"TIMEOUT waiting for claude ready state. Final screen ({len(visible)} lines):")
             for line in visible:
                 _log(f"  | {line}")
@@ -308,7 +308,7 @@ def get_usage(
             time.sleep(1)
             feed()
             t = text()
-            visible = [l for l in t.split("\n") if l.strip()]
+            visible = [ln for ln in t.split("\n") if ln.strip()]
             _log(f"  wait {i+1}s: {len(visible)} non-empty lines, has_pct={'%' in t and 'used' in t}")
             if visible:
                 for line in visible[:5]:
@@ -325,7 +325,7 @@ def get_usage(
                 break
         else:
             t = text()
-            visible = [l for l in t.split("\n") if l.strip()]
+            visible = [ln for ln in t.split("\n") if ln.strip()]
             _log(f"TIMEOUT waiting for /usage output. Final screen ({len(visible)} lines):")
             for line in visible:
                 _log(f"  | {line}")
