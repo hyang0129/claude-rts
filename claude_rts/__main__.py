@@ -17,11 +17,22 @@ def main():
     parser.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
     parser.add_argument("--test-mode", action="store_true", help="Enable test puppeting API")
     parser.add_argument("--config-dir", help="Override config directory (default: ~/.supreme-claudemander)")
+    parser.add_argument(
+        "--dev-config",
+        action="store_true",
+        help="Wipe and rebuild an isolated dev config dir (~/.supreme-claudemander-dev); never touches real user config",
+    )
     args = parser.parse_args()
 
-    if args.config_dir:
-        import os
+    import os
 
+    if args.dev_config:
+        from .dev_config import setup_dev_config
+
+        dev_dir = setup_dev_config()
+        os.environ["SUPREME_CLAUDEMANDER_CONFIG_DIR"] = str(dev_dir)
+        logger.info("Dev config active: {}", dev_dir)
+    elif args.config_dir:
         os.environ["SUPREME_CLAUDEMANDER_CONFIG_DIR"] = str(pathlib.Path(args.config_dir).resolve())
 
     # Configure loguru: remove default handler, add our own
@@ -40,8 +51,6 @@ def main():
     )
 
     logger.info("supreme-claudemander starting on http://localhost:{}", args.port)
-
-    import os
 
     test_mode = args.test_mode or os.environ.get("CLAUDE_RTS_TEST_MODE", "").lower() in ("1", "true")
     app = create_app(test_mode=test_mode)
