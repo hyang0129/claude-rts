@@ -20,20 +20,23 @@ def main():
     parser.add_argument("--config-dir", help="Override config directory (default: ~/.supreme-claudemander)")
     parser.add_argument(
         "--dev-config",
-        action="store_true",
-        help="Wipe and rebuild an isolated dev config dir (~/.supreme-claudemander-dev); never touches real user config",
+        nargs="?",
+        const="default",
+        default=None,
+        metavar="PRESET",
+        help="Wipe and rebuild an isolated dev config dir; optionally specify a preset name (default: 'default')",
     )
     args = parser.parse_args()
 
     import os
 
     # Build AppConfig early, before anything reads config from disk
-    if args.dev_config:
+    if args.dev_config is not None:
         from .dev_config import setup_dev_config
 
-        dev_dir = setup_dev_config()
+        dev_dir = setup_dev_config(preset=args.dev_config)
         app_config = config.load(dev_dir)
-        logger.info("Dev config active: {}", dev_dir)
+        logger.info("Dev config active: {} (preset={})", dev_dir, args.dev_config)
     elif args.config_dir:
         app_config = config.load(pathlib.Path(args.config_dir).resolve())
     else:

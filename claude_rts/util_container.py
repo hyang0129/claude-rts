@@ -206,6 +206,31 @@ async def exec_in_util_pty(app_config: AppConfig, cmd: str, timeout: float = 60)
     return rc, stdout
 
 
+_METADATA_DIRS = {"backups", "cache", "telemetry", "plugins", "sessions", "projects"}
+
+
+async def discover_profiles(app_config: AppConfig) -> list[str]:
+    """Scan /profiles in the util container and return sorted profile names."""
+    cfg = _get_config(app_config)
+    try:
+        cmd = f"{_DOCKER} exec {cfg['name']} find /profiles -mindepth 1 -maxdepth 1 -type d"
+        rc, stdout, _ = await _run(cmd, timeout=10)
+        if rc != 0:
+            logger.warning("discover_profiles: failed to list /profiles (rc={})", rc)
+            return []
+        names = []
+        for line in stdout.splitlines():
+            name = line.strip().rsplit("/", 1)[-1]
+            if name and not name.startswith(".") and name not in _METADATA_DIRS:
+                names.append(name)
+        names.sort()
+        logger.info("discover_profiles: found {} profile(s): {}", len(names), names)
+        return names
+    except Exception:
+        logger.exception("discover_profiles: failed to scan /profiles")
+        return []
+
+
 async def ensure_util_container(app_config: AppConfig) -> bool:
     """Ensure the utility container is running. Start if needed.
 

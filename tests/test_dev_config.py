@@ -3,7 +3,9 @@
 import json
 from unittest.mock import patch
 
-from claude_rts.dev_config import setup_dev_config, _FIXTURE_CONFIG, _FIXTURE_CANVASES
+import pytest
+
+from claude_rts.dev_config import setup_dev_config, _FIXTURE_CONFIG, _FIXTURE_CANVASES, PRESETS
 
 
 def test_setup_dev_config_creates_dir(tmp_path):
@@ -57,3 +59,28 @@ def test_setup_dev_config_idempotent(tmp_path):
         setup_dev_config()  # second call should not error
 
     assert (dev_dir / "config.json").exists()
+
+
+def test_setup_dev_config_profiles_preset(tmp_path):
+    dev_dir = tmp_path / "dev"
+    with patch("claude_rts.dev_config.DEV_CONFIG_DIR", dev_dir):
+        setup_dev_config(preset="profiles")
+
+    config = json.loads((dev_dir / "config.json").read_text())
+    assert config["default_canvas"] == "profiles-dev"
+    canvas = json.loads((dev_dir / "canvases" / "profiles-dev.json").read_text())
+    assert any(c.get("widgetType") == "profiles" for c in canvas["cards"])
+
+
+def test_setup_dev_config_unknown_preset_raises(tmp_path):
+    dev_dir = tmp_path / "dev"
+    with patch("claude_rts.dev_config.DEV_CONFIG_DIR", dev_dir):
+        with pytest.raises(ValueError, match="Unknown dev-config preset"):
+            setup_dev_config(preset="nonexistent")
+
+
+def test_all_presets_have_required_keys():
+    for name, preset in PRESETS.items():
+        assert "config" in preset, f"Preset '{name}' missing 'config' key"
+        assert "canvases" in preset, f"Preset '{name}' missing 'canvases' key"
+        assert "startup_script" in preset["config"], f"Preset '{name}' config missing 'startup_script'"

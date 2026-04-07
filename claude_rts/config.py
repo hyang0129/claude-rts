@@ -49,6 +49,8 @@ DEFAULT_CONFIG = {
     "default_canvas": "probe-qa",
     "theme": "catppuccin-mocha",
     "startup_script": "util-terminal",
+    "probe_profiles": [],
+    "priority_profile": None,
     "util_container": {
         "name": "supreme-claudemander-util",
         "image": "supreme-claudemander-util:latest",
