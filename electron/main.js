@@ -92,10 +92,9 @@ function createWindow() {
     }
   });
 
-  // --- Block context menu ---
-  mainWindow.webContents.on("context-menu", (event) => {
-    event.preventDefault();
-  });
+  // Context menu is blocked by the preload script (contextmenu event handler).
+  // No main-process handler needed — Electron's context-menu event on
+  // webContents does not support preventDefault() for suppression.
 
   // --- Disable navigation ---
   // Prevent accidental navigation via links, drag-drop, or back/forward
