@@ -5,7 +5,16 @@ Plain classes (not fixtures) so that test files can import them directly:
     from tests.conftest import ProbeCard, MockScrollback, MockSession, MockSessionManager
 """
 
+import pytest
 from claude_rts.cards.service_card import ServiceCard
+
+
+@pytest.fixture(autouse=True)
+def _clear_probe_cooldowns():
+    """Reset the class-level probe cooldown dict before each test."""
+    ServiceCard._probe_cooldowns.clear()
+    yield
+    ServiceCard._probe_cooldowns.clear()
 
 
 # ── Concrete test subclass ───────────────────────────────────────────────────

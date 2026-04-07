@@ -3,6 +3,7 @@
 import asyncio
 import re
 import sys
+import time
 
 import pyte
 from loguru import logger
@@ -103,7 +104,22 @@ class ClaudeUsageCard(ServiceCard):
         return result
 
     async def run_probe(self) -> dict | None:
-        """Override ServiceCard.run_probe to use interactive PTY puppeting."""
+        """Override ServiceCard.run_probe to use interactive PTY puppeting.
+
+        Respects the per-credential cooldown from ServiceCard: if this identity
+        was probed within PROBE_COOLDOWN_SECONDS, returns the cached result.
+        """
+        last_probe_time = ServiceCard._probe_cooldowns.get(self.identity)
+        if last_probe_time is not None:
+            elapsed = time.monotonic() - last_probe_time
+            if elapsed < self.PROBE_COOLDOWN_SECONDS:
+                logger.debug(
+                    "ClaudeUsageCard {}: probe skipped — cooldown active ({:.0f}s remaining)",
+                    self.identity,
+                    self.PROBE_COOLDOWN_SECONDS - elapsed,
+                )
+                return self._last_result
+
         return await self._puppet_probe()
 
     async def start_visible_probe(self) -> str:
@@ -302,6 +318,7 @@ class ClaudeUsageCard(ServiceCard):
 
         if result is not None:
             self._last_result = result
+            ServiceCard._probe_cooldowns[self.identity] = time.monotonic()
             logger.info(
                 "ClaudeUsageCard {}: probe succeeded, notifying {} subscriber(s)",
                 self.identity,
