@@ -86,13 +86,9 @@ class ClaudeUsageCard(ServiceCard):
     def probe_command(self) -> str:
         util = self._container or "supreme-claudemander-util"
         if not _SAFE_IDENTIFIER.match(self.identity):
-            raise ValueError(
-                f"ClaudeUsageCard: identity {self.identity!r} must match ^[a-zA-Z0-9._-]+$"
-            )
+            raise ValueError(f"ClaudeUsageCard: identity {self.identity!r} must match ^[a-zA-Z0-9._-]+$")
         if not _SAFE_IDENTIFIER.match(util):
-            raise ValueError(
-                f"ClaudeUsageCard: container {util!r} must match ^[a-zA-Z0-9._-]+$"
-            )
+            raise ValueError(f"ClaudeUsageCard: container {util!r} must match ^[a-zA-Z0-9._-]+$")
         return (
             f"{_DOCKER} exec -it {util} "
             f"env CLAUDE_CONFIG_DIR=/profiles/{self.identity} "

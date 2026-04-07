@@ -58,9 +58,7 @@ def _setup_file_logger(claude_dir: str | None) -> None:
     log_dir = claude_dir if claude_dir else os.path.expanduser("~/.claude")
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, "claude-usage.log")
-    handler = logging.handlers.RotatingFileHandler(
-        log_path, maxBytes=1_000_000, backupCount=3
-    )
+    handler = logging.handlers.RotatingFileHandler(log_path, maxBytes=1_000_000, backupCount=3)
     handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     fl = logging.getLogger(f"claude_usage._file.{log_path}")
     fl.setLevel(logging.DEBUG)
@@ -107,9 +105,7 @@ def _find_claude() -> str:
     if env_bin:
         if os.path.isfile(env_bin) and os.access(env_bin, os.X_OK):
             return env_bin
-        raise FileNotFoundError(
-            f"CLAUDE_BIN is set to {env_bin!r} but it is not an executable file."
-        )
+        raise FileNotFoundError(f"CLAUDE_BIN is set to {env_bin!r} but it is not an executable file.")
 
     # 2. PATH lookup
     if shutil.which("claude"):
@@ -125,9 +121,7 @@ def _find_claude() -> str:
         matches = sorted(glob.glob(pattern))
         if matches:
             return matches[-1]
-    raise FileNotFoundError(
-        "claude not found. Install Claude Code, add it to PATH, or set CLAUDE_BIN."
-    )
+    raise FileNotFoundError("claude not found. Install Claude Code, add it to PATH, or set CLAUDE_BIN.")
 
 
 def _parse_screen(text: str) -> Usage:
@@ -142,7 +136,7 @@ def _parse_screen(text: str) -> Usage:
         pct = float(m.group(1))
 
         # Look backward for context
-        ctx = " ".join(lines[max(0, i - 3):i]).lower()
+        ctx = " ".join(lines[max(0, i - 3) : i]).lower()
 
         # Look forward for reset time
         resets = None
@@ -252,8 +246,7 @@ def get_usage(
             # 1. Bail out early if claude is showing the login/auth screen
             if _is_login_screen(t):
                 raise PermissionError(
-                    "Not authenticated: claude is prompting for login. "
-                    "Run `claude` interactively to log in first."
+                    "Not authenticated: claude is prompting for login. Run `claude` interactively to log in first."
                 )
 
             # 2. Handle workspace trust prompt ("Yes, I trust this folder")
@@ -309,14 +302,13 @@ def get_usage(
             feed()
             t = text()
             visible = [ln for ln in t.split("\n") if ln.strip()]
-            _log(f"  wait {i+1}s: {len(visible)} non-empty lines, has_pct={'%' in t and 'used' in t}")
+            _log(f"  wait {i + 1}s: {len(visible)} non-empty lines, has_pct={'%' in t and 'used' in t}")
             if visible:
                 for line in visible[:5]:
                     _log(f"    | {line}")
             if _is_login_screen(t):
                 raise PermissionError(
-                    "Not authenticated: claude is prompting for login. "
-                    "Run `claude` interactively to log in first."
+                    "Not authenticated: claude is prompting for login. Run `claude` interactively to log in first."
                 )
             if "%" in t and "used" in t:
                 # Give it a moment to finish rendering
@@ -422,9 +414,7 @@ def _print_usage(usage: Usage, label: str | None = None) -> bool:
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Check Claude Max/Pro usage limits"
-    )
+    parser = argparse.ArgumentParser(description="Check Claude Max/Pro usage limits")
     parser.add_argument(
         "--claude-dir",
         action="append",
@@ -435,15 +425,21 @@ def main():
         help="Explicit path to the claude binary (skips auto-discovery)",
     )
     parser.add_argument(
-        "--json", action="store_true", dest="as_json",
+        "--json",
+        action="store_true",
+        dest="as_json",
         help="Output as JSON",
     )
     parser.add_argument(
-        "-v", "--verbose", action="store_true",
+        "-v",
+        "--verbose",
+        action="store_true",
         help="Enable debug logging (shows raw screen output on failure)",
     )
     parser.add_argument(
-        "--timeout", type=int, default=DEFAULT_TIMEOUT,
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT,
         help=f"Timeout in seconds (default: {DEFAULT_TIMEOUT})",
     )
     args = parser.parse_args()
@@ -461,10 +457,12 @@ def main():
             # Multi-account parallel mode
             results = get_usage_multi(dirs, claude_bin=bin_path, timeout=args.timeout)
             if args.as_json:
-                print(json.dumps(
-                    {d: u.to_dict() if u else None for d, u in results.items()},
-                    indent=2,
-                ))
+                print(
+                    json.dumps(
+                        {d: u.to_dict() if u else None for d, u in results.items()},
+                        indent=2,
+                    )
+                )
             else:
                 any_data = False
                 for d, usage in results.items():

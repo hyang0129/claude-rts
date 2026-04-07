@@ -21,6 +21,7 @@ def main():
 
     if args.config_dir:
         import os
+
         os.environ["SUPREME_CLAUDEMANDER_CONFIG_DIR"] = str(pathlib.Path(args.config_dir).resolve())
 
     # Configure loguru: remove default handler, add our own
