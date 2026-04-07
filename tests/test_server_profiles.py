@@ -32,7 +32,7 @@ def app(tmp_path):
 @pytest.fixture
 async def client(aiohttp_client, app):
     with patch("claude_rts.server.discover_profiles", new_callable=AsyncMock, return_value=[]):
-        return await aiohttp_client(app)
+        yield await aiohttp_client(app)
 
 
 def _make_mock_card(last_result=_FAKE_RESULT):

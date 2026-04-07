@@ -206,12 +206,13 @@ async def exec_in_util_pty(app_config: AppConfig, cmd: str, timeout: float = 60)
     return rc, stdout
 
 
+_METADATA_DIRS = {"backups", "cache", "telemetry", "plugins", "sessions", "projects"}
+
+
 async def discover_profiles(app_config: AppConfig) -> list[str]:
     """Scan /profiles in the util container and return sorted profile names."""
     cfg = _get_config(app_config)
     try:
-        # List immediate subdirectories of /profiles, filtering Claude metadata dirs
-        _METADATA_DIRS = {"backups", "cache", "telemetry", "plugins", "sessions", "projects"}
         cmd = f'{_DOCKER} exec {cfg["name"]} find /profiles -mindepth 1 -maxdepth 1 -type d'
         rc, stdout, _ = await _run(cmd, timeout=10)
         if rc != 0:
