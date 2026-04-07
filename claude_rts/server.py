@@ -448,6 +448,64 @@ async def test_sessions_list(request: web.Request) -> web.Response:
     return web.json_response(mgr.list_sessions())
 
 
+async def claude_usage_handler(request: web.Request) -> web.Response:
+    """POST /api/claude-usage
+
+    Accepts {"profile": "name"} in the request body.
+
+    First call for a profile:
+      - Creates a ClaudeUsageCard via the service card registry
+      - Runs an initial probe (blocking until complete or timeout)
+      - Stores the card reference server-side keyed by profile
+
+    Subsequent calls for the same profile:
+      - Reuses the existing service card
+      - Returns its most recent probe result
+
+    Returns the probe result dict as JSON, or 503 if the probe failed.
+    """
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="Invalid JSON")
+
+    profile = body.get("profile", "").strip()
+    if not profile:
+        raise web.HTTPBadRequest(text="'profile' field required in request body")
+
+    registry: ServiceCardRegistry = request.app["service_card_registry"]
+    config = read_config()
+    util_cfg = config.get("util_container", {})
+    util_name = util_cfg.get("name", "supreme-claudemander-util")
+    probe_interval = config.get("probe_interval", 1800)
+
+    card = registry.get("claude-usage", profile)
+    if card is None:
+        # First call: create card, run initial probe (subscribe calls start() which runs probe)
+        def _noop(result):
+            pass
+
+        try:
+            card = await registry.subscribe(
+                "claude-usage",
+                profile,
+                _noop,
+                interval_seconds=probe_interval,
+                container=util_name,
+            )
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        except Exception:
+            logger.exception("claude_usage_handler: failed to create card for '{}'", profile)
+            raise web.HTTPInternalServerError(text="Failed to start probe")
+
+    result = card.last_result
+    if result is None:
+        return web.json_response({"error": "probe failed or timed out"}, status=503)
+
+    return web.json_response(result)
+
+
 async def probe_claude_usage_handler(request: web.Request) -> web.Response:
     """POST /api/probe/claude-usage?profile=<name>
 
@@ -498,6 +556,7 @@ def create_app(test_mode: bool = False) -> web.Application:
     app.router.add_put("/api/canvases/{name}", canvas_put_handler)
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
     app.router.add_get("/api/widgets/system-info", widget_system_info_handler)
+    app.router.add_post("/api/claude-usage", claude_usage_handler)
     app.router.add_post("/api/probe/claude-usage", probe_claude_usage_handler)
 
     # Session routes (must be before /ws/{hub} catch-all)
