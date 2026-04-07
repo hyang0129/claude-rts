@@ -104,8 +104,9 @@
   .terminal-titlebar .close-btn:hover { background: #f38ba8; color: #1e1e2e; }
   .terminal-titlebar .claude-btn {
     width: 20px; height: 20px; border: none; background: transparent;
-    color: #585b70; font-size: 14px; cursor: pointer; border-radius: 4px;
+    color: #cba6f7; font-size: 12px; cursor: pointer; border-radius: 4px;
     display: flex; align-items: center; justify-content: center;
+    margin-right: 4px;
   }
   .terminal-titlebar .claude-btn:hover { background: #cba6f7; color: #1e1e2e; }
   .terminal-titlebar .claude-btn:disabled { opacity: 0.3; pointer-events: none; }
@@ -1370,7 +1371,7 @@ class TerminalCard extends Card {
     const btn = document.createElement('button');
     btn.className = 'claude-btn';
     btn.title = 'Start Claude';
-    btn.textContent = '✦';
+    btn.innerHTML = '&#9654;';
 
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
