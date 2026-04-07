@@ -808,16 +808,16 @@ function showContextMenu(sx, sy) {
   html += '<div class="ctx-header">Host terminal</div>';
   const isWin = navigator.platform.startsWith('Win') || navigator.userAgent.includes('Windows');
   const hostShells = isWin ? [
-    { id: 'powershell', label: 'PowerShell', cmd: 'powershell.exe' },
-    { id: 'cmd', label: 'Command Prompt', cmd: 'cmd.exe' },
-    { id: 'util', label: 'Utility Container', cmd: 'docker.exe exec -it supreme-claudemander-util bash' },
+    { id: 'powershell', label: 'PowerShell', cmd: 'powershell.exe', container: 'localhost' },
+    { id: 'cmd', label: 'Command Prompt', cmd: 'cmd.exe', container: 'localhost' },
+    { id: 'util', label: 'Utility Container', cmd: 'docker.exe exec -it supreme-claudemander-util bash', container: 'supreme-claudemander-util' },
   ] : [
-    { id: 'zsh', label: 'zsh', cmd: '/bin/zsh -l' },
-    { id: 'bash', label: 'bash', cmd: '/bin/bash -l' },
-    { id: 'util', label: 'Utility Container', cmd: 'docker exec -it supreme-claudemander-util bash' },
+    { id: 'zsh', label: 'zsh', cmd: '/bin/zsh -l', container: 'localhost' },
+    { id: 'bash', label: 'bash', cmd: '/bin/bash -l', container: 'localhost' },
+    { id: 'util', label: 'Utility Container', cmd: 'docker exec -it supreme-claudemander-util bash', container: 'supreme-claudemander-util' },
   ];
   for (const shell of hostShells) {
-    html += `<div class="ctx-item" data-host-shell="${shell.id}" data-host-cmd="${shell.cmd}">
+    html += `<div class="ctx-item" data-host-shell="${shell.id}" data-host-cmd="${shell.cmd}" data-host-container="${shell.container}">
       <span class="symbol-preview" style="color:#89b4fa">H</span>
       ${shell.label}
     </div>`;
@@ -867,7 +867,8 @@ function showContextMenu(sx, sy) {
       e.stopPropagation();
       const shellId = item.dataset.hostShell;
       const shellCmd = item.dataset.hostCmd;
-      const hub = { hub: shellId, container: 'localhost', exec: shellCmd };
+      const shellContainer = item.dataset.hostContainer || 'localhost';
+      const hub = { hub: shellId, container: shellContainer, exec: shellCmd };
       // Add to hubs if not already there so symbol assignment works
       if (!hubSymbolMap[shellId]) {
         hubSymbolMap[shellId] = 'H';
@@ -1251,6 +1252,7 @@ class TerminalCard extends Card {
           }
           if (msg.error === 'session_not_found') {
             this.sessionId = null;
+            this._intentionalClose = true; // prevent close event from also reconnecting
             this.connectWs(); // create new session
             return;
           }
@@ -1720,7 +1722,7 @@ const DEFAULT_SETTINGS = {
   paste: 'ctrl-shift-v',
   rightclick: 'paste',
   idle_threshold: 5,
-  default_canvas: 'main',
+  default_canvas: 'probe-qa',
   theme: 'catppuccin-mocha',
 };
 let settings = { ...DEFAULT_SETTINGS };
@@ -2161,7 +2163,7 @@ async function switchCanvas(name) {
 (async function() {
   // Load settings first (determines default_canvas)
   await loadSettings();
-  currentCanvasName = settings.default_canvas || 'main';
+  currentCanvasName = settings.default_canvas || 'probe-qa';
   updateCanvasSwitcherLabel();
 
   // Load canvas list

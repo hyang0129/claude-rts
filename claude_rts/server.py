@@ -38,7 +38,7 @@ async def hubs_handler(request: web.Request) -> web.Response:
 async def startup_handler(request: web.Request) -> web.Response:
     logger.info("Startup requested by {}", request.remote)
     config = read_config()
-    script_name = config.get("startup_script", "discover-devcontainers")
+    script_name = config.get("startup_script", "util-terminal")
     try:
         result = await run_startup(script_name)
         logger.info("Startup script '{}' returned {} card(s)", script_name, len(result))
@@ -610,9 +610,13 @@ def create_app(test_mode: bool = False) -> web.Application:
         except Exception:
             logger.warning("Failed to start utility container (non-fatal)")
 
-        # Start claude-usage probes after util container is ready
+        # Probe tmux availability in the util container
         util_cfg = config.get("util_container", {})
         util_name = util_cfg.get("name", "supreme-claudemander-util")
+        if mgr.tmux_enabled:
+            await mgr.probe_tmux(util_name)
+
+        # Start claude-usage probes after util container is ready
         probe_interval = config.get("probe_interval", 1800)
         for profile in config.get("probe_profiles", []):
 

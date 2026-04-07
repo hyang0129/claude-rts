@@ -12,13 +12,13 @@ import json
 
 from loguru import logger
 
-from .config import CONFIG_DIR
+from .config import CONFIG_DIR, read_config
 from .discovery import discover_hubs
 
 STARTUP_DIR = CONFIG_DIR / "startup"
 
 # Built-in script names
-BUILTIN_SCRIPTS = {"discover-devcontainers", "from-layout"}
+BUILTIN_SCRIPTS = {"discover-devcontainers", "from-layout", "util-terminal"}
 
 
 def ensure_startup_dir() -> None:
@@ -39,6 +39,8 @@ async def run_startup(script_name: str) -> list[dict]:
         return await _builtin_discover_devcontainers()
     elif script_name == "from-layout":
         return await _builtin_from_layout()
+    elif script_name == "util-terminal":
+        return await _builtin_util_terminal()
     else:
         return await _run_custom_script(script_name)
 
@@ -58,6 +60,21 @@ async def _builtin_discover_devcontainers() -> list[dict]:
         )
     logger.info("discover-devcontainers: found {} hub(s)", len(result))
     return result
+
+
+async def _builtin_util_terminal() -> list[dict]:
+    """Return a single terminal card for the util container."""
+    config = read_config()
+    util_name = config.get("util_container", {}).get("name", "supreme-claudemander-util")
+    logger.info("util-terminal: using util container '{}'", util_name)
+    return [
+        {
+            "type": "terminal",
+            "name": util_name,
+            "container": util_name,
+            "exec": f"docker.exe exec -it {util_name} bash -l",
+        }
+    ]
 
 
 async def _builtin_from_layout() -> list[dict]:

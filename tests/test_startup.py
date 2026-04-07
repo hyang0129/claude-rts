@@ -28,6 +28,25 @@ async def test_from_layout_startup():
     assert result == []
 
 
+async def test_util_terminal_startup():
+    with patch("claude_rts.startup.read_config", return_value={"util_container": {"name": "my-util"}}):
+        result = await run_startup("util-terminal")
+
+    assert len(result) == 1
+    assert result[0]["type"] == "terminal"
+    assert result[0]["name"] == "my-util"
+    assert result[0]["container"] == "my-util"
+    assert "docker.exe exec" in result[0]["exec"]
+    assert "my-util" in result[0]["exec"]
+
+
+async def test_util_terminal_startup_default_name():
+    with patch("claude_rts.startup.read_config", return_value={}):
+        result = await run_startup("util-terminal")
+
+    assert result[0]["container"] == "supreme-claudemander-util"
+
+
 async def test_custom_script_invalid_name():
     with pytest.raises(ValueError, match="Invalid startup script name"):
         await run_startup("../etc/passwd")
