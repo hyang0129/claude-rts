@@ -217,6 +217,14 @@ class ClaudeUsageCard(ServiceCard):
                     _log_screen("rate-limited")
                     break
 
+                # First-run theme picker
+                if "Choose the text style" in t or "Let's get started" in t:
+                    logger.info("ClaudeUsageCard {}: first-run theme picker — accepting default", self.identity)
+                    _log_screen("theme-picker")
+                    session.pty.write("\r")
+                    await asyncio.sleep(2)
+                    continue
+
                 # Trust-folder dialog
                 if "Yes, I trust this folder" in t and not accepted:
                     logger.info("ClaudeUsageCard {}: trust-folder dialog — accepting", self.identity)
