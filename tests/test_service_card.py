@@ -255,9 +255,7 @@ async def test_cooldown_probe_after_window_expires_allowed():
     assert len(mgr.destroyed) == 1
 
     # Simulate cooldown expiry by backdating the timestamp
-    ServiceCard._probe_cooldowns["cooldown-test-3"] = (
-        time.monotonic() - ServiceCard.PROBE_COOLDOWN_SECONDS - 1
-    )
+    ServiceCard._probe_cooldowns["cooldown-test-3"] = time.monotonic() - ServiceCard.PROBE_COOLDOWN_SECONDS - 1
 
     # Probe again: should run because cooldown has expired
     result2 = await card.run_probe()
