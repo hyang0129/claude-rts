@@ -1,0 +1,8 @@
+{
+  "name": "start-claude-qa",
+  "canvas_size": [3840, 2160],
+  "cards": [
+    {"type": "widget", "widgetType": "profiles", "x": 100, "y": 100, "w": 600, "h": 400},
+    {"type": "terminal", "hub": "supreme-claudemander-util", "x": 750, "y": 100, "w": 900, "h": 600}
+  ]
+}

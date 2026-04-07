@@ -102,6 +102,13 @@
     display: flex; align-items: center; justify-content: center;
   }
   .terminal-titlebar .close-btn:hover { background: #f38ba8; color: #1e1e2e; }
+  .terminal-titlebar .claude-btn {
+    width: 20px; height: 20px; border: none; background: transparent;
+    color: #585b70; font-size: 14px; cursor: pointer; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .terminal-titlebar .claude-btn:hover { background: #cba6f7; color: #1e1e2e; }
+  .terminal-titlebar .claude-btn:disabled { opacity: 0.3; pointer-events: none; }
 
   .terminal-body {
     flex: 1;
@@ -1039,6 +1046,7 @@ class Card {
     // Double-click anywhere on card to zoom-to-fill
     el.addEventListener('dblclick', (e) => {
       if (e.target.closest('.close-btn')) return;
+      if (e.target.closest('.claude-btn')) return;
       zoomToCard(this);
     });
 
@@ -1192,6 +1200,7 @@ class TerminalCard extends Card {
     this.connectWs();
     this.setupInput();
     this.setupResizeObserver();
+    this.setupClaudeBtn();
   }
 
   onDestroy() {
@@ -1352,6 +1361,42 @@ class TerminalCard extends Card {
       }
     });
     this.ro.observe(body);
+  }
+
+  setupClaudeBtn() {
+    const titlebar = this.el.querySelector(`[data-drag="${this.id}"]`);
+    const closeBtn = titlebar.querySelector('.close-btn');
+
+    const btn = document.createElement('button');
+    btn.className = 'claude-btn';
+    btn.title = 'Start Claude';
+    btn.textContent = '✦';
+
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      btn.disabled = true;
+      try {
+        const resp = await fetch('/api/profiles/priority');
+        const data = await resp.json();
+        const name = data.priority_profile;
+        if (!name) {
+          this.term.write('\r\n\x1b[33m[No priority profile set — configure one in the Profile Manager]\x1b[0m\r\n');
+          return;
+        }
+        const command = `env CLAUDE_CONFIG_DIR=/profiles/${name} claude\n`;
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(new TextEncoder().encode(command));
+        } else {
+          this.term.write('\r\n\x1b[31m[Not connected — cannot send command]\x1b[0m\r\n');
+        }
+      } catch (err) {
+        this.term.write(`\r\n\x1b[31m[Error fetching priority profile: ${err.message}]\x1b[0m\r\n`);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    titlebar.insertBefore(btn, closeBtn);
   }
 }
 

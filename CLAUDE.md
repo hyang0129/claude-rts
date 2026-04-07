@@ -50,6 +50,7 @@ To add a new preset: create a directory under `dev_presets/` with a `config.json
 |--------|---------|
 | `default` | Bare util-terminal + empty probe-qa canvas |
 | `profiles` | Profile Manager widget pre-placed on canvas |
+| `start-claude` | Start Claude button QA — priority_profile pre-set, Profile Manager widget on canvas |
 
 ## Testing
 
