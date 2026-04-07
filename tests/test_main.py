@@ -81,3 +81,51 @@ def test_browser_opens_by_default():
             pass
         # on_startup should have the browser callback
         assert len(mock_app.on_startup) == 1
+
+
+def test_electron_flag_launches_electron():
+    """Verify --electron adds electron launch callback and cleanup."""
+    with (
+        patch("sys.argv", ["supreme-claudemander", "--electron"]),
+        patch("claude_rts.__main__.web") as _mock_web,
+        patch("claude_rts.__main__.create_app") as mock_create,
+        patch("claude_rts.__main__.config") as mock_config,
+        patch("claude_rts.__main__._check_electron_installed"),
+    ):
+        mock_config.load.return_value = MagicMock()
+        mock_app = MagicMock()
+        mock_app.on_startup = []
+        mock_app.on_cleanup = []
+        mock_create.return_value = mock_app
+        try:
+            main()
+        except SystemExit:
+            pass
+        # on_startup should have electron launch (not browser)
+        assert len(mock_app.on_startup) == 1
+        assert mock_app.on_startup[0].__name__ == "launch_electron"
+        # cleanup handler registered
+        assert len(mock_app.on_cleanup) == 1
+
+
+def test_electron_flag_skips_browser():
+    """Verify --electron does not also open a browser."""
+    with (
+        patch("sys.argv", ["supreme-claudemander", "--electron"]),
+        patch("claude_rts.__main__.web") as _mock_web,
+        patch("claude_rts.__main__.create_app") as mock_create,
+        patch("claude_rts.__main__.config") as mock_config,
+        patch("claude_rts.__main__._check_electron_installed"),
+        patch("claude_rts.__main__.webbrowser") as mock_wb,
+    ):
+        mock_config.load.return_value = MagicMock()
+        mock_app = MagicMock()
+        mock_app.on_startup = []
+        mock_app.on_cleanup = []
+        mock_create.return_value = mock_app
+        try:
+            main()
+        except SystemExit:
+            pass
+        # webbrowser.open should never be referenced in startup
+        mock_wb.open.assert_not_called()
