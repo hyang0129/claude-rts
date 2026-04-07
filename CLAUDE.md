@@ -71,6 +71,7 @@ CLAUDE_RTS_TEST_MODE=1 python -m claude_rts   # enables puppeting API at /api/te
 | `test_server_profiles.py` | 9 | Profile manager API endpoints |
 | `test_dev_config.py` | 8 | Dev-config preset loading and setup |
 | `test_sessions.py` | 30 | ScrollbackBuffer, SessionManager, test puppeting API |
+| `test_terminal_card.py` | 11 | TerminalCard lifecycle, CardRegistry, server integration |
 
 Tests use `MockPty` to avoid needing Docker.
 
