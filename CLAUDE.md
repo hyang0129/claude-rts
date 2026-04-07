@@ -55,8 +55,11 @@ To add a new preset: create a directory under `dev_presets/` with a `config.json
 
 ```bash
 python -m pytest tests/ -v
+python -m ruff check . && python -m ruff format --check .   # lint + format check
 CLAUDE_RTS_TEST_MODE=1 python -m claude_rts   # enables puppeting API at /api/test/...
 ```
+
+**Always run `ruff format` before committing.** CI enforces formatting via `ruff format --check`.
 
 | File | Tests | What it covers |
 |------|-------|----------------|

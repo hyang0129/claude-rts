@@ -481,23 +481,27 @@ async def profiles_list_handler(request: web.Request) -> web.Response:
         entry = {"profile": profile, "is_priority": profile == priority_profile}
         if card and card.last_result:
             r = card.last_result
-            entry.update({
-                "five_hour_pct": r.get("five_hour_pct"),
-                "five_hour_resets": r.get("five_hour_resets"),
-                "seven_day_pct": r.get("seven_day_pct"),
-                "seven_day_resets": r.get("seven_day_resets"),
-                "burn_rate": r.get("burn_rate"),
-                "probe_available": True,
-            })
+            entry.update(
+                {
+                    "five_hour_pct": r.get("five_hour_pct"),
+                    "five_hour_resets": r.get("five_hour_resets"),
+                    "seven_day_pct": r.get("seven_day_pct"),
+                    "seven_day_resets": r.get("seven_day_resets"),
+                    "burn_rate": r.get("burn_rate"),
+                    "probe_available": True,
+                }
+            )
         else:
-            entry.update({
-                "five_hour_pct": None,
-                "five_hour_resets": None,
-                "seven_day_pct": None,
-                "seven_day_resets": None,
-                "burn_rate": None,
-                "probe_available": False,
-            })
+            entry.update(
+                {
+                    "five_hour_pct": None,
+                    "five_hour_resets": None,
+                    "seven_day_pct": None,
+                    "seven_day_resets": None,
+                    "burn_rate": None,
+                    "probe_available": False,
+                }
+            )
         profiles.append(entry)
 
     # Sort by burn_rate ascending, nulls last

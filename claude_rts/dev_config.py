@@ -29,10 +29,7 @@ def list_presets() -> list[str]:
     """Return sorted list of available preset names."""
     if not _PRESETS_DIR.is_dir():
         return []
-    return sorted(
-        p.name for p in _PRESETS_DIR.iterdir()
-        if p.is_dir() and (p / "config.json").exists()
-    )
+    return sorted(p.name for p in _PRESETS_DIR.iterdir() if p.is_dir() and (p / "config.json").exists())
 
 
 def load_preset(name: str) -> dict:
@@ -74,9 +71,7 @@ def setup_dev_config(preset: str = "default") -> pathlib.Path:
     canvases_dir = DEV_CONFIG_DIR / "canvases"
     canvases_dir.mkdir(parents=True)
 
-    (DEV_CONFIG_DIR / "config.json").write_text(
-        json.dumps(fixture["config"], indent=2), encoding="utf-8"
-    )
+    (DEV_CONFIG_DIR / "config.json").write_text(json.dumps(fixture["config"], indent=2), encoding="utf-8")
 
     for name, layout in fixture["canvases"].items():
         (canvases_dir / f"{name}.json").write_text(json.dumps(layout, indent=2), encoding="utf-8")
