@@ -1,6 +1,7 @@
 """CLI entry point: start server and open browser."""
 
 import argparse
+import pathlib
 import sys
 import webbrowser
 
@@ -15,7 +16,12 @@ def main():
     parser.add_argument("--port", type=int, default=3000, help="Server port (default: 3000)")
     parser.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
     parser.add_argument("--test-mode", action="store_true", help="Enable test puppeting API")
+    parser.add_argument("--config-dir", help="Override config directory (default: ~/.supreme-claudemander)")
     args = parser.parse_args()
+
+    if args.config_dir:
+        import os
+        os.environ["SUPREME_CLAUDEMANDER_CONFIG_DIR"] = str(pathlib.Path(args.config_dir).resolve())
 
     # Configure loguru: remove default handler, add our own
     logger.remove()

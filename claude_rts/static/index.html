@@ -590,7 +590,8 @@ let IDLE_THRESHOLD_MS = 5000; // updated by settings
 // ════════════════════════════════════════════
 let cards = [];         // Card instances
 let hubs = [];          // from /api/hubs
-let hubSymbolMap = {};  // hub name -> symbol
+let hubSymbolMap = {};
+let probeProfiles = []; // from /api/config probe_profiles  // hub name -> symbol
 let pan = { x: 0, y: 0 };
 let zoom = 1;
 let isPanning = false;
@@ -835,6 +836,17 @@ function showContextMenu(sx, sy) {
     }
   }
 
+  // Claude usage probe section
+  if (probeProfiles.length > 0) {
+    html += '<div class="ctx-header">Claude usage probe</div>';
+    for (const profile of probeProfiles) {
+      html += `<div class="ctx-item" data-probe-profile="${profile}">
+        <span class="symbol-preview" style="color:#a6e3a1">P</span>
+        ${profile}
+      </div>`;
+    }
+  }
+
   ctxMenu.innerHTML = html;
   ctxMenu.style.left = sx + 'px';
   ctxMenu.style.top = sy + 'px';
@@ -871,6 +883,24 @@ function showContextMenu(sx, sy) {
       const widgetType = item.dataset.widget;
       spawnWidget(widgetType, ctxMenuCanvasPos.x, ctxMenuCanvasPos.y);
       hideContextMenu();
+    });
+  });
+
+  ctxMenu.querySelectorAll('.ctx-item[data-probe-profile]').forEach(item => {
+    item.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      hideContextMenu();
+      const profile = item.dataset.probeProfile;
+      try {
+        const resp = await fetch(`/api/probe/claude-usage?profile=${encodeURIComponent(profile)}`, { method: 'POST' });
+        if (!resp.ok) throw new Error(await resp.text());
+        const { session_id } = await resp.json();
+        const hub = { hub: `claude-probe-${profile}`, container: 'supreme-claudemander-util', exec: null };
+        if (!hubSymbolMap[hub.hub]) hubSymbolMap[hub.hub] = 'P';
+        spawnCard(hub, ctxMenuCanvasPos.x, ctxMenuCanvasPos.y, 960, 640, null, null, session_id);
+      } catch (err) {
+        console.error('Failed to start claude usage probe:', err);
+      }
     });
   });
 }
@@ -2193,6 +2223,13 @@ async function switchCanvas(name) {
       hubs = [];
     }
   }
+
+  // Fetch probe profiles from config
+  try {
+    const cfgResp = await fetch('/api/config');
+    const cfg = await cfgResp.json();
+    probeProfiles = cfg.probe_profiles || [];
+  } catch { probeProfiles = []; }
 
   // Remove loader card
   loader.destroy();

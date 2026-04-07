@@ -8,6 +8,7 @@ dependencies = [
     "pywinpty>=2.0; sys_platform == 'win32'",
     "ptyprocess>=0.7; sys_platform != 'win32'",
     "loguru>=0.7",
+    "pyte>=0.8",
 ]
 
 [project.optional-dependencies]

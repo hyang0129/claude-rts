@@ -1,0 +1,18 @@
+{
+  "startup_script": "from-layout",
+  "default_canvas": "hongy-probe",
+  "probe_profiles": ["hongy"],
+  "probe_interval": 60,
+  "sessions": {
+    "orphan_timeout": 300,
+    "scrollback_size": 65536,
+    "tmux_persistence": false
+  },
+  "util_container": {
+    "name": "supreme-claudemander-util",
+    "auto_start": false,
+    "mounts": {
+      "~/.claude-profiles": "/profiles"
+    }
+  }
+}

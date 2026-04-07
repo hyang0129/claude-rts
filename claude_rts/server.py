@@ -448,6 +448,41 @@ async def test_sessions_list(request: web.Request) -> web.Response:
     return web.json_response(mgr.list_sessions())
 
 
+async def probe_claude_usage_handler(request: web.Request) -> web.Response:
+    """POST /api/probe/claude-usage?profile=<name>
+
+    Starts a visible ClaudeUsageCard puppet probe. Returns the session_id so the
+    frontend can attach a terminal card to the live PTY session.
+    """
+    profile = request.query.get("profile", "").strip()
+    if not profile:
+        raise web.HTTPBadRequest(text="profile query parameter required")
+
+    mgr: SessionManager = request.app["session_manager"]
+    config = read_config()
+    util_cfg = config.get("util_container", {})
+    util_name = util_cfg.get("name", "supreme-claudemander-util")
+    probe_timeout = float(config.get("probe_timeout", 90))
+
+    card = ClaudeUsageCard(
+        identity=profile,
+        session_manager=mgr,
+        container=util_name,
+        probe_timeout=probe_timeout,
+        interval_seconds=999999,
+    )
+    try:
+        session_id = await card.start_visible_probe()
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc))
+    except Exception:
+        logger.exception("probe_claude_usage_handler: failed to start probe for '{}'", profile)
+        raise web.HTTPInternalServerError(text="Failed to start probe")
+
+    logger.info("probe_claude_usage_handler: started visible probe for '{}', session={}", profile, session_id)
+    return web.json_response({"session_id": session_id, "profile": profile})
+
+
 def create_app(test_mode: bool = False) -> web.Application:
     app = web.Application()
     app["test_mode"] = test_mode
@@ -463,6 +498,7 @@ def create_app(test_mode: bool = False) -> web.Application:
     app.router.add_put("/api/canvases/{name}", canvas_put_handler)
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
     app.router.add_get("/api/widgets/system-info", widget_system_info_handler)
+    app.router.add_post("/api/probe/claude-usage", probe_claude_usage_handler)
 
     # Session routes (must be before /ws/{hub} catch-all)
     app.router.add_get("/api/sessions", sessions_list_handler)
@@ -530,16 +566,19 @@ def create_app(test_mode: bool = False) -> web.Application:
                     result.get("five_hour_resets"),
                 )
 
-            try:
-                await registry.subscribe(
-                    "claude-usage",
-                    profile,
-                    _log_usage,
-                    container=util_name,
-                    interval_seconds=probe_interval,
-                )
-            except Exception:
-                logger.exception("Failed to start claude-usage probe for profile '{}'", profile)
+            async def _start_probe(_p=profile, _cb=_log_usage):
+                try:
+                    await registry.subscribe(
+                        "claude-usage",
+                        _p,
+                        _cb,
+                        container=util_name,
+                        interval_seconds=probe_interval,
+                    )
+                except Exception:
+                    logger.exception("Failed to start claude-usage probe for profile '{}'", _p)
+
+            asyncio.create_task(_start_probe())
 
     async def on_shutdown(app: web.Application) -> None:
         if "service_card_registry" in app:

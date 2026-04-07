@@ -8,3 +8,12 @@ supreme-claudemander.log
 claude-rts.log
 claude-usage-debug.log
 uv.lock
+
+# pyte installed locally (pip install --target .)
+pyte/
+wcwidth/
+pyte-*.dist-info/
+wcwidth-*.dist-info/
+
+# QA probe logs
+qa/hongy-probe/canvases/*.json.bak
