@@ -210,11 +210,19 @@ async def discover_profiles(app_config: AppConfig) -> list[str]:
     """Scan /profiles in the util container and return sorted profile names."""
     cfg = _get_config(app_config)
     try:
-        rc, stdout = await _run(f'{_DOCKER} exec {cfg["name"]} ls /profiles', timeout=10)
+        # List immediate subdirectories of /profiles, filtering Claude metadata dirs
+        _METADATA_DIRS = {"backups", "cache", "telemetry", "plugins", "sessions", "projects"}
+        cmd = f'{_DOCKER} exec {cfg["name"]} find /profiles -mindepth 1 -maxdepth 1 -type d'
+        rc, stdout, _ = await _run(cmd, timeout=10)
         if rc != 0:
-            logger.warning("discover_profiles: ls /profiles failed (rc={})", rc)
+            logger.warning("discover_profiles: failed to list /profiles (rc={})", rc)
             return []
-        names = sorted(line.strip() for line in stdout.splitlines() if line.strip())
+        names = []
+        for line in stdout.splitlines():
+            name = line.strip().rsplit("/", 1)[-1]
+            if name and not name.startswith(".") and name not in _METADATA_DIRS:
+                names.append(name)
+        names.sort()
         logger.info("discover_profiles: found {} profile(s): {}", len(names), names)
         return names
     except Exception:

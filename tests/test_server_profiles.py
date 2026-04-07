@@ -6,7 +6,7 @@ Tests the profile manager API:
 - PUT /api/profiles/priority sets the priority profile
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -31,7 +31,8 @@ def app(tmp_path):
 
 @pytest.fixture
 async def client(aiohttp_client, app):
-    return await aiohttp_client(app)
+    with patch("claude_rts.server.discover_profiles", new_callable=AsyncMock, return_value=[]):
+        return await aiohttp_client(app)
 
 
 def _make_mock_card(last_result=_FAKE_RESULT):
@@ -44,7 +45,8 @@ def _make_mock_card(last_result=_FAKE_RESULT):
 
 
 async def test_profiles_list_empty(client, tmp_path):
-    """No probe_profiles in config returns empty list."""
+    """No probe_profiles and no discovered profiles returns empty list."""
+
     resp = await client.get("/api/profiles")
     assert resp.status == 200
     data = await resp.json()
@@ -53,6 +55,7 @@ async def test_profiles_list_empty(client, tmp_path):
 
 async def test_profiles_list_with_data(client, tmp_path):
     """Profiles with probe data are returned sorted by burn_rate ascending."""
+
     app_config = client.app["app_config"]
     cfg = config.read_config(app_config)
     cfg["probe_profiles"] = ["alice", "bob"]
@@ -79,6 +82,7 @@ async def test_profiles_list_with_data(client, tmp_path):
 
 async def test_profiles_list_no_probe_result(client, tmp_path):
     """Profile with no probe result shows probe_available=False."""
+
     app_config = client.app["app_config"]
     cfg = config.read_config(app_config)
     cfg["probe_profiles"] = ["hongy"]

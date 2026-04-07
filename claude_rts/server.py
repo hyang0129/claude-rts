@@ -633,6 +633,7 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app = web.Application()
     app["app_config"] = app_config
     app["test_mode"] = test_mode
+    app["discovered_profiles"] = []
 
     # Static + API routes
     app.router.add_get("/", index_handler)
