@@ -129,3 +129,55 @@ Every widget requires exactly three coordinated changes:
 
 Do not create standalone pages, inline fetch calls outside `WIDGET_REGISTRY`, or ad-hoc refresh logic. The `WidgetCard` lifecycle (auto-refresh, state tracking, drag/resize, serialization) only works through the registry.
 
+## EventBus
+
+`EventBus` (`claude_rts/event_bus.py`) is the central pub/sub backbone for server-side cross-card communication. It lives at `app["event_bus"]` and is injected into cards via `BaseCard.bus`.
+
+### Emitting events from a card
+
+Any card subclass can emit:
+
+```python
+if self.bus is not None:
+    await self.bus.emit("probe:claude-usage", result_dict)
+```
+
+ServiceCard does this automatically in `_notify_subscribers()` — after legacy callback delivery, it emits `probe:{card_type}`.
+
+### Subscribing to events
+
+From a handler, widget, or card:
+
+```python
+bus: EventBus = request.app["event_bus"]
+bus.subscribe("probe:claude-usage", my_callback)
+```
+
+Callbacks receive `(event_type: str, payload: dict)`. They may be sync or async (async callbacks are fire-and-forget via `asyncio.create_task`). Exceptions are logged, never propagated.
+
+Wildcard: `bus.subscribe("*", cb)` receives every event.
+
+### Event naming conventions
+
+Events follow `{namespace}:{action}` format:
+
+| Event pattern | Emitter | Payload |
+|---|---|---|
+| `probe:{card_type}` | ServiceCard subclasses | Parsed probe result dict |
+| `card:registered` | CardRegistry | `{card_id, card_type}` |
+| `card:unregistered` | CardRegistry | `{card_id, card_type}` |
+| `terminal:started` | TerminalCard (future) | `{session_id, cmd, hub, container}` |
+| `terminal:stopped` | TerminalCard (future) | `{session_id}` |
+
+New card types add their own namespaced events following this pattern.
+
+### Shutdown
+
+`event_bus.clear()` is called during `on_shutdown` to remove all subscriptions and cancel pending async tasks.
+
+### Test table update
+
+| File | Tests | What it covers |
+|------|-------|----------------|
+| `test_event_bus.py` | 13 | EventBus core (subscribe, emit, unsubscribe, wildcard, async, errors, clear) + integration (ServiceCard bus emit, CardRegistry events) |
+

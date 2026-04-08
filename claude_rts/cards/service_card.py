@@ -148,7 +148,12 @@ class ServiceCard(BaseCard):
         return result
 
     async def _notify_subscribers(self, result: dict) -> None:
-        """Notify all subscribers with the probe result. Fire-and-forget for async callbacks."""
+        """Notify all subscribers with the probe result. Fire-and-forget for async callbacks.
+
+        Also emits a ``probe:{card_type}`` event on the EventBus if one is
+        attached, so that any card or handler can react without a direct
+        subscription to this ServiceCard instance.
+        """
         for cb in list(self._subscribers):
             try:
                 ret = cb(result)
@@ -158,6 +163,10 @@ class ServiceCard(BaseCard):
                     task.add_done_callback(self._pending_tasks.discard)
             except Exception:
                 logger.exception("ServiceCard {}/{}: subscriber callback raised", self.card_type, self.identity)
+
+        # Emit on the EventBus (if wired)
+        if self._bus is not None:
+            await self._bus.emit(f"probe:{self.card_type}", result)
 
     async def start(self) -> None:
         """Run an initial probe immediately, then start the periodic probe loop."""

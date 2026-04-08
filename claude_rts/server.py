@@ -18,7 +18,7 @@ from .discovery import discover_hubs  # noqa: E402
 from .startup import run_startup  # noqa: E402
 from .util_container import ensure_util_container, discover_profiles  # noqa: E402
 from .sessions import SessionManager  # noqa: E402
-from .cards import ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegistry  # noqa: E402
+from .cards import ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegistry, EventBus  # noqa: E402
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
@@ -710,10 +710,12 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
             tmux_enabled=session_config.get("tmux_persistence", True),
         )
         app["session_manager"] = mgr
+        event_bus = EventBus()
+        app["event_bus"] = event_bus
         registry = ServiceCardRegistry(session_manager=mgr)
         registry.register_type("claude-usage", ClaudeUsageCard)
         app["service_card_registry"] = registry
-        app["card_registry"] = CardRegistry()
+        app["card_registry"] = CardRegistry(bus=event_bus)
         mgr.start_orphan_reaper()
 
         # Probe tmux availability and recover existing sessions
@@ -783,6 +785,8 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
             await app["card_registry"].stop_all()
         if "service_card_registry" in app:
             await app["service_card_registry"].stop_all()
+        if "event_bus" in app:
+            app["event_bus"].clear()
         if "session_manager" in app:
             app["session_manager"].stop_all()
 
