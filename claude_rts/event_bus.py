@@ -58,11 +58,23 @@ class EventBus:
                 if inspect.isawaitable(ret):
                     task = asyncio.create_task(ret)
                     self._pending_tasks.add(task)
-                    task.add_done_callback(self._pending_tasks.discard)
+                    task.add_done_callback(lambda t: self._task_done(t, event_type))
             except Exception:
                 logger.exception(
                     "EventBus: subscriber raised for event '{}'",
                     event_type,
+                )
+
+    def _task_done(self, task: asyncio.Task, event_type: str) -> None:
+        """Done-callback for fire-and-forget async subscriber tasks."""
+        self._pending_tasks.discard(task)
+        if not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                logger.error(
+                    "EventBus: async subscriber raised for event '{}': {}",
+                    event_type,
+                    exc,
                 )
 
     def clear(self) -> None:

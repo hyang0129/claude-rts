@@ -88,6 +88,31 @@ async def test_subscriber_exception_does_not_block():
     assert received == ["ok"]
 
 
+async def test_async_subscriber_exception_is_logged():
+    """An async callback that raises still allows other subscribers to run and gets logged."""
+    bus = EventBus()
+    received: list[str] = []
+
+    async def bad_async_cb(et, p):
+        raise RuntimeError("async boom")
+
+    def good_cb(et, p):
+        received.append("ok")
+
+    bus.subscribe("ev", bad_async_cb)
+    bus.subscribe("ev", good_cb)
+
+    await bus.emit("ev", {})
+
+    # Give the async task time to complete and log the error
+    await asyncio.sleep(0.05)
+
+    # The sync subscriber still received the event
+    assert received == ["ok"]
+    # The async task should have completed (error was logged, not propagated)
+    assert len(bus._pending_tasks) == 0
+
+
 async def test_clear_removes_all_subscriptions():
     """clear() wipes all subscriptions; subsequent emit delivers nothing."""
     bus = EventBus()
