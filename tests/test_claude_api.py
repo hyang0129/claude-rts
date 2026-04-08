@@ -1,0 +1,337 @@
+"""Tests for the production Claude terminal control API endpoints."""
+
+import time
+
+import pytest
+from claude_rts import config
+from claude_rts.server import create_app
+from claude_rts.ansi_strip import strip_ansi
+
+
+# -- MockPty ---
+
+
+class MockPty:
+    """Mock PtyProcess for testing."""
+
+    def __init__(self):
+        self._alive = True
+        self._output_queue = []
+        self._written = []
+
+    def isalive(self):
+        return self._alive
+
+    def read(self):
+        if self._output_queue:
+            return self._output_queue.pop(0)
+        time.sleep(0.1)
+        if not self._alive:
+            raise EOFError()
+        return ""
+
+    def write(self, text):
+        self._written.append(text)
+
+    def setwinsize(self, rows, cols):
+        pass
+
+    def terminate(self, force=False):
+        self._alive = False
+
+    @classmethod
+    def spawn(cls, cmd, dimensions=(24, 80)):
+        return cls()
+
+
+# -- strip_ansi unit tests --
+
+
+def test_strip_ansi_removes_csi():
+    """strip_ansi removes CSI sequences (colors, cursor movement)."""
+    text = "\x1b[31mhello\x1b[0m world"
+    assert strip_ansi(text) == "hello world"
+
+
+def test_strip_ansi_removes_osc():
+    """strip_ansi removes OSC sequences (title set, etc.)."""
+    text = "\x1b]0;my title\x07some text"
+    assert strip_ansi(text) == "some text"
+
+
+def test_strip_ansi_plain_text():
+    """strip_ansi passes through plain text unchanged."""
+    assert strip_ansi("hello world") == "hello world"
+
+
+def test_strip_ansi_empty():
+    """strip_ansi handles empty string."""
+    assert strip_ansi("") == ""
+
+
+def test_strip_ansi_complex():
+    """strip_ansi handles mixed ANSI codes."""
+    text = "\x1b[1;32m$ \x1b[0mls\r\n\x1b[34mdir1\x1b[0m  file.txt"
+    assert strip_ansi(text) == "$ ls\r\ndir1  file.txt"
+
+
+def test_strip_ansi_dec_private_mode():
+    """strip_ansi removes DEC private mode sequences (e.g. hide cursor, alternate screen)."""
+    text = "\x1b[?25lhidden cursor\x1b[?25h\x1b[?1049halt screen\x1b[?1049l"
+    assert strip_ansi(text) == "hidden cursoralt screen"
+
+
+# -- API endpoint tests --
+
+
+@pytest.fixture
+def app_factory(tmp_path, monkeypatch):
+    """Create a test app with MockPty."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+
+    def factory():
+        app_config = config.load(tmp_path / ".sc")
+        return create_app(app_config, test_mode=True)
+
+    return factory
+
+
+async def test_create_terminal(aiohttp_client, app_factory):
+    """POST /api/claude/terminal/create returns descriptor with session_id."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=echo+hello")
+    assert resp.status == 200
+    data = await resp.json()
+    assert "session_id" in data
+    assert data["type"] == "terminal"
+    assert data["exec"] == "echo hello"
+
+
+async def test_create_terminal_with_hub_container(aiohttp_client, app_factory):
+    """Create with hub and container params."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash&hub=myhub&container=mycont")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["hub"] == "myhub"
+    assert data["container"] == "mycont"
+
+
+async def test_create_terminal_missing_cmd(aiohttp_client, app_factory):
+    """Create without cmd returns 400."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create")
+    assert resp.status == 400
+
+
+async def test_create_terminal_with_layout(aiohttp_client, app_factory):
+    """Create with x, y, w, h layout params."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash&x=100&y=200&w=600&h=400")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["x"] == 100
+    assert data["y"] == 200
+    assert data["w"] == 600
+    assert data["h"] == 400
+
+
+async def test_send_to_terminal(aiohttp_client, app_factory):
+    """POST /api/claude/terminal/{id}/send writes to PTY."""
+    client = await aiohttp_client(app_factory())
+
+    # Create
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    data = await resp.json()
+    sid = data["session_id"]
+
+    # Send
+    resp = await client.post(f"/api/claude/terminal/{sid}/send", data="ls -la\n")
+    assert resp.status == 200
+    send_data = await resp.json()
+    assert send_data["status"] == "ok"
+    assert send_data["sent"] == 7
+
+
+async def test_send_to_nonexistent(aiohttp_client, app_factory):
+    """Send to nonexistent terminal returns 404."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/nonexistent/send", data="hello")
+    assert resp.status == 404
+
+
+async def test_read_terminal(aiohttp_client, app_factory):
+    """GET /api/claude/terminal/{id}/read returns scrollback."""
+    client = await aiohttp_client(app_factory())
+
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    data = await resp.json()
+    sid = data["session_id"]
+
+    resp = await client.get(f"/api/claude/terminal/{sid}/read")
+    assert resp.status == 200
+    read_data = await resp.json()
+    assert "output" in read_data
+    assert "size" in read_data
+    assert "total_written" in read_data
+
+
+async def test_read_terminal_strip_ansi(aiohttp_client, app_factory):
+    """GET with strip_ansi=true strips ANSI codes from output."""
+    client = await aiohttp_client(app_factory())
+
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    data = await resp.json()
+    sid = data["session_id"]
+
+    # Inject ANSI content into scrollback directly
+    mgr = client.app["session_manager"]
+    session = mgr.get_session(sid)
+    session.scrollback.append(b"\x1b[31mred\x1b[0m text")
+
+    resp = await client.get(f"/api/claude/terminal/{sid}/read?strip_ansi=true")
+    assert resp.status == 200
+    read_data = await resp.json()
+    assert "red text" in read_data["output"]
+    assert "\x1b" not in read_data["output"]
+
+
+async def test_read_nonexistent(aiohttp_client, app_factory):
+    """Read from nonexistent terminal returns 404."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.get("/api/claude/terminal/nonexistent/read")
+    assert resp.status == 404
+
+
+async def test_terminal_status(aiohttp_client, app_factory):
+    """GET /api/claude/terminal/{id}/status returns metadata."""
+    client = await aiohttp_client(app_factory())
+
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    data = await resp.json()
+    sid = data["session_id"]
+
+    resp = await client.get(f"/api/claude/terminal/{sid}/status")
+    assert resp.status == 200
+    status = await resp.json()
+    assert status["session_id"] == sid
+    assert status["alive"] is True
+    assert "age_seconds" in status
+    assert "idle_seconds" in status
+    assert "cmd" in status
+
+
+async def test_delete_terminal(aiohttp_client, app_factory):
+    """DELETE /api/claude/terminal/{id} removes from both registries."""
+    client = await aiohttp_client(app_factory())
+
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    data = await resp.json()
+    sid = data["session_id"]
+
+    # Verify it exists
+    resp = await client.get(f"/api/claude/terminal/{sid}/status")
+    assert resp.status == 200
+
+    # Delete
+    resp = await client.delete(f"/api/claude/terminal/{sid}")
+    assert resp.status == 200
+
+    # Verify gone from card registry
+    card_reg = client.app["card_registry"]
+    assert card_reg.get(sid) is None
+
+    # Verify gone from session manager
+    mgr = client.app["session_manager"]
+    assert mgr.get_session(sid) is None
+
+
+async def test_delete_nonexistent(aiohttp_client, app_factory):
+    """Delete nonexistent terminal returns 404."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.delete("/api/claude/terminal/nonexistent")
+    assert resp.status == 404
+
+
+async def test_list_terminals(aiohttp_client, app_factory):
+    """GET /api/claude/terminals lists all terminal cards."""
+    client = await aiohttp_client(app_factory())
+
+    # Create two terminals
+    resp1 = await client.post("/api/claude/terminal/create?cmd=bash")
+    resp2 = await client.post("/api/claude/terminal/create?cmd=sh")
+    d1 = await resp1.json()
+    d2 = await resp2.json()
+
+    resp = await client.get("/api/claude/terminals")
+    assert resp.status == 200
+    terminals = await resp.json()
+    assert len(terminals) == 2
+    sids = {t["session_id"] for t in terminals}
+    assert d1["session_id"] in sids
+    assert d2["session_id"] in sids
+    # Each entry should have metadata
+    for t in terminals:
+        assert "alive" in t
+        assert "age_seconds" in t
+
+
+async def test_list_terminals_empty(aiohttp_client, app_factory):
+    """GET /api/claude/terminals with no terminals returns empty list."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.get("/api/claude/terminals")
+    assert resp.status == 200
+    assert await resp.json() == []
+
+
+async def test_http_access_touches_last_client_time(aiohttp_client, app_factory):
+    """HTTP read and send should update last_client_time to prevent orphan reaping."""
+    client = await aiohttp_client(app_factory())
+
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    data = await resp.json()
+    sid = data["session_id"]
+
+    mgr = client.app["session_manager"]
+    session = mgr.get_session(sid)
+
+    # Set last_client_time to the past
+    old_time = time.monotonic() - 1000
+    session.last_client_time = old_time
+
+    # Read should touch it
+    await client.get(f"/api/claude/terminal/{sid}/read")
+    assert session.last_client_time > old_time
+
+    # Reset and test send
+    session.last_client_time = old_time
+    await client.post(f"/api/claude/terminal/{sid}/send", data="test")
+    assert session.last_client_time > old_time
+
+
+async def test_create_registers_in_card_registry(aiohttp_client, app_factory):
+    """POST create should register the TerminalCard in the CardRegistry."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    data = await resp.json()
+    sid = data["session_id"]
+
+    card_reg = client.app["card_registry"]
+    card = card_reg.get_terminal(sid)
+    assert card is not None
+    assert card.session_id == sid
+    assert card.alive is True
+
+
+async def test_create_terminal_invalid_cols(aiohttp_client, app_factory):
+    """Create with non-numeric cols returns 400."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash&cols=abc")
+    assert resp.status == 400
+
+
+async def test_create_terminal_invalid_layout(aiohttp_client, app_factory):
+    """Create with non-numeric layout param returns 400."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash&x=abc")
+    assert resp.status == 400

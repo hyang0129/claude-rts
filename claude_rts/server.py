@@ -20,6 +20,7 @@ from .util_container import ensure_util_container, discover_profiles  # noqa: E4
 from .sessions import SessionManager  # noqa: E402
 from .cards import ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegistry  # noqa: E402
 from .event_bus import EventBus  # noqa: E402
+from .ansi_strip import strip_ansi  # noqa: E402
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
@@ -659,6 +660,174 @@ async def probe_claude_usage_handler(request: web.Request) -> web.Response:
     return web.json_response({"session_id": session_id, "profile": profile})
 
 
+# ── Production Claude terminal control API ─────────────────────────────────
+
+
+async def claude_terminal_create(request: web.Request) -> web.Response:
+    """POST /api/claude/terminal/create — create a TerminalCard + PTY session."""
+    cmd = request.query.get("cmd", "").strip()
+    hub = request.query.get("hub", "")
+    container = request.query.get("container", "").strip()
+    if not cmd:
+        raise web.HTTPBadRequest(text="Missing 'cmd' query parameter")
+
+    try:
+        cols = int(request.query.get("cols", 80))
+        rows = int(request.query.get("rows", 24))
+    except ValueError:
+        raise web.HTTPBadRequest(text="'cols' and 'rows' must be integers")
+
+    x = request.query.get("x")
+    y = request.query.get("y")
+    w = request.query.get("w")
+    h = request.query.get("h")
+
+    mgr: SessionManager = request.app["session_manager"]
+    card_registry: CardRegistry = request.app["card_registry"]
+
+    card = TerminalCard(
+        session_manager=mgr,
+        cmd=cmd,
+        hub=hub or None,
+        container=container or None,
+    )
+    try:
+        await card.start()
+        card_registry.register(card)
+    except Exception:
+        logger.exception("claude_terminal_create: failed for cmd={!r}", cmd)
+        return web.json_response({"error": "Failed to spawn terminal"}, status=500)
+
+    # Resize if non-default dimensions requested
+    if cols != 80 or rows != 24:
+        try:
+            card.session.pty.setwinsize(rows, cols)
+        except Exception:
+            pass
+
+    desc = card.to_descriptor()
+    # Attach optional layout hints
+    try:
+        if x is not None:
+            desc["x"] = int(x)
+        if y is not None:
+            desc["y"] = int(y)
+        if w is not None:
+            desc["w"] = int(w)
+        if h is not None:
+            desc["h"] = int(h)
+    except ValueError:
+        raise web.HTTPBadRequest(text="Layout params (x, y, w, h) must be integers")
+
+    logger.info("claude_terminal_create: created {} for cmd={!r}", card.session_id, cmd)
+    return web.json_response(desc)
+
+
+async def claude_terminal_send(request: web.Request) -> web.Response:
+    """POST /api/claude/terminal/{id}/send — write text to PTY."""
+    card_id = request.match_info["id"]
+    card_registry: CardRegistry = request.app["card_registry"]
+    card = card_registry.get_terminal(card_id)
+    if not card or not card.alive:
+        raise web.HTTPNotFound(text="Terminal not found")
+
+    text = await request.text()
+    card.session.pty.write(text)
+    # Touch last_client_time to prevent orphan reaping
+    card.session.last_client_time = time.monotonic()
+
+    return web.json_response({"status": "ok", "sent": len(text)})
+
+
+async def claude_terminal_read(request: web.Request) -> web.Response:
+    """GET /api/claude/terminal/{id}/read — return scrollback (optionally ANSI-stripped)."""
+    card_id = request.match_info["id"]
+    card_registry: CardRegistry = request.app["card_registry"]
+    card = card_registry.get_terminal(card_id)
+    if not card or not card.alive:
+        raise web.HTTPNotFound(text="Terminal not found")
+
+    # Touch last_client_time to prevent orphan reaping
+    card.session.last_client_time = time.monotonic()
+
+    data = card.session.scrollback.get_all()
+    output = data.decode("utf-8", errors="replace")
+
+    do_strip = request.query.get("strip_ansi", "").lower() in ("true", "1", "yes")
+    if do_strip:
+        output = strip_ansi(output)
+
+    return web.json_response(
+        {
+            "output": output,
+            "size": len(data),
+            "total_written": card.session.scrollback.total_written,
+        }
+    )
+
+
+async def claude_terminal_status(request: web.Request) -> web.Response:
+    """GET /api/claude/terminal/{id}/status — session metadata."""
+    card_id = request.match_info["id"]
+    card_registry: CardRegistry = request.app["card_registry"]
+    card = card_registry.get_terminal(card_id)
+    if not card:
+        raise web.HTTPNotFound(text="Terminal not found")
+
+    session = card.session
+    now = time.monotonic()
+    return web.json_response(
+        {
+            "session_id": card.session_id,
+            "cmd": card.cmd,
+            "hub": card.hub,
+            "container": card.container,
+            "alive": card.alive,
+            "client_count": len(session.clients) if session else 0,
+            "scrollback_size": session.scrollback.size if session else 0,
+            "age_seconds": int(now - session.created_at) if session else 0,
+            "idle_seconds": int(now - session.last_client_time) if session else 0,
+        }
+    )
+
+
+async def claude_terminal_delete(request: web.Request) -> web.Response:
+    """DELETE /api/claude/terminal/{id} — stop card, clean up."""
+    card_id = request.match_info["id"]
+    card_registry: CardRegistry = request.app["card_registry"]
+
+    card = card_registry.get_terminal(card_id)
+    if not card:
+        raise web.HTTPNotFound(text="Terminal not found")
+
+    # Stop card (destroys PTY via SessionManager)
+    await card.stop()
+    card_registry.unregister(card_id)
+
+    logger.info("claude_terminal_delete: removed {}", card_id)
+    return web.json_response({"status": "ok"})
+
+
+async def claude_terminals_list(request: web.Request) -> web.Response:
+    """GET /api/claude/terminals — list all terminal cards."""
+    card_registry: CardRegistry = request.app["card_registry"]
+    terminals = card_registry.list_terminals()
+
+    result = []
+    now = time.monotonic()
+    for card in terminals:
+        desc = card.to_descriptor()
+        session = card.session
+        desc["alive"] = card.alive
+        if session:
+            desc["age_seconds"] = int(now - session.created_at)
+            desc["idle_seconds"] = int(now - session.last_client_time)
+            desc["scrollback_size"] = session.scrollback.size
+        result.append(desc)
+
+    return web.json_response(result)
+
+
 def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Application:
     app = web.Application()
     app["app_config"] = app_config
@@ -682,6 +851,14 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_put("/api/profiles/priority", priority_put_handler)
     app.router.add_post("/api/claude-usage", claude_usage_handler)
     app.router.add_post("/api/probe/claude-usage", probe_claude_usage_handler)
+
+    # Claude terminal control API (production)
+    app.router.add_post("/api/claude/terminal/create", claude_terminal_create)
+    app.router.add_post("/api/claude/terminal/{id}/send", claude_terminal_send)
+    app.router.add_get("/api/claude/terminal/{id}/read", claude_terminal_read)
+    app.router.add_get("/api/claude/terminal/{id}/status", claude_terminal_status)
+    app.router.add_delete("/api/claude/terminal/{id}", claude_terminal_delete)
+    app.router.add_get("/api/claude/terminals", claude_terminals_list)
 
     # Session routes (must be before /ws/{hub} catch-all)
     app.router.add_get("/api/sessions", sessions_list_handler)
