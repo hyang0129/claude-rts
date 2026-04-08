@@ -1,23 +1,27 @@
-"""Playwright Electron fixtures for supreme-claudemander smoke tests.
+"""Playwright fixtures for supreme-claudemander e2e tests.
 
-Launches the Python backend with --electron --dev-config stress-test,
-then connects Playwright to the Electron window.
+Launches the Python backend with --dev-config <preset>, then opens the
+app in a Chromium browser via Playwright.
+
+The dev-config preset defaults to "stress-test" and can be overridden
+per-module by defining a ``dev_config_preset`` fixture.
 """
 
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 import pytest
 
 # Skip the entire e2e module if playwright is not installed
-playwright = pytest.importorskip("playwright")
+pytest.importorskip("playwright")
 
 from playwright.sync_api import sync_playwright  # noqa: E402
 
 
-def _wait_for_server(port: int, timeout: float = 15.0) -> bool:
+def _wait_for_server(port: int, timeout: float = 30.0) -> bool:
     """Poll until the backend responds on the given port."""
     import urllib.request
     import urllib.error
@@ -33,19 +37,35 @@ def _wait_for_server(port: int, timeout: float = 15.0) -> bool:
     return False
 
 
-@pytest.fixture(scope="session")
-def backend_port():
-    """Return the port for the backend server."""
-    return int(os.environ.get("CLAUDE_RTS_PORT", "3099"))
+@pytest.fixture(scope="module")
+def dev_config_preset():
+    """Override in test modules to use a different dev-config preset."""
+    return "stress-test"
 
 
-@pytest.fixture(scope="session")
-def backend_server(backend_port):
-    """Start the backend server for the test session."""
+@pytest.fixture(scope="module")
+def backend_port(dev_config_preset):
+    """Return the port for the backend server.
+
+    Each preset gets a deterministic port to avoid collisions when
+    pytest-xdist or manual runs overlap.
+    """
+    base = int(os.environ.get("CLAUDE_RTS_PORT", "3099"))
+    # Simple hash so different presets get different ports
+    offset = sum(ord(c) for c in dev_config_preset) % 100
+    return base + offset
+
+
+@pytest.fixture(scope="module")
+def backend_server(backend_port, dev_config_preset):
+    """Start the backend server for the test module."""
     env = os.environ.copy()
     env["CLAUDE_RTS_TEST_MODE"] = "1"
-    # Remove ELECTRON_RUN_AS_NODE so Electron can launch properly
-    env.pop("ELECTRON_RUN_AS_NODE", None)
+
+    # Write server output to temp files instead of PIPE to avoid blocking
+    # when the pipe buffer fills (the server emits a lot of debug output).
+    stdout_file = tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False, prefix="rts-stdout-")
+    stderr_file = tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False, prefix="rts-stderr-")
 
     proc = subprocess.Popen(
         [
@@ -56,18 +76,22 @@ def backend_server(backend_port):
             str(backend_port),
             "--no-browser",
             "--dev-config",
-            "stress-test",
+            dev_config_preset,
             "--test-mode",
         ],
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=stdout_file,
+        stderr=stderr_file,
     )
 
-    if not _wait_for_server(backend_port):
+    if not _wait_for_server(backend_port, timeout=30.0):
         proc.terminate()
-        stdout = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
-        stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+        stdout_file.close()
+        stderr_file.close()
+        stdout = open(stdout_file.name, errors="replace").read()
+        stderr = open(stderr_file.name, errors="replace").read()
+        os.unlink(stdout_file.name)
+        os.unlink(stderr_file.name)
         pytest.fail(f"Backend did not start within timeout.\nstdout: {stdout}\nstderr: {stderr}")
 
     yield proc
@@ -77,46 +101,30 @@ def backend_server(backend_port):
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         proc.kill()
+    for f in (stdout_file, stderr_file):
+        try:
+            f.close()
+            os.unlink(f.name)
+        except OSError:
+            pass  # Windows may hold the file briefly after process exit
 
 
-@pytest.fixture(scope="session")
-def electron_app(backend_server, backend_port):
-    """Launch the Electron app via Playwright and yield the first window."""
-    import pathlib
-
-    electron_dir = pathlib.Path(__file__).resolve().parents[2] / "electron"
-    electron_exe = electron_dir / "node_modules" / "electron" / "dist" / "electron.exe"
-    if not electron_exe.exists():
-        electron_exe = electron_dir / "node_modules" / "electron" / "dist" / "electron"
-
-    if not electron_exe.exists():
-        pytest.skip("Electron not installed — run 'npm install' in electron/")
-
+@pytest.fixture(scope="module")
+def page(backend_server, backend_port):
+    """Launch Chromium and navigate to the backend URL."""
     headed = os.environ.get("HEADED", "").lower() in ("1", "true")
 
     pw = sync_playwright().start()
+    browser = pw.chromium.launch(headless=not headed)
+    pg = browser.new_page()
+    pg.goto(f"http://localhost:{backend_port}")
+    pg.wait_for_load_state("networkidle")
+    pg.wait_for_selector("#canvas", timeout=15000)
+    # Give the startup script time to spawn cards
+    pg.wait_for_timeout(3000)
 
-    launch_args = [str(electron_dir), "--port", str(backend_port)]
-    if not headed:
-        launch_args.insert(0, "--headless")
+    yield pg
 
-    app = pw._playwright.electron.launch(
-        executable_path=str(electron_exe),
-        args=launch_args,
-    )
-
-    yield app
-
-    app.close()
+    pg.close()
+    browser.close()
     pw.stop()
-
-
-@pytest.fixture(scope="session")
-def page(electron_app, backend_port):
-    """Get the first Electron window as a Playwright page."""
-    window = electron_app.first_window()
-    # Wait for the page to load the backend URL
-    window.wait_for_load_state("networkidle")
-    # Wait for the canvas element to be present
-    window.wait_for_selector("#canvas", timeout=10000)
-    return window

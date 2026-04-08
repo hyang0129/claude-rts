@@ -42,12 +42,12 @@ class TestTerminalCardSpawns:
 
     def test_terminal_card_spawns(self, page):
         """Spawn a terminal card from context menu, verify xterm container appears."""
-        # Right-click on the canvas to open context menu
-        canvas = page.locator("#canvas")
-        canvas.click(button="right", position={"x": 500, "y": 500})
+        # Right-click on the viewport (not #canvas — viewport receives the event)
+        viewport = page.locator("#viewport")
+        viewport.click(button="right", position={"x": 500, "y": 500})
 
         # Wait for context menu to appear
-        ctx_menu = page.locator("#ctx-menu")
+        ctx_menu = page.locator("#context-menu")
         ctx_menu.wait_for(state="visible", timeout=3000)
 
         # Click on a host shell item (PowerShell or bash, depending on OS)
@@ -70,11 +70,26 @@ class TestCardDrag:
 
     def test_card_drag(self, page):
         """Drag card by titlebar, verify position changes in DOM."""
-        card = page.locator("[data-card-id]").first
-        if card.count() == 0:
-            pytest.skip("No cards on canvas to drag")
+        # Pick the large terminal card (400,50 800x600) which isn't obscured
+        # by the profiles widget (10,10 600x400).
+        all_cards = page.locator("[data-card-id]")
+        card = None
+        card_id = None
+        for i in range(all_cards.count()):
+            c = all_cards.nth(i)
+            style = c.get_attribute("style") or ""
+            # The large card is at left:400px
+            if "left: 400" in style or "left:400" in style:
+                card = c
+                card_id = c.get_attribute("data-card-id")
+                break
+        if card is None:
+            # Fallback to any visible card
+            card = all_cards.first
+            if card.count() == 0:
+                pytest.skip("No cards on canvas to drag")
+            card_id = card.get_attribute("data-card-id")
 
-        # Get initial position from inline style
         initial_style = card.get_attribute("style") or ""
         initial_left_match = re.search(r"left:\s*(-?\d+(?:\.\d+)?)px", initial_style)
         if not initial_left_match:
@@ -82,8 +97,6 @@ class TestCardDrag:
 
         initial_left = float(initial_left_match.group(1))
 
-        # Find the titlebar (data-drag attribute)
-        card_id = card.get_attribute("data-card-id")
         titlebar = page.locator(f"[data-drag='{card_id}']")
         if titlebar.count() == 0:
             pytest.skip("No titlebar found for card")
@@ -113,7 +126,18 @@ class TestCardResize:
 
     def test_card_resize(self, page):
         """Resize via handle, verify dimensions update."""
-        card = page.locator("[data-card-id]").first
+        # Pick the large terminal card (800x600) which isn't obscured
+        all_cards = page.locator("[data-card-id]")
+        card = None
+        for i in range(all_cards.count()):
+            c = all_cards.nth(i)
+            style = c.get_attribute("style") or ""
+            w_match = re.search(r"width:\s*(\d+)", style)
+            if w_match and int(w_match.group(1)) >= 700:
+                card = c
+                break
+        if card is None:
+            card = all_cards.first
         if card.count() == 0:
             pytest.skip("No cards on canvas to resize")
 
@@ -187,11 +211,11 @@ class TestWidgetSpawns:
         # Count current cards
         initial_count = page.locator("[data-card-id]").count()
 
-        # Right-click on canvas
-        canvas = page.locator("#canvas")
-        canvas.click(button="right", position={"x": 600, "y": 400})
+        # Right-click on viewport (not #canvas — viewport receives the event)
+        viewport = page.locator("#viewport")
+        viewport.click(button="right", position={"x": 600, "y": 400})
 
-        ctx_menu = page.locator("#ctx-menu")
+        ctx_menu = page.locator("#context-menu")
         ctx_menu.wait_for(state="visible", timeout=3000)
 
         # Click a widget item
