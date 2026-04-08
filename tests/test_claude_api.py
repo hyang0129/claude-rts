@@ -75,6 +75,12 @@ def test_strip_ansi_complex():
     assert strip_ansi(text) == "$ ls\r\ndir1  file.txt"
 
 
+def test_strip_ansi_dec_private_mode():
+    """strip_ansi removes DEC private mode sequences (e.g. hide cursor, alternate screen)."""
+    text = "\x1b[?25lhidden cursor\x1b[?25h\x1b[?1049halt screen\x1b[?1049l"
+    assert strip_ansi(text) == "hidden cursoralt screen"
+
+
 # -- API endpoint tests --
 
 
@@ -315,3 +321,17 @@ async def test_create_registers_in_card_registry(aiohttp_client, app_factory):
     assert card is not None
     assert card.session_id == sid
     assert card.alive is True
+
+
+async def test_create_terminal_invalid_cols(aiohttp_client, app_factory):
+    """Create with non-numeric cols returns 400."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash&cols=abc")
+    assert resp.status == 400
+
+
+async def test_create_terminal_invalid_layout(aiohttp_client, app_factory):
+    """Create with non-numeric layout param returns 400."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash&x=abc")
+    assert resp.status == 400

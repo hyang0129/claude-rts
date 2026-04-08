@@ -11,8 +11,9 @@ _ANSI_RE = re.compile(
     \x1b       # ESC character
     (?:
         \[     # CSI: ESC [
-        [0-9;]*  # parameter bytes
-        [A-Za-z]  # final byte
+        [\x30-\x3f]*  # parameter bytes (0-9 ; < = > ?)
+        [\x20-\x2f]*  # intermediate bytes (space ! " # etc.)
+        [\x40-\x7e]   # final byte (@ A-Z [ \ ] ^ _ ` a-z { | } ~)
     |
         \]     # OSC: ESC ]
         .*?    # payload
