@@ -53,6 +53,7 @@ To add a new preset: create a directory under `dev_presets/` with a `config.json
 | `default` | Bare util-terminal + empty probe-qa canvas |
 | `profiles` | Profile Manager widget pre-placed on canvas |
 | `start-claude` | Start Claude button QA — priority_profile pre-set, Profile Manager widget on canvas |
+| `stress-test` | Layout QA — 6 cards at edge positions, varying sizes, overlapping z-order |
 
 ## Testing
 
@@ -77,8 +78,9 @@ CLAUDE_RTS_TEST_MODE=1 python -m claude_rts   # enables puppeting API at /api/te
 | `test_dev_config.py` | 8 | Dev-config preset loading and setup |
 | `test_sessions.py` | 30 | ScrollbackBuffer, SessionManager, test puppeting API |
 | `test_terminal_card.py` | 11 | TerminalCard lifecycle, CardRegistry, server integration |
+| `e2e/test_smoke.py` | 7 | Playwright Electron smoke tests — launch, spawn, drag, resize, widgets, pan/zoom, save/reload |
 
-Tests use `MockPty` to avoid needing Docker.
+Tests use `MockPty` to avoid needing Docker. E2E tests require Playwright and Electron (`pip install -e ".[e2e]" && python -m playwright install chromium`).
 
 ## API Endpoints
 
