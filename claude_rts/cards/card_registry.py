@@ -34,6 +34,7 @@ class CardRegistry:
         self._cards[card.id] = card
         logger.debug("CardRegistry: registered {} '{}'", card.card_type, card.id)
         if self._bus is not None:
+            # Requires a running event loop — always true when called from aiohttp handlers.
             asyncio.ensure_future(self._bus.emit("card:registered", {"card_id": card.id, "card_type": card.card_type}))
 
     def unregister(self, card_id: str) -> BaseCard | None:
