@@ -18,7 +18,8 @@ from .discovery import discover_hubs  # noqa: E402
 from .startup import run_startup  # noqa: E402
 from .util_container import ensure_util_container, discover_profiles  # noqa: E402
 from .sessions import SessionManager  # noqa: E402
-from .cards import ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegistry, EventBus  # noqa: E402
+from .cards import ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegistry  # noqa: E402
+from .event_bus import EventBus  # noqa: E402
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
