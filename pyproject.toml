@@ -18,6 +18,11 @@ test = [
     "pytest-aiohttp>=1.0",
     "ruff>=0.4",
 ]
+e2e = [
+    "pytest>=8.0",
+    "pytest-playwright>=0.4",
+    "playwright>=1.40",
+]
 
 [project.scripts]
 supreme-claudemander = "claude_rts.__main__:main"

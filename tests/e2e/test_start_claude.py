@@ -1,0 +1,173 @@
+"""Playwright e2e tests for the Start Claude button on terminal cards.
+
+Uses the ``start-claude`` dev-config preset which has:
+- priority_profile set to "test-profile"
+- A Profile Manager widget and a terminal card pre-placed on canvas
+
+Run:
+    HEADED=1 python -m pytest tests/e2e/test_start_claude.py -v
+"""
+
+import pytest
+
+pw = pytest.importorskip("playwright")
+
+
+# ── Override the preset to start-claude ────────────────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def dev_config_preset():
+    return "start-claude"
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+
+def _find_terminal_card(page):
+    """Return the first card element that has a .claude-btn (i.e. a terminal card)."""
+    btn = page.locator(".claude-btn").first
+    if btn.count() == 0:
+        return None, None
+    card = btn.locator("xpath=ancestor::*[@data-card-id]")
+    if card.count() == 0:
+        return None, None
+    return card, btn
+
+
+def _get_card_session_id(page, card):
+    """Get the WebSocket session ID from the frontend card object."""
+    card_id = card.get_attribute("data-card-id")
+    # `cards` is a module-level let in index.html, accessible from page context
+    return page.evaluate(
+        """(cardId) => {
+            // cards is a let in module scope — accessible via eval in page context
+            const c = cards.find(c => String(c.id) === String(cardId));
+            return c ? c.sessionId : null;
+        }""",
+        card_id,
+    )
+
+
+def _read_session_scrollback(page, backend_port, session_id):
+    """Read scrollback for a specific session via the puppeting API."""
+    return page.evaluate(
+        """async ([port, sid]) => {
+            const resp = await fetch(
+                `http://localhost:${port}/api/test/session/${sid}/read`
+            );
+            if (!resp.ok) return { error: `HTTP ${resp.status}` };
+            return await resp.json();
+        }""",
+        [backend_port, session_id],
+    )
+
+
+def _get_xterm_content(page, card):
+    """Read the visible text content from the xterm.js terminal in this card."""
+    card_id = card.get_attribute("data-card-id")
+    return page.evaluate(
+        """(cardId) => {
+            const c = cards.find(c => String(c.id) === String(cardId));
+            if (!c || !c.term) return '';
+            const buf = c.term.buffer.active;
+            let lines = [];
+            for (let i = 0; i < buf.length; i++) {
+                const line = buf.getLine(i);
+                if (line) lines.push(line.translateToString(true));
+            }
+            return lines.join('\\n');
+        }""",
+        card_id,
+    )
+
+
+# ── Tests ──────────────────────────────────────────────────────────────────────
+
+
+class TestStartClaudeButton:
+    """The Start Claude button on terminal cards uses the priority profile."""
+
+    def test_claude_btn_visible_on_terminal_card(self, page):
+        """Terminal cards in the start-claude preset have a .claude-btn."""
+        card, btn = _find_terminal_card(page)
+        assert btn is not None, "Expected at least one .claude-btn on a terminal card"
+        assert btn.is_visible()
+
+    def test_claude_btn_sends_priority_profile_command(self, page, backend_port):
+        """Clicking Start Claude sends 'env CLAUDE_CONFIG_DIR=/profiles/<name> claude'.
+
+        The start-claude preset sets priority_profile to "test-profile".
+        We verify the command appears in the xterm.js buffer after clicking.
+        """
+        card, btn = _find_terminal_card(page)
+        if btn is None:
+            pytest.skip("No terminal card with .claude-btn found")
+
+        # Wait for WebSocket session to be established
+        page.wait_for_timeout(3000)
+
+        btn.click()
+
+        # Wait for the command to be sent and echoed back
+        page.wait_for_timeout(3000)
+
+        # Check the xterm terminal buffer for the command
+        content = _get_xterm_content(page, card)
+
+        expected_fragment = "CLAUDE_CONFIG_DIR=/profiles/test-profile"
+        assert expected_fragment in content, f"Expected '{expected_fragment}' in xterm buffer.\nGot: {content[:500]}"
+
+    def test_priority_profile_api_returns_test_profile(self, page, backend_port):
+        """The /api/profiles/priority endpoint returns the preset's priority_profile."""
+        result = page.evaluate(
+            """async (port) => {
+                const resp = await fetch(`http://localhost:${port}/api/profiles/priority`);
+                return await resp.json();
+            }""",
+            backend_port,
+        )
+        assert result.get("priority_profile") == "test-profile", (
+            f"Expected priority_profile='test-profile', got {result}"
+        )
+
+    def test_no_priority_shows_warning(self, page, backend_port):
+        """When priority_profile is cleared, clicking Start Claude shows a warning."""
+        card, btn = _find_terminal_card(page)
+        if btn is None:
+            pytest.skip("No terminal card with .claude-btn found")
+
+        # Clear the priority profile
+        page.evaluate(
+            """async (port) => {
+                await fetch(`http://localhost:${port}/api/profiles/priority`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ priority_profile: null }),
+                });
+            }""",
+            backend_port,
+        )
+
+        page.wait_for_timeout(500)
+
+        btn.click()
+        page.wait_for_timeout(1000)
+
+        # Warning is written to xterm.js locally (not to server scrollback)
+        content = _get_xterm_content(page, card)
+        assert "No priority profile set" in content, (
+            f"Expected warning about no priority profile in xterm buffer.\nGot: {content[:500]}"
+        )
+
+        # Restore priority profile for subsequent tests
+        page.evaluate(
+            """async (port) => {
+                await fetch(`http://localhost:${port}/api/profiles/priority`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ priority_profile: 'test-profile' }),
+                });
+            }""",
+            backend_port,
+        )
