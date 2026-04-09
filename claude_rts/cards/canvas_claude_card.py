@@ -137,6 +137,11 @@ class CanvasClaudeCard(TerminalCard):
         claude process continues running (Docker-on-Windows doesn't reliably send SIGHUP
         to the container process when the exec connection drops). This cleans up before
         starting a fresh session so orphans don't accumulate.
+
+        NOTE: `pkill -x claude` kills ALL processes named 'claude' in the container.
+        Only one CanvasClaudeCard per container is supported. Running a second card
+        against the same container will kill the first card's claude process when the
+        second card starts a new session.
         """
         try:
             _subprocess.run(

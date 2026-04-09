@@ -1,4 +1,4 @@
-"""Tests for MCP server tool functions."""
+"""Tests for MCP server tool functions and JSON-RPC dispatch."""
 
 import json
 import os
@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from claude_rts.mcp_server import (
+    handle_request,
     tool_delete_terminal,
     tool_list_terminals,
     tool_open_terminal,
@@ -104,3 +105,107 @@ def test_open_terminal_missing_cmd():
 
     with pytest.raises(ValueError):
         tool_open_terminal({})
+
+
+# ── handle_request / MCP JSON-RPC dispatch tests ─────────────────────────────
+
+
+def test_handle_request_initialize():
+    """initialize returns protocol version, capabilities, and server info."""
+    msg = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+    resp = handle_request(msg)
+    assert resp["id"] == 1
+    result = resp["result"]
+    assert result["protocolVersion"] == "2024-11-05"
+    assert "tools" in result["capabilities"]
+    assert result["serverInfo"]["name"] == "canvas-mcp"
+
+
+def test_handle_request_tools_list():
+    """tools/list returns all 5 tool schemas with required fields."""
+    msg = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+    resp = handle_request(msg)
+    tools = resp["result"]["tools"]
+    names = {t["name"] for t in tools}
+    assert names == {"open_terminal", "read_terminal", "write_terminal", "list_terminals", "delete_terminal"}
+    for t in tools:
+        assert "description" in t
+        assert "inputSchema" in t
+
+
+def test_handle_request_tools_call_dispatch():
+    """tools/call dispatches to the correct handler and returns text content."""
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = json.dumps([]).encode()
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        msg = {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "list_terminals", "arguments": {}},
+        }
+        resp = handle_request(msg)
+    assert resp["id"] == 3
+    content = resp["result"]["content"]
+    assert len(content) == 1
+    assert content[0]["type"] == "text"
+    assert resp["result"]["isError"] is False
+
+
+def test_handle_request_tools_call_unknown_tool():
+    """tools/call with unknown tool returns error response."""
+    msg = {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {"name": "nonexistent_tool", "arguments": {}},
+    }
+    resp = handle_request(msg)
+    assert "error" in resp
+    assert resp["error"]["code"] == -32601
+    assert "nonexistent_tool" in resp["error"]["message"]
+
+
+def test_handle_request_tools_call_handler_error():
+    """tools/call returns isError=True when handler raises an exception."""
+    msg = {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "tools/call",
+        "params": {"name": "open_terminal", "arguments": {}},  # missing required 'cmd'
+    }
+    resp = handle_request(msg)
+    assert resp["result"]["isError"] is True
+    assert "Error:" in resp["result"]["content"][0]["text"]
+
+
+def test_handle_request_ping():
+    """ping returns empty result."""
+    msg = {"jsonrpc": "2.0", "id": 6, "method": "ping", "params": {}}
+    resp = handle_request(msg)
+    assert resp["result"] == {}
+    assert resp["id"] == 6
+
+
+def test_handle_request_notification_no_response():
+    """notifications/initialized returns None (no response for notifications)."""
+    msg = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+    resp = handle_request(msg)
+    assert resp is None
+
+
+def test_handle_request_unknown_method_with_id():
+    """Unknown method with an id returns error response."""
+    msg = {"jsonrpc": "2.0", "id": 7, "method": "bogus/method", "params": {}}
+    resp = handle_request(msg)
+    assert "error" in resp
+    assert resp["error"]["code"] == -32601
+
+
+def test_handle_request_unknown_method_notification():
+    """Unknown method without id (notification) returns None."""
+    msg = {"jsonrpc": "2.0", "method": "bogus/method", "params": {}}
+    resp = handle_request(msg)
+    assert resp is None
