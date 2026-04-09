@@ -415,3 +415,7 @@ async def test_ws_control_descriptor_has_layout(aiohttp_client, app_factory):
         assert msg["type"] == "card_created"
         desc = msg["descriptor"]
         assert desc["session_id"] is not None
+        assert desc["x"] == 100
+        assert desc["y"] == 200
+        assert desc["w"] == 600
+        assert desc["h"] == 400
