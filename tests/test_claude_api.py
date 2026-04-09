@@ -335,3 +335,87 @@ async def test_create_terminal_invalid_layout(aiohttp_client, app_factory):
     client = await aiohttp_client(app_factory())
     resp = await client.post("/api/claude/terminal/create?cmd=bash&x=abc")
     assert resp.status == 400
+
+
+# ── /ws/control tests ─────────────────────────────────────────────────────
+
+
+async def test_ws_control_connects(aiohttp_client, app_factory):
+    """GET /ws/control upgrades to WebSocket successfully."""
+    client = await aiohttp_client(app_factory())
+    async with client.ws_connect("/ws/control") as ws:
+        assert not ws.closed
+
+
+async def test_ws_control_receives_card_created(aiohttp_client, app_factory):
+    """Creating a terminal via API sends card_created over /ws/control."""
+
+    client = await aiohttp_client(app_factory())
+    async with client.ws_connect("/ws/control") as ws:
+        # Create a terminal — this triggers card:registered → broadcast
+        resp = await client.post("/api/claude/terminal/create?cmd=echo+hello")
+        assert resp.status == 200
+        data = await resp.json()
+        sid = data["session_id"]
+
+        # Read the control message (with a timeout)
+        msg = await ws.receive_json(timeout=2)
+        assert msg["type"] == "card_created"
+        assert msg["card_id"] == sid
+        assert msg["card_type"] == "terminal"
+        assert "descriptor" in msg
+        assert msg["descriptor"]["session_id"] == sid
+
+
+async def test_ws_control_receives_card_deleted(aiohttp_client, app_factory):
+    """Deleting a terminal via API sends card_deleted over /ws/control."""
+    client = await aiohttp_client(app_factory())
+    async with client.ws_connect("/ws/control") as ws:
+        # Create
+        resp = await client.post("/api/claude/terminal/create?cmd=bash")
+        data = await resp.json()
+        sid = data["session_id"]
+
+        # Drain the card_created message
+        await ws.receive_json(timeout=2)
+
+        # Delete
+        resp = await client.delete(f"/api/claude/terminal/{sid}")
+        assert resp.status == 200
+
+        # Read the card_deleted message
+        msg = await ws.receive_json(timeout=2)
+        assert msg["type"] == "card_deleted"
+        assert msg["card_id"] == sid
+
+
+async def test_ws_control_multiple_clients(aiohttp_client, app_factory):
+    """Multiple /ws/control clients all receive the same events."""
+    client = await aiohttp_client(app_factory())
+    async with client.ws_connect("/ws/control") as ws1:
+        async with client.ws_connect("/ws/control") as ws2:
+            resp = await client.post("/api/claude/terminal/create?cmd=echo+test")
+            assert resp.status == 200
+
+            msg1 = await ws1.receive_json(timeout=2)
+            msg2 = await ws2.receive_json(timeout=2)
+            assert msg1["type"] == "card_created"
+            assert msg2["type"] == "card_created"
+            assert msg1["card_id"] == msg2["card_id"]
+
+
+async def test_ws_control_descriptor_has_layout(aiohttp_client, app_factory):
+    """card_created descriptor includes layout hints when provided."""
+    client = await aiohttp_client(app_factory())
+    async with client.ws_connect("/ws/control") as ws:
+        resp = await client.post("/api/claude/terminal/create?cmd=bash&x=100&y=200&w=600&h=400")
+        assert resp.status == 200
+
+        msg = await ws.receive_json(timeout=2)
+        assert msg["type"] == "card_created"
+        desc = msg["descriptor"]
+        assert desc["session_id"] is not None
+        assert desc["x"] == 100
+        assert desc["y"] == 200
+        assert desc["w"] == 600
+        assert desc["h"] == 400

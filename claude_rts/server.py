@@ -677,10 +677,16 @@ async def claude_terminal_create(request: web.Request) -> web.Response:
     except ValueError:
         raise web.HTTPBadRequest(text="'cols' and 'rows' must be integers")
 
-    x = request.query.get("x")
-    y = request.query.get("y")
-    w = request.query.get("w")
-    h = request.query.get("h")
+    # Parse optional layout hints before creating the card so they are
+    # available in to_descriptor() when the EventBus broadcast fires.
+    layout: dict = {}
+    try:
+        for key in ("x", "y", "w", "h"):
+            val = request.query.get(key)
+            if val is not None:
+                layout[key] = int(val)
+    except ValueError:
+        raise web.HTTPBadRequest(text="Layout params (x, y, w, h) must be integers")
 
     mgr: SessionManager = request.app["session_manager"]
     card_registry: CardRegistry = request.app["card_registry"]
@@ -690,6 +696,7 @@ async def claude_terminal_create(request: web.Request) -> web.Response:
         cmd=cmd,
         hub=hub or None,
         container=container or None,
+        layout=layout,
     )
     try:
         await card.start()
@@ -706,18 +713,6 @@ async def claude_terminal_create(request: web.Request) -> web.Response:
             pass
 
     desc = card.to_descriptor()
-    # Attach optional layout hints
-    try:
-        if x is not None:
-            desc["x"] = int(x)
-        if y is not None:
-            desc["y"] = int(y)
-        if w is not None:
-            desc["w"] = int(w)
-        if h is not None:
-            desc["h"] = int(h)
-    except ValueError:
-        raise web.HTTPBadRequest(text="Layout params (x, y, w, h) must be integers")
 
     logger.info("claude_terminal_create: created {} for cmd={!r}", card.session_id, cmd)
     return web.json_response(desc)
@@ -828,11 +823,70 @@ async def claude_terminals_list(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+# ── Control WebSocket — broadcast card lifecycle to frontends ─────────────
+
+
+async def ws_control_handler(request: web.Request) -> web.WebSocketResponse:
+    """GET /ws/control — WebSocket that broadcasts card_created/card_deleted events.
+
+    The frontend connects on page load.  The server subscribes to EventBus
+    ``card:registered`` and ``card:unregistered`` and pushes JSON text frames
+    to every connected client.
+    """
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    logger.info("Control WebSocket connected from {}", request.remote)
+
+    control_clients: list = request.app["control_ws_clients"]
+    control_clients.append(ws)
+
+    try:
+        async for msg in ws:
+            # The control channel is server→client only; ignore client messages.
+            if msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
+                break
+    finally:
+        control_clients.remove(ws)
+        logger.info("Control WebSocket disconnected from {}", request.remote)
+
+    return ws
+
+
+async def _broadcast_card_event(app: web.Application, event_type: str, payload: dict) -> None:
+    """Push a card lifecycle event to all connected /ws/control clients."""
+    if event_type == "card:registered":
+        msg_type = "card_created"
+    elif event_type == "card:unregistered":
+        msg_type = "card_deleted"
+    else:
+        return
+
+    # Build the message.  For card_created we include the full descriptor
+    # so the frontend can spawn the card without a round-trip.
+    message: dict = {"type": msg_type, "card_id": payload.get("card_id"), "card_type": payload.get("card_type")}
+
+    if msg_type == "card_created":
+        card_registry: CardRegistry = app["card_registry"]
+        card = card_registry.get(payload["card_id"])
+        if card is not None and hasattr(card, "to_descriptor"):
+            message["descriptor"] = card.to_descriptor()
+
+    data = json.dumps(message)
+    clients: list = app.get("control_ws_clients", [])
+    for ws in list(clients):
+        if not ws.closed:
+            try:
+                await ws.send_str(data)
+            except Exception:
+                logger.debug("Failed to send control event to a client")
+
+
 def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Application:
     app = web.Application()
     app["app_config"] = app_config
     app["test_mode"] = test_mode
     app["discovered_profiles"] = []
+    app["control_ws_clients"] = []
 
     # Static + API routes
     app.router.add_get("/", index_handler)
@@ -865,6 +919,7 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_get("/ws/session/new", session_new_handler)
     app.router.add_get("/ws/session/{session_id}", session_attach_handler)
     app.router.add_get("/ws/exec", exec_websocket_handler)
+    app.router.add_get("/ws/control", ws_control_handler)
 
     # Test puppeting API (only in test mode)
     if test_mode:
@@ -894,6 +949,14 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
         registry.register_type("claude-usage", ClaudeUsageCard)
         app["service_card_registry"] = registry
         app["card_registry"] = CardRegistry(bus=event_bus)
+
+        # Wire EventBus → /ws/control broadcast
+        async def _on_card_event(event_type: str, payload: dict) -> None:
+            await _broadcast_card_event(app, event_type, payload)
+
+        event_bus.subscribe("card:registered", _on_card_event)
+        event_bus.subscribe("card:unregistered", _on_card_event)
+
         mgr.start_orphan_reaper()
 
         # Probe tmux availability and recover existing sessions
@@ -959,6 +1022,13 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
             asyncio.create_task(_start_probe())
 
     async def on_shutdown(app: web.Application) -> None:
+        # Close all control WebSocket clients
+        clients = app.get("control_ws_clients", [])
+        for ws in list(clients):
+            if not ws.closed:
+                await ws.close()
+        clients.clear()
+
         if "card_registry" in app:
             await app["card_registry"].stop_all()
         if "service_card_registry" in app:

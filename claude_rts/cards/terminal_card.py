@@ -25,6 +25,7 @@ class TerminalCard(BaseCard):
         hub: str | None = None,
         container: str | None = None,
         card_id: str | None = None,
+        layout: dict | None = None,
     ):
         # card_id is set *after* start() when we know the session_id,
         # unless the caller supplies one (reconnect path).
@@ -34,6 +35,7 @@ class TerminalCard(BaseCard):
         self.hub = hub
         self.container = container
         self._session = None  # set by start()
+        self.layout = layout or {}  # optional {x, y, w, h} hints for frontend
 
     # ── Descriptor serialization ───────────────────────────────────────
 
@@ -53,6 +55,8 @@ class TerminalCard(BaseCard):
             desc["container"] = self.container
         if self.cmd:
             desc["exec"] = self.cmd
+        if self.layout:
+            desc.update(self.layout)
         return desc
 
     # ── Lifecycle ──────────────────────────────────────────────────────

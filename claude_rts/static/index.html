@@ -2301,6 +2301,94 @@ async function switchCanvas(name) {
 }
 
 // ════════════════════════════════════════════
+// Control WebSocket — server-pushed card events
+// ════════════════════════════════════════════
+let controlWs = null;
+let controlWsReconnectTimer = null;
+
+function connectControlWs() {
+  const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${wsProto}//${location.host}/ws/control`;
+  controlWs = new WebSocket(url);
+
+  controlWs.addEventListener('open', () => {
+    console.log('[control-ws] connected');
+  });
+
+  controlWs.addEventListener('message', (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'card_created') {
+        handleControlCardCreated(msg);
+      } else if (msg.type === 'card_deleted') {
+        handleControlCardDeleted(msg);
+      }
+    } catch (err) {
+      console.warn('[control-ws] bad message:', err);
+    }
+  });
+
+  controlWs.addEventListener('close', () => {
+    console.log('[control-ws] disconnected, reconnecting in 3s');
+    controlWsReconnectTimer = setTimeout(connectControlWs, 3000);
+  });
+
+  controlWs.addEventListener('error', () => {
+    // close event will follow — reconnect handled there
+  });
+}
+
+function handleControlCardCreated(msg) {
+  const desc = msg.descriptor;
+  if (!desc) return;
+
+  // Avoid duplicates — check if a card with this session_id already exists
+  if (desc.session_id && cards.some(c => c.sessionId === desc.session_id)) return;
+
+  if (desc.type === 'terminal') {
+    // Build a hub-like object for spawnCard
+    const hubName = desc.hub || desc.exec || 'api-terminal';
+    const container = desc.container || '';
+    const hub = hubs.find(entry => entry.hub === hubName) || { hub: hubName, container: container, exec: desc.exec || null };
+
+    // Place near center of current viewport if no layout hints
+    const vw = viewport.clientWidth;
+    const vh = viewport.clientHeight;
+    const cx = (-pan.x + vw / 2) / zoom;
+    const cy = (-pan.y + vh / 2) / zoom;
+    const x = desc.x != null ? desc.x : cx - CARD_W / 2 + Math.random() * 60;
+    const y = desc.y != null ? desc.y : cy - CARD_H / 2 + Math.random() * 60;
+    const w = desc.w || CARD_W;
+    const h = desc.h || CARD_H;
+
+    // Ensure hub is in the hubs array so it shows in sidebar / can be found on reload
+    if (!hubs.find(entry => entry.hub === hubName)) {
+      hubs.push({ hub: hubName, container: container, exec: desc.exec || null });
+      hubSymbolMap[hubName] = HUB_SYMBOLS[hubs.length % HUB_SYMBOLS.length];
+    }
+
+    spawnCard(hub, x, y, w, h, null, desc.exec || null, desc.session_id);
+    saveLayout();
+  }
+}
+
+function handleControlCardDeleted(msg) {
+  const cardId = msg.card_id;
+  if (!cardId) return;
+
+  // Find the card by session_id (TerminalCard stores it as sessionId)
+  const idx = cards.findIndex(c => c.sessionId === cardId);
+  if (idx === -1) return;
+
+  const card = cards[idx];
+  card.destroy();
+  cards.splice(idx, 1);
+  saveLayout();
+  drawMinimap();
+  updateHubCount();
+}
+
+// ════════════════════════════════════════════
 // Boot
 // ════════════════════════════════════════════
 (async function() {
@@ -2378,6 +2466,9 @@ async function switchCanvas(name) {
 
   // Remove loader card
   loader.destroy();
+
+  // Connect control WebSocket for server-pushed card events
+  connectControlWs();
 
   if (hubs.length === 0) {
     document.getElementById('hub-count').textContent = 'No containers running';
