@@ -54,6 +54,7 @@ To add a new preset: create a directory under `dev_presets/` with a `config.json
 | `profiles` | Profile Manager widget pre-placed on canvas |
 | `start-claude` | Start Claude button QA — priority_profile pre-set, Profile Manager widget on canvas |
 | `stress-test` | Layout QA — 6 cards at edge positions, varying sizes, overlapping z-order |
+| `claude-api` | Claude terminal control API QA — empty canvas for programmatic terminal lifecycle |
 
 ## Testing
 
@@ -78,6 +79,7 @@ CLAUDE_RTS_TEST_MODE=1 python -m claude_rts   # enables puppeting API at /api/te
 | `test_dev_config.py` | 8 | Dev-config preset loading and setup |
 | `test_sessions.py` | 30 | ScrollbackBuffer, SessionManager, test puppeting API |
 | `test_terminal_card.py` | 11 | TerminalCard lifecycle, CardRegistry, server integration |
+| `test_claude_api.py` | 30 | Claude terminal control API (CRUD, send/read, strip_ansi, /ws/control, full lifecycle integration) |
 | `test_event_bus.py` | 14 | EventBus core (subscribe, emit, unsubscribe, wildcard, async, errors, clear) + integration (ServiceCard bus emit, CardRegistry events) |
 | `e2e/test_smoke.py` | 7 | Playwright Electron smoke tests — launch, spawn, drag, resize, widgets, pan/zoom, save/reload |
 
@@ -96,8 +98,15 @@ Tests use `MockPty` to avoid needing Docker. E2E tests require Playwright and El
 | GET | `/api/widgets/system-info` | System info widget data |
 | GET | `/api/profiles` | Probe profiles with usage data, sorted by burn rate |
 | GET/PUT | `/api/profiles/priority` | Read/set priority profile |
+| POST | `/api/claude/terminal/create` | Create a TerminalCard + PTY session (params: cmd, hub, container, cols, rows, x, y, w, h) |
+| POST | `/api/claude/terminal/{id}/send` | Write text to a terminal PTY |
+| GET | `/api/claude/terminal/{id}/read` | Read scrollback (optional: strip_ansi, last_n) |
+| GET | `/api/claude/terminal/{id}/status` | Session metadata (alive, age, idle, cmd) |
+| DELETE | `/api/claude/terminal/{id}` | Stop card, clean up session and card registry |
+| GET | `/api/claude/terminals` | List all terminal cards with metadata |
 | WS | `/ws/session/new?cmd=...` | Create persistent PTY session |
 | WS | `/ws/session/{session_id}` | Reconnect to existing session |
+| WS | `/ws/control` | Card lifecycle events (card_created, card_deleted) broadcast |
 
 ## WebSocket Protocol
 
