@@ -1475,6 +1475,7 @@ class CanvasClaudeCard extends TerminalCard {
     // If session_not_found is received, we go through the server-side
     // create API to get a properly initialised session.
     if (!this.sessionId) return; // should not happen — spawnCanvasClaudeCard always sets sessionId
+    if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
     this._intentionalClose = false;
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProto}//${location.host}/ws/session/${this.sessionId}`;
