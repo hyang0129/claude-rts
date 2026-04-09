@@ -419,3 +419,63 @@ async def test_ws_control_descriptor_has_layout(aiohttp_client, app_factory):
         assert desc["y"] == 200
         assert desc["w"] == 600
         assert desc["h"] == 400
+
+
+# ── Full round-trip integration test ─────────────────────────────────────
+
+
+async def test_full_lifecycle_create_send_read_delete(aiohttp_client, app_factory):
+    """Integration: create terminal → send command → read output → delete.
+
+    Exercises the complete Claude terminal control API lifecycle in sequence,
+    verifying each step returns the expected state.
+    """
+    client = await aiohttp_client(app_factory())
+
+    # 1. Create
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    assert resp.status == 200
+    create_data = await resp.json()
+    sid = create_data["session_id"]
+    assert sid
+    assert create_data["type"] == "terminal"
+
+    # Verify card is registered
+    card_reg = client.app["card_registry"]
+    card = card_reg.get_terminal(sid)
+    assert card is not None
+
+    # 2. Send
+    resp = await client.post(f"/api/claude/terminal/{sid}/send", data="echo hello\n")
+    assert resp.status == 200
+    send_data = await resp.json()
+    assert send_data["status"] == "ok"
+    assert send_data["sent"] == len("echo hello\n")
+
+    # 3. Read
+    resp = await client.get(f"/api/claude/terminal/{sid}/read")
+    assert resp.status == 200
+    read_data = await resp.json()
+    assert "output" in read_data
+    assert "size" in read_data
+    assert "total_written" in read_data
+
+    # Verify status is still alive
+    resp = await client.get(f"/api/claude/terminal/{sid}/status")
+    assert resp.status == 200
+    status_data = await resp.json()
+    assert status_data["session_id"] == sid
+    assert status_data["alive"] is True
+
+    # 4. Delete
+    resp = await client.delete(f"/api/claude/terminal/{sid}")
+    assert resp.status == 200
+
+    # Verify gone from both registries
+    assert card_reg.get(sid) is None
+    mgr = client.app["session_manager"]
+    assert mgr.get_session(sid) is None
+
+    # Verify status returns 404
+    resp = await client.get(f"/api/claude/terminal/{sid}/status")
+    assert resp.status == 404
