@@ -110,15 +110,12 @@
   }
   .terminal-titlebar .claude-btn:hover { background: #cba6f7; color: #1e1e2e; }
   .terminal-titlebar .claude-btn:disabled { opacity: 0.3; pointer-events: none; }
-  .terminal-titlebar .new-session-btn,
   .terminal-titlebar .clear-session-btn {
     padding: 2px 8px; font-size: 11px; border-radius: 3px; border: none;
     cursor: pointer; background: #45475a; color: #cdd6f4; margin-right: 4px;
     transition: background 0.15s;
   }
-  .terminal-titlebar .new-session-btn:hover { background: #cba6f7; color: #1e1e2e; }
   .terminal-titlebar .clear-session-btn:hover { background: #89b4fa; color: #1e1e2e; }
-  .terminal-titlebar .new-session-btn:disabled,
   .terminal-titlebar .clear-session-btn:disabled { opacity: 0.3; pointer-events: none; }
 
   .terminal-body {
@@ -1445,45 +1442,14 @@ class CanvasClaudeCard extends TerminalCard {
   }
 
   setupClaudeBtn() {
-    // Override: no default "Start Claude" button; add New Session + Clear instead
+    // Override: no default "Start Claude" button; just a Clear button
     const titlebar = this.el.querySelector(`[data-drag="${this.id}"]`);
     const closeBtn = titlebar.querySelector('.close-btn');
-
-    const newBtn = document.createElement('button');
-    newBtn.className = 'new-session-btn';
-    newBtn.title = 'Start a fresh Claude session';
-    newBtn.textContent = 'New Session';
 
     const clearBtn = document.createElement('button');
     clearBtn.className = 'clear-session-btn';
     clearBtn.title = 'Clear conversation history';
     clearBtn.textContent = 'Clear';
-
-    newBtn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      newBtn.disabled = true;
-      clearBtn.disabled = true;
-      try {
-        const sid = this.sessionId;
-        if (sid) {
-          const resp = await fetch(`/api/canvas-claude/${sid}/new-session`, { method: 'POST' });
-          if (resp.ok) {
-            const data = await resp.json();
-            if (data.session_id) {
-              // Update sessionId and reconnect the terminal WebSocket to the new session.
-              this.sessionId = data.session_id;
-              if (this.ws) { this._intentionalClose = true; this.ws.close(); this.ws = null; }
-              this.connectWs();
-            }
-          }
-        }
-      } catch (err) {
-        console.error('New session failed:', err);
-      } finally {
-        newBtn.disabled = false;
-        clearBtn.disabled = false;
-      }
-    });
 
     clearBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -1501,7 +1467,6 @@ class CanvasClaudeCard extends TerminalCard {
     });
 
     titlebar.insertBefore(clearBtn, closeBtn);
-    titlebar.insertBefore(newBtn, clearBtn);
   }
 
   serialize() {
@@ -1806,6 +1771,18 @@ function spawnWidget(widgetType, x, y, w, h) {
 async function spawnCanvasClaudeCard(x, y, w, h, sessionId, profile, canvasName) {
   // If no existing session, ask the server to create one
   if (!sessionId) {
+    // Auto-resolve priority profile if none was explicitly set
+    if (!profile) {
+      try {
+        const pr = await fetch('/api/profiles/priority');
+        if (pr.ok) {
+          const pd = await pr.json();
+          if (pd.priority_profile && /^[a-zA-Z0-9._-]+$/.test(pd.priority_profile)) {
+            profile = pd.priority_profile;
+          }
+        }
+      } catch (_) { /* non-fatal — proceed without profile */ }
+    }
     try {
       const params = new URLSearchParams({ x: Math.round(x), y: Math.round(y), w: w || 960, h: h || 640 });
       if (profile) params.set('profile', profile);
