@@ -677,10 +677,16 @@ async def claude_terminal_create(request: web.Request) -> web.Response:
     except ValueError:
         raise web.HTTPBadRequest(text="'cols' and 'rows' must be integers")
 
-    x = request.query.get("x")
-    y = request.query.get("y")
-    w = request.query.get("w")
-    h = request.query.get("h")
+    # Parse optional layout hints before creating the card so they are
+    # available in to_descriptor() when the EventBus broadcast fires.
+    layout: dict = {}
+    try:
+        for key in ("x", "y", "w", "h"):
+            val = request.query.get(key)
+            if val is not None:
+                layout[key] = int(val)
+    except ValueError:
+        raise web.HTTPBadRequest(text="Layout params (x, y, w, h) must be integers")
 
     mgr: SessionManager = request.app["session_manager"]
     card_registry: CardRegistry = request.app["card_registry"]
@@ -690,6 +696,7 @@ async def claude_terminal_create(request: web.Request) -> web.Response:
         cmd=cmd,
         hub=hub or None,
         container=container or None,
+        layout=layout,
     )
     try:
         await card.start()
@@ -706,18 +713,6 @@ async def claude_terminal_create(request: web.Request) -> web.Response:
             pass
 
     desc = card.to_descriptor()
-    # Attach optional layout hints
-    try:
-        if x is not None:
-            desc["x"] = int(x)
-        if y is not None:
-            desc["y"] = int(y)
-        if w is not None:
-            desc["w"] = int(w)
-        if h is not None:
-            desc["h"] = int(h)
-    except ValueError:
-        raise web.HTTPBadRequest(text="Layout params (x, y, w, h) must be integers")
 
     logger.info("claude_terminal_create: created {} for cmd={!r}", card.session_id, cmd)
     return web.json_response(desc)
