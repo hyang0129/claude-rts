@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from claude_rts.cards.canvas_claude_card import CanvasClaudeCard
+from claude_rts.cards.canvas_claude_card import CanvasClaudeCard, TMUX_SESSION_NAME
 from claude_rts.sessions import SessionManager
 
 
@@ -43,6 +43,11 @@ class MockPty:
 
 def _mock_subprocess_run(*a, **kw):
     return type("R", (), {"returncode": 0, "stderr": b""})()
+
+
+def _mock_subprocess_run_no_tmux(*a, **kw):
+    """Mock that returns failure for tmux has-session (no existing session)."""
+    return type("R", (), {"returncode": 1, "stderr": b"no session"})()
 
 
 async def test_canvas_claude_card_type():
@@ -121,11 +126,13 @@ async def test_canvas_claude_card_clear_session(monkeypatch):
     mgr.stop_all()
 
 
-async def test_canvas_claude_card_cmd_includes_mcp(monkeypatch):
-    """The computed cmd includes MCP config and docker exec."""
+async def test_canvas_claude_card_cmd_includes_tmux(monkeypatch):
+    """The computed cmd includes tmux new-session and the claude command."""
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
     mgr = SessionManager()
     card = CanvasClaudeCard(session_manager=mgr, container="my-container")
+    assert "tmux new-session" in card.cmd
+    assert TMUX_SESSION_NAME in card.cmd
     assert "mcp.json" in card.cmd
     assert "my-container" in card.cmd
 
@@ -151,12 +158,10 @@ async def test_canvas_claude_card_no_profile(monkeypatch):
 
 
 async def test_canvas_claude_card_no_bash_wrapper(monkeypatch):
-    """The PTY cmd does NOT use a bash -c wrapper (direct docker exec env pattern)."""
+    """The PTY cmd does NOT use a bash -c wrapper (direct docker exec pattern)."""
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
     mgr = SessionManager()
     card = CanvasClaudeCard(session_manager=mgr, container="my-container")
-    # cmd should be: docker.exe exec -it my-container [env ...] claude --mcp-config /tmp/mcp.json
-    # No bash -c wrapper — that pattern causes PTY allocation failures on Windows/ConPTY.
     assert "bash -c" not in card.cmd
 
 
@@ -189,4 +194,51 @@ async def test_canvas_claude_card_invalid_profile_rejected():
     mgr = SessionManager()
     with pytest.raises(ValueError):
         CanvasClaudeCard(session_manager=mgr, container="my-container", profile="x; evil")
+    mgr.stop_all()
+
+
+async def test_canvas_claude_card_ensure_tmux_attach(monkeypatch):
+    """_ensure_tmux_session sets cmd to attach when tmux session exists."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", _mock_subprocess_run)
+    mgr = SessionManager()
+    card = CanvasClaudeCard(session_manager=mgr, container="my-container")
+    # _mock_subprocess_run returns rc=0 → tmux session exists
+    card._ensure_tmux_session()
+    assert "tmux attach-session" in card.cmd
+    assert TMUX_SESSION_NAME in card.cmd
+    assert "--mcp-config" not in card.cmd  # attach doesn't include the full claude cmd
+
+
+async def test_canvas_claude_card_ensure_tmux_new(monkeypatch):
+    """_ensure_tmux_session sets cmd to new-session when no tmux session exists."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", _mock_subprocess_run_no_tmux)
+    mgr = SessionManager()
+    card = CanvasClaudeCard(session_manager=mgr, container="my-container")
+    card._ensure_tmux_session()
+    assert "tmux new-session" in card.cmd
+    assert TMUX_SESSION_NAME in card.cmd
+    assert "claude" in card.cmd
+
+
+async def test_canvas_claude_card_new_session_kills_tmux(monkeypatch):
+    """new_session() kills the tmux session before restarting."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    calls = []
+
+    def track_subprocess_run(cmd_list, **kw):
+        calls.append(cmd_list)
+        return type("R", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", track_subprocess_run)
+    mgr = SessionManager()
+    card = CanvasClaudeCard(session_manager=mgr, container="test-container")
+    await card.start()
+    calls.clear()
+    await card.new_session()
+    # Should have called kill-session at some point
+    kill_calls = [c for c in calls if "kill-session" in c]
+    assert len(kill_calls) >= 1
+    await card.stop()
     mgr.stop_all()

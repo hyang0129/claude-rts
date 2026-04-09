@@ -12,6 +12,10 @@ from .terminal_card import TerminalCard
 # Only alphanumeric, hyphens, and underscores are safe for shell interpolation.
 _SAFE_NAME = _re.compile(r"^[a-zA-Z0-9_-]+$")
 
+# Stable tmux session name used for canvas claude persistence.
+# Only one canvas claude per container is supported, so a fixed name is fine.
+TMUX_SESSION_NAME = "canvas-claude"
+
 
 def _validate_name(value: str, label: str) -> None:
     """Raise ValueError if value contains characters unsafe for shell interpolation."""
@@ -26,12 +30,21 @@ class CanvasClaudeCard(TerminalCard):
     /home/util/mcp_server.py and speaks the MCP stdio protocol over the
     subprocess's stdin/stdout, giving claude access to canvas control tools.
 
+    Persistence strategy:
+    The claude process runs inside a tmux session named ``canvas-claude``
+    within the container.  When the Windows-side PTY (ConPTY) is closed,
+    tmux keeps the process alive.  On reconnect, the PTY command is
+    ``tmux attach-session -t canvas-claude`` which rebinds to the live
+    session instead of spawning a fresh claude.
+
     Start sequence:
     1. write_mcp_config() — writes /tmp/mcp.json into the container via `docker exec`
        (non-interactive subprocess, no PTY, avoids shell-quoting issues on Windows).
-    2. The PTY is then started with:
-       `docker exec -it <container> env CLAUDE_CONFIG_DIR=/profiles/<profile> claude --mcp-config /tmp/mcp.json`
-       This mirrors the working pattern used by ClaudeUsageCard (no bash -c wrapper).
+    2. _ensure_tmux_session() — checks if a tmux session already exists:
+       a. If yes: the PTY command is set to ``docker exec -it <container> tmux
+          attach-session -t canvas-claude`` so claude resumes where it left off.
+       b. If no: the PTY command creates a new tmux session running claude:
+          ``docker exec -it <container> tmux new-session -s canvas-claude <claude_cmd>``
     """
 
     card_type: str = "canvas_claude"
@@ -67,26 +80,23 @@ class CanvasClaudeCard(TerminalCard):
         mcp_json = _json.dumps(mcp_config)
         self._mcp_b64 = _b64.b64encode(mcp_json.encode()).decode()
 
-        # Build the PTY command — no bash -c wrapper.
-        # Using `docker exec -it container env VAR=value claude ...` is identical to
-        # the pattern used by ClaudeUsageCard probe sessions, which work reliably
-        # through pywinpty/ConPTY on Windows.  The bash -c "..." wrapper interferes
-        # with PTY allocation and causes claude to exit immediately.
+        # Build the inner claude command (without docker/tmux wrapping).
+        # The actual PTY command is determined at start() time by
+        # _ensure_tmux_session(), which decides between attach vs new-session.
         docker_bin = "docker.exe"  # Windows host
         if profile:
-            cmd = (
-                f"{docker_bin} exec -it {effective_container} "
+            claude_cmd = (
                 f"env CLAUDE_CONFIG_DIR=/profiles/{profile} "
                 f"claude --dangerously-skip-permissions --mcp-config /tmp/mcp.json"
             )
         else:
-            cmd = (
-                f"{docker_bin} exec -it {effective_container} "
-                f"claude --dangerously-skip-permissions --mcp-config /tmp/mcp.json"
-            )
+            claude_cmd = "claude --dangerously-skip-permissions --mcp-config /tmp/mcp.json"
 
-        # Pass container=None so SessionManager doesn't override cmd with tmux.
-        # The docker exec is already baked into cmd; tmux would replace it with bash.
+        # Default cmd is the new-session variant; start() may override with attach.
+        cmd = f"{docker_bin} exec -it {effective_container} tmux new-session -s {TMUX_SESSION_NAME} {claude_cmd}"
+
+        # Pass container=None so SessionManager doesn't override cmd with its
+        # own tmux logic. We handle tmux ourselves with a stable session name.
         super().__init__(
             session_manager,
             cmd=cmd,
@@ -97,6 +107,7 @@ class CanvasClaudeCard(TerminalCard):
         )
 
         self._effective_container = effective_container
+        self._claude_cmd = claude_cmd
         self.api_base_url = api_base_url
         self.profile = profile
         self.canvas_name = canvas_name
@@ -133,41 +144,88 @@ class CanvasClaudeCard(TerminalCard):
             raise RuntimeError(f"Failed to write MCP config: {result.stderr.decode(errors='replace')}")
         logger.debug("CanvasClaudeCard: wrote /tmp/mcp.json to {}", self._effective_container)
 
-    def _kill_orphan_claudes(self) -> None:
-        """Kill lingering claude processes in the util container.
-
-        When the Windows-side ConPTY dies, docker exec exits but the container-side
-        claude process continues running (Docker-on-Windows doesn't reliably send SIGHUP
-        to the container process when the exec connection drops). This cleans up before
-        starting a fresh session so orphans don't accumulate.
-
-        NOTE: `pkill -x claude` kills ALL processes named 'claude' in the container.
-        Only one CanvasClaudeCard per container is supported. Running a second card
-        against the same container will kill the first card's claude process when the
-        second card starts a new session.
-        """
+    def _has_tmux_session(self) -> bool:
+        """Check if the stable tmux session already exists in the container."""
         try:
-            _subprocess.run(
-                ["docker.exe", "exec", self._effective_container, "pkill", "-x", "claude"],
+            result = _subprocess.run(
+                [
+                    "docker.exe",
+                    "exec",
+                    self._effective_container,
+                    "tmux",
+                    "has-session",
+                    "-t",
+                    TMUX_SESSION_NAME,
+                ],
                 timeout=5,
                 capture_output=True,
             )
-            logger.debug("CanvasClaudeCard: killed orphan claude processes in {}", self._effective_container)
+            return result.returncode == 0
         except Exception as exc:
-            logger.debug("CanvasClaudeCard: pkill claude (benign): {}", exc)
+            logger.debug("CanvasClaudeCard: tmux has-session check (benign): {}", exc)
+            return False
+
+    def _kill_tmux_session(self) -> None:
+        """Kill the stable tmux session in the container.
+
+        Used by new_session() to force a clean restart.  Unlike the old
+        pkill approach, this cleanly terminates the tmux session (and with
+        it the claude process running inside).
+        """
+        try:
+            _subprocess.run(
+                [
+                    "docker.exe",
+                    "exec",
+                    self._effective_container,
+                    "tmux",
+                    "kill-session",
+                    "-t",
+                    TMUX_SESSION_NAME,
+                ],
+                timeout=5,
+                capture_output=True,
+            )
+            logger.debug("CanvasClaudeCard: killed tmux session {} in {}", TMUX_SESSION_NAME, self._effective_container)
+        except Exception as exc:
+            logger.debug("CanvasClaudeCard: tmux kill-session (benign): {}", exc)
+
+    def _ensure_tmux_session(self) -> None:
+        """Set self.cmd to attach or new-session depending on tmux state.
+
+        If a tmux session named ``canvas-claude`` already exists, the PTY
+        command attaches to it (resume).  Otherwise, it creates a new tmux
+        session running the claude command.
+        """
+        docker_bin = "docker.exe"
+        if self._has_tmux_session():
+            self.cmd = f"{docker_bin} exec -it {self._effective_container} tmux attach-session -t {TMUX_SESSION_NAME}"
+            logger.info("CanvasClaudeCard: attaching to existing tmux session {}", TMUX_SESSION_NAME)
+        else:
+            self.cmd = (
+                f"{docker_bin} exec -it {self._effective_container} "
+                f"tmux new-session -s {TMUX_SESSION_NAME} {self._claude_cmd}"
+            )
+            logger.info("CanvasClaudeCard: creating new tmux session {}", TMUX_SESSION_NAME)
 
     async def start(self) -> None:
-        """Write MCP config and kill orphans, then start the PTY."""
+        """Write MCP config, resolve tmux state, then start the PTY."""
         loop = _asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._kill_orphan_claudes)
         await loop.run_in_executor(None, self._write_mcp_config)
+        await loop.run_in_executor(None, self._ensure_tmux_session)
         await super().start()
 
     # ── Session helpers ────────────────────────────────────────────────
 
     async def new_session(self) -> None:
-        """Destroy current PTY and start a fresh claude process."""
+        """Destroy current PTY and start a fresh claude process.
+
+        Kills the tmux session first so _ensure_tmux_session() creates a
+        new one rather than reattaching to the old conversation.
+        """
         await self.stop()
+        loop = _asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._kill_tmux_session)
         await self.start()
 
     async def clear_session(self) -> None:
