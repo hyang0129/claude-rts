@@ -41,6 +41,10 @@ class MockPty:
         return cls()
 
 
+def _mock_subprocess_run(*a, **kw):
+    return type("R", (), {"returncode": 0, "stderr": b""})()
+
+
 async def test_canvas_claude_card_type():
     """card_type is 'canvas_claude' and hidden is False."""
     mgr = SessionManager()
@@ -53,6 +57,7 @@ async def test_canvas_claude_card_type():
 async def test_canvas_claude_card_start_stop(monkeypatch):
     """start() allocates a PTY session; stop() destroys it."""
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", _mock_subprocess_run)
     mgr = SessionManager()
     card = CanvasClaudeCard(session_manager=mgr, container="test-container")
     await card.start()
@@ -68,6 +73,7 @@ async def test_canvas_claude_card_start_stop(monkeypatch):
 async def test_canvas_claude_card_to_descriptor(monkeypatch):
     """to_descriptor() returns type='canvas_claude' with profile and canvas_name."""
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", _mock_subprocess_run)
     mgr = SessionManager()
     card = CanvasClaudeCard(
         session_manager=mgr,
@@ -81,6 +87,7 @@ async def test_canvas_claude_card_to_descriptor(monkeypatch):
     assert desc["session_id"] == card.session_id
     assert desc.get("profile") == "test-profile"
     assert desc.get("canvas_name") == "my-canvas"
+    assert desc.get("container") == "my-container"
     await card.stop()
     mgr.stop_all()
 
@@ -88,6 +95,7 @@ async def test_canvas_claude_card_to_descriptor(monkeypatch):
 async def test_canvas_claude_card_new_session(monkeypatch):
     """new_session() stops the old PTY and starts a fresh one."""
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", _mock_subprocess_run)
     mgr = SessionManager()
     card = CanvasClaudeCard(session_manager=mgr, container="test-container")
     await card.start()
@@ -102,6 +110,7 @@ async def test_canvas_claude_card_new_session(monkeypatch):
 async def test_canvas_claude_card_clear_session(monkeypatch):
     """clear_session() writes /clear to the PTY."""
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", _mock_subprocess_run)
     mgr = SessionManager()
     card = CanvasClaudeCard(session_manager=mgr, container="test-container")
     await card.start()
@@ -117,7 +126,7 @@ async def test_canvas_claude_card_cmd_includes_mcp(monkeypatch):
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
     mgr = SessionManager()
     card = CanvasClaudeCard(session_manager=mgr, container="my-container")
-    assert "mcp_server.py" in card.cmd or "mcp.json" in card.cmd
+    assert "mcp.json" in card.cmd
     assert "my-container" in card.cmd
 
 
@@ -139,6 +148,16 @@ async def test_canvas_claude_card_no_profile(monkeypatch):
     mgr = SessionManager()
     card = CanvasClaudeCard(session_manager=mgr, container="my-container")
     assert "CLAUDE_CONFIG_DIR" not in card.cmd
+
+
+async def test_canvas_claude_card_no_bash_wrapper(monkeypatch):
+    """The PTY cmd does NOT use a bash -c wrapper (direct docker exec env pattern)."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    card = CanvasClaudeCard(session_manager=mgr, container="my-container")
+    # cmd should be: docker.exe exec -it my-container [env ...] claude --mcp-config /tmp/mcp.json
+    # No bash -c wrapper — that pattern causes PTY allocation failures on Windows/ConPTY.
+    assert "bash -c" not in card.cmd
 
 
 async def test_canvas_claude_card_default_api_url(monkeypatch):

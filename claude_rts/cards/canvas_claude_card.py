@@ -1,8 +1,12 @@
 """CanvasClaudeCard: runs `claude` CLI with the canvas MCP server inside the util container."""
 
+import asyncio as _asyncio
+import base64 as _b64
 import json as _json
 import re as _re
+import subprocess as _subprocess
 
+from loguru import logger
 from .terminal_card import TerminalCard
 
 # Only alphanumeric, hyphens, and underscores are safe for shell interpolation.
@@ -21,6 +25,13 @@ class CanvasClaudeCard(TerminalCard):
     The MCP server (mcp_server.py) is written into the util container at
     /home/util/mcp_server.py and speaks the MCP stdio protocol over the
     subprocess's stdin/stdout, giving claude access to canvas control tools.
+
+    Start sequence:
+    1. write_mcp_config() — writes /tmp/mcp.json into the container via `docker exec`
+       (non-interactive subprocess, no PTY, avoids shell-quoting issues on Windows).
+    2. The PTY is then started with:
+       `docker exec -it <container> env CLAUDE_CONFIG_DIR=/profiles/<profile> claude --mcp-config /tmp/mcp.json`
+       This mirrors the working pattern used by ClaudeUsageCard (no bash -c wrapper).
     """
 
     card_type: str = "canvas_claude"
@@ -43,7 +54,7 @@ class CanvasClaudeCard(TerminalCard):
         if profile:
             _validate_name(profile, "profile")
 
-        # Build the MCP config JSON
+        # Build the MCP config JSON and base64-encode it for safe transfer.
         mcp_config = {
             "mcpServers": {
                 "canvas": {
@@ -54,26 +65,35 @@ class CanvasClaudeCard(TerminalCard):
             }
         }
         mcp_json = _json.dumps(mcp_config)
+        self._mcp_b64 = _b64.b64encode(mcp_json.encode()).decode()
 
-        # Build the bash command that writes the config file and launches claude
-        bash_inner = f"cat > /tmp/mcp.json << 'MCPEOF'\n{mcp_json}\nMCPEOF\n"
-        if profile:
-            bash_inner += f"CLAUDE_CONFIG_DIR=/profiles/{profile} claude --mcp-config /tmp/mcp.json"
-        else:
-            bash_inner += "claude --mcp-config /tmp/mcp.json"
-
+        # Build the PTY command — no bash -c wrapper.
+        # Using `docker exec -it container env VAR=value claude ...` is identical to
+        # the pattern used by ClaudeUsageCard probe sessions, which work reliably
+        # through pywinpty/ConPTY on Windows.  The bash -c "..." wrapper interferes
+        # with PTY allocation and causes claude to exit immediately.
         docker_bin = "docker.exe"  # Windows host
-        cmd = f"{docker_bin} exec -it {effective_container} bash -c '{bash_inner}'"
+        if profile:
+            cmd = (
+                f"{docker_bin} exec -it {effective_container} "
+                f"env CLAUDE_CONFIG_DIR=/profiles/{profile} "
+                f"claude --mcp-config /tmp/mcp.json"
+            )
+        else:
+            cmd = f"{docker_bin} exec -it {effective_container} claude --mcp-config /tmp/mcp.json"
 
+        # Pass container=None so SessionManager doesn't override cmd with tmux.
+        # The docker exec is already baked into cmd; tmux would replace it with bash.
         super().__init__(
             session_manager,
             cmd=cmd,
             hub=hub,
-            container=container,
+            container=None,
             card_id=card_id,
             layout=layout,
         )
 
+        self._effective_container = effective_container
         self.api_base_url = api_base_url
         self.profile = profile
         self.canvas_name = canvas_name
@@ -84,9 +104,56 @@ class CanvasClaudeCard(TerminalCard):
         """Return descriptor with canvas_claude type and extra fields."""
         desc = super().to_descriptor()
         desc["type"] = "canvas_claude"
+        desc["container"] = self._effective_container
         desc["profile"] = self.profile
         desc["canvas_name"] = self.canvas_name
         return desc
+
+    # ── Container helpers ──────────────────────────────────────────────
+
+    def _write_mcp_config(self) -> None:
+        """Write /tmp/mcp.json into the util container via non-interactive docker exec.
+
+        Uses base64 so no shell-quoting issues regardless of JSON content.
+        Runs synchronously; call from an executor when inside async context.
+        """
+        write_cmd = [
+            "docker.exe",
+            "exec",
+            self._effective_container,
+            "bash",
+            "-c",
+            f"echo {self._mcp_b64} | base64 -d > /tmp/mcp.json",
+        ]
+        result = _subprocess.run(write_cmd, timeout=10, capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to write MCP config: {result.stderr.decode(errors='replace')}")
+        logger.debug("CanvasClaudeCard: wrote /tmp/mcp.json to {}", self._effective_container)
+
+    def _kill_orphan_claudes(self) -> None:
+        """Kill lingering claude processes in the util container.
+
+        When the Windows-side ConPTY dies, docker exec exits but the container-side
+        claude process continues running (Docker-on-Windows doesn't reliably send SIGHUP
+        to the container process when the exec connection drops). This cleans up before
+        starting a fresh session so orphans don't accumulate.
+        """
+        try:
+            _subprocess.run(
+                ["docker.exe", "exec", self._effective_container, "pkill", "-x", "claude"],
+                timeout=5,
+                capture_output=True,
+            )
+            logger.debug("CanvasClaudeCard: killed orphan claude processes in {}", self._effective_container)
+        except Exception as exc:
+            logger.debug("CanvasClaudeCard: pkill claude (benign): {}", exc)
+
+    async def start(self) -> None:
+        """Write MCP config and kill orphans, then start the PTY."""
+        loop = _asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._kill_orphan_claudes)
+        await loop.run_in_executor(None, self._write_mcp_config)
+        await super().start()
 
     # ── Session helpers ────────────────────────────────────────────────
 

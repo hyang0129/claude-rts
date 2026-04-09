@@ -2487,16 +2487,12 @@ async function handleControlCardCreated(msg) {
   const desc = msg.descriptor;
   if (!desc) return;
 
+  // canvas_claude cards always self-create via _createAndConnect() — never spawn from
+  // the control event, which would race with the in-flight fetch and create duplicate cards.
+  if (desc.type === 'canvas_claude') return;
+
   // Avoid duplicates — check if a card with this session_id already exists
   if (desc.session_id && cards.some(c => c.sessionId === desc.session_id)) return;
-
-  if (desc.type === 'canvas_claude') {
-    const x = desc.x != null ? desc.x : (-pan.x + viewport.clientWidth / 2) / zoom - 480;
-    const y = desc.y != null ? desc.y : (-pan.y + viewport.clientHeight / 2) / zoom - 320;
-    await spawnCanvasClaudeCard(x, y, desc.w || 960, desc.h || 640, desc.session_id, desc.profile, desc.canvas_name);
-    saveLayout();
-    return;
-  }
 
   if (desc.type === 'terminal') {
     // Build a hub-like object for spawnCard
