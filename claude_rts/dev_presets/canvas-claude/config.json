@@ -1,0 +1,19 @@
+{
+  "startup_script": "util-terminal",
+  "default_canvas": "canvas-claude-qa",
+  "probe_profiles": [],
+  "sessions": {
+    "orphan_timeout": 300,
+    "scrollback_size": 65536,
+    "tmux_persistence": true
+  },
+  "util_container": {
+    "name": "supreme-claudemander-util",
+    "image": "supreme-claudemander-util:latest",
+    "auto_start": true,
+    "auto_stop": false,
+    "mounts": {
+      "~/.claude-profiles": "/profiles"
+    }
+  }
+}

@@ -27,4 +27,7 @@ RUN useradd -m -s /bin/bash util
 USER util
 WORKDIR /home/util
 
+# Copy MCP server for Canvas Claude Code integration
+COPY --chown=util:util mcp_server.py /home/util/mcp_server.py
+
 CMD ["sleep", "infinity"]

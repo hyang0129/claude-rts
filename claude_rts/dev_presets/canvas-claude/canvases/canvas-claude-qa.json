@@ -1,0 +1,13 @@
+{
+  "name": "canvas-claude-qa",
+  "canvas_size": [3840, 2160],
+  "cards": [
+    {
+      "type": "canvas_claude",
+      "x": 100,
+      "y": 100,
+      "w": 960,
+      "h": 640
+    }
+  ]
+}

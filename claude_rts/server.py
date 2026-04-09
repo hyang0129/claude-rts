@@ -18,7 +18,7 @@ from .discovery import discover_hubs  # noqa: E402
 from .startup import run_startup  # noqa: E402
 from .util_container import ensure_util_container, discover_profiles  # noqa: E402
 from .sessions import SessionManager  # noqa: E402
-from .cards import ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegistry  # noqa: E402
+from .cards import ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegistry, CanvasClaudeCard  # noqa: E402
 from .event_bus import EventBus  # noqa: E402
 from .ansi_strip import strip_ansi  # noqa: E402
 
@@ -823,6 +823,82 @@ async def claude_terminals_list(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+# ── Canvas Claude Code API ────────────────────────────────────────────────────
+
+
+async def canvas_claude_create(request: web.Request) -> web.Response:
+    """POST /api/canvas-claude/create — create a CanvasClaudeCard + PTY session."""
+    hub = request.query.get("hub", "canvas-claude")
+    container = request.query.get("container", "supreme-claudemander-util").strip()
+    profile = request.query.get("profile", "").strip() or None
+    canvas_name = request.query.get("canvas_name", "").strip() or None
+    api_base_url = request.query.get("api_base_url", "http://host.docker.internal:3000").strip()
+
+    layout: dict = {}
+    try:
+        for key in ("x", "y", "w", "h"):
+            val = request.query.get(key)
+            if val is not None:
+                layout[key] = int(val)
+    except ValueError:
+        raise web.HTTPBadRequest(text="Layout params (x, y, w, h) must be integers")
+
+    mgr: SessionManager = request.app["session_manager"]
+    card_registry: CardRegistry = request.app["card_registry"]
+
+    card = CanvasClaudeCard(
+        session_manager=mgr,
+        hub=hub or None,
+        container=container or None,
+        layout=layout,
+        api_base_url=api_base_url,
+        profile=profile,
+        canvas_name=canvas_name,
+    )
+    try:
+        await card.start()
+        card_registry.register(card)
+    except Exception:
+        logger.exception("canvas_claude_create: failed to start card")
+        return web.json_response({"error": "Failed to spawn Canvas Claude card"}, status=500)
+
+    desc = card.to_descriptor()
+    logger.info("canvas_claude_create: created {}", card.session_id)
+    return web.json_response(desc)
+
+
+async def canvas_claude_new_session(request: web.Request) -> web.Response:
+    """POST /api/canvas-claude/{id}/new-session — restart the claude process.
+
+    Unregisters the card under the old session_id before restarting, then
+    re-registers under the new session_id so the registry stays consistent.
+    """
+    card_id = request.match_info["id"]
+    card_registry: CardRegistry = request.app["card_registry"]
+    card = card_registry.get_canvas_claude(card_id)
+    if not card:
+        raise web.HTTPNotFound(text="Canvas Claude card not found")
+    try:
+        card_registry.unregister(card_id)
+        await card.new_session()
+        card_registry.register(card)
+    except Exception:
+        logger.exception("canvas_claude_new_session: failed for {}", card_id)
+        return web.json_response({"error": "Failed to restart session"}, status=500)
+    return web.json_response({"status": "ok", "session_id": card.session_id})
+
+
+async def canvas_claude_clear(request: web.Request) -> web.Response:
+    """POST /api/canvas-claude/{id}/clear — send /clear to the claude PTY."""
+    card_id = request.match_info["id"]
+    card_registry: CardRegistry = request.app["card_registry"]
+    card = card_registry.get_canvas_claude(card_id)
+    if not card:
+        raise web.HTTPNotFound(text="Canvas Claude card not found")
+    await card.clear_session()
+    return web.json_response({"status": "ok"})
+
+
 # ── Control WebSocket — broadcast card lifecycle to frontends ─────────────
 
 
@@ -913,6 +989,11 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_get("/api/claude/terminal/{id}/status", claude_terminal_status)
     app.router.add_delete("/api/claude/terminal/{id}", claude_terminal_delete)
     app.router.add_get("/api/claude/terminals", claude_terminals_list)
+
+    # Canvas Claude Code API
+    app.router.add_post("/api/canvas-claude/create", canvas_claude_create)
+    app.router.add_post("/api/canvas-claude/{id}/new-session", canvas_claude_new_session)
+    app.router.add_post("/api/canvas-claude/{id}/clear", canvas_claude_clear)
 
     # Session routes (must be before /ws/{hub} catch-all)
     app.router.add_get("/api/sessions", sessions_list_handler)
