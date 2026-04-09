@@ -2349,7 +2349,7 @@ function handleControlCardCreated(msg) {
     // Build a hub-like object for spawnCard
     const hubName = desc.hub || desc.exec || 'api-terminal';
     const container = desc.container || '';
-    const hub = hubs.find(h => h.hub === hubName) || { hub: hubName, container: container, exec: desc.exec || null };
+    const hub = hubs.find(entry => entry.hub === hubName) || { hub: hubName, container: container, exec: desc.exec || null };
 
     // Place near center of current viewport if no layout hints
     const vw = viewport.clientWidth;
@@ -2362,7 +2362,7 @@ function handleControlCardCreated(msg) {
     const h = desc.h || CARD_H;
 
     // Ensure hub is in the hubs array so it shows in sidebar / can be found on reload
-    if (!hubs.find(h => h.hub === hubName)) {
+    if (!hubs.find(entry => entry.hub === hubName)) {
       hubs.push({ hub: hubName, container: container, exec: desc.exec || null });
       hubSymbolMap[hubName] = HUB_SYMBOLS[hubs.length % HUB_SYMBOLS.length];
     }
