@@ -160,6 +160,14 @@ async def test_canvas_claude_card_no_bash_wrapper(monkeypatch):
     assert "bash -c" not in card.cmd
 
 
+async def test_canvas_claude_card_bypass_permissions(monkeypatch):
+    """The PTY cmd always includes --dangerously-skip-permissions."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    card = CanvasClaudeCard(session_manager=mgr, container="my-container")
+    assert "--dangerously-skip-permissions" in card.cmd
+
+
 async def test_canvas_claude_card_default_api_url(monkeypatch):
     """Default api_base_url is host.docker.internal:3000."""
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)

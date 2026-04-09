@@ -77,10 +77,13 @@ class CanvasClaudeCard(TerminalCard):
             cmd = (
                 f"{docker_bin} exec -it {effective_container} "
                 f"env CLAUDE_CONFIG_DIR=/profiles/{profile} "
-                f"claude --mcp-config /tmp/mcp.json"
+                f"claude --dangerously-skip-permissions --mcp-config /tmp/mcp.json"
             )
         else:
-            cmd = f"{docker_bin} exec -it {effective_container} claude --mcp-config /tmp/mcp.json"
+            cmd = (
+                f"{docker_bin} exec -it {effective_container} "
+                f"claude --dangerously-skip-permissions --mcp-config /tmp/mcp.json"
+            )
 
         # Pass container=None so SessionManager doesn't override cmd with tmux.
         # The docker exec is already baked into cmd; tmux would replace it with bash.
