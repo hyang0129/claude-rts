@@ -79,7 +79,7 @@ CLAUDE_RTS_TEST_MODE=1 python -m claude_rts   # enables puppeting API at /api/te
 | `test_dev_config.py` | 8 | Dev-config preset loading and setup |
 | `test_sessions.py` | 30 | ScrollbackBuffer, SessionManager, test puppeting API |
 | `test_terminal_card.py` | 11 | TerminalCard lifecycle, CardRegistry, server integration |
-| `test_claude_api.py` | 27 | Claude terminal control API (CRUD, send/read, strip_ansi, /ws/control, full lifecycle integration) |
+| `test_claude_api.py` | 30 | Claude terminal control API (CRUD, send/read, strip_ansi, /ws/control, full lifecycle integration) |
 | `test_event_bus.py` | 14 | EventBus core (subscribe, emit, unsubscribe, wildcard, async, errors, clear) + integration (ServiceCard bus emit, CardRegistry events) |
 | `e2e/test_smoke.py` | 7 | Playwright Electron smoke tests — launch, spawn, drag, resize, widgets, pan/zoom, save/reload |
 
