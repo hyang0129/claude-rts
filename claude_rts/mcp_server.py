@@ -70,7 +70,12 @@ def tool_read_terminal(args):
     session_id = args.get("session_id", "")
     if not session_id:
         raise ValueError("session_id is required")
-    result = http_request("GET", f"/api/claude/terminal/{session_id}/read?strip_ansi=true")
+    safe_id = urllib.parse.quote(session_id, safe="")
+    qs = "strip_ansi=true"
+    last_n = args.get("last_n")
+    if last_n is not None:
+        qs += f"&last_n={int(last_n)}"
+    result = http_request("GET", f"/api/claude/terminal/{safe_id}/read?{qs}")
     return result.get("output", "")
 
 
@@ -79,7 +84,8 @@ def tool_write_terminal(args):
     text = args.get("text", "")
     if not session_id:
         raise ValueError("session_id is required")
-    result = http_request("POST", f"/api/claude/terminal/{session_id}/send", body=text)
+    safe_id = urllib.parse.quote(session_id, safe="")
+    result = http_request("POST", f"/api/claude/terminal/{safe_id}/send", body=text)
     return f"Sent {result.get('sent', 0)} bytes"
 
 
@@ -97,7 +103,8 @@ def tool_delete_terminal(args):
     session_id = args.get("session_id", "")
     if not session_id:
         raise ValueError("session_id is required")
-    http_request("DELETE", f"/api/claude/terminal/{session_id}")
+    safe_id = urllib.parse.quote(session_id, safe="")
+    http_request("DELETE", f"/api/claude/terminal/{safe_id}")
     return "Terminal deleted"
 
 
@@ -134,6 +141,10 @@ TOOL_SCHEMAS = [
             "type": "object",
             "properties": {
                 "session_id": {"type": "string", "description": "Session ID of the terminal to read"},
+                "last_n": {
+                    "type": "integer",
+                    "description": "Only return the last N bytes of output (optional, default: full scrollback)",
+                },
             },
             "required": ["session_id"],
         },

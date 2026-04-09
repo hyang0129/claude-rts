@@ -100,8 +100,7 @@ def test_list_terminals_empty():
 
 def test_open_terminal_missing_cmd():
     """open_terminal raises ValueError when cmd is missing."""
-    try:
+    import pytest
+
+    with pytest.raises(ValueError):
         tool_open_terminal({})
-        assert False, "Should have raised ValueError"
-    except (ValueError, Exception):
-        pass

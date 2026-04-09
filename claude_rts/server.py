@@ -884,6 +884,13 @@ async def canvas_claude_new_session(request: web.Request) -> web.Response:
         card_registry.register(card)
     except Exception:
         logger.exception("canvas_claude_new_session: failed for {}", card_id)
+        # Re-register the card so it is not orphaned — use whatever id it
+        # currently has (may be the old one if new_session() failed before
+        # allocating a new PTY).
+        try:
+            card_registry.register(card)
+        except Exception:
+            logger.exception("canvas_claude_new_session: failed to re-register card {}", card_id)
         return web.json_response({"error": "Failed to restart session"}, status=500)
     return web.json_response({"status": "ok", "session_id": card.session_id})
 

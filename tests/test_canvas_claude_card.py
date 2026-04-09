@@ -2,6 +2,8 @@
 
 import time
 
+import pytest
+
 from claude_rts.cards.canvas_claude_card import CanvasClaudeCard
 from claude_rts.sessions import SessionManager
 
@@ -150,20 +152,14 @@ async def test_canvas_claude_card_default_api_url(monkeypatch):
 async def test_canvas_claude_card_invalid_container_rejected():
     """Container name with shell-unsafe characters raises ValueError."""
     mgr = SessionManager()
-    try:
+    with pytest.raises(ValueError):
         CanvasClaudeCard(session_manager=mgr, container="foo'; rm -rf /")
-        assert False, "Should have raised ValueError"
-    except ValueError:
-        pass
     mgr.stop_all()
 
 
 async def test_canvas_claude_card_invalid_profile_rejected():
     """Profile name with shell-unsafe characters raises ValueError."""
     mgr = SessionManager()
-    try:
+    with pytest.raises(ValueError):
         CanvasClaudeCard(session_manager=mgr, container="my-container", profile="x; evil")
-        assert False, "Should have raised ValueError"
-    except ValueError:
-        pass
     mgr.stop_all()
