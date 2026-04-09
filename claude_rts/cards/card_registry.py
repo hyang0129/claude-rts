@@ -12,6 +12,7 @@ from .terminal_card import TerminalCard
 
 if TYPE_CHECKING:
     from claude_rts.event_bus import EventBus
+    from .canvas_claude_card import CanvasClaudeCard
 
 
 class CardRegistry:
@@ -62,6 +63,21 @@ class CardRegistry:
     def list_terminals(self) -> list[TerminalCard]:
         """Return all registered TerminalCards."""
         return [c for c in self._cards.values() if isinstance(c, TerminalCard)]
+
+    def get_canvas_claude(self, card_id: str) -> "CanvasClaudeCard | None":
+        """Look up a CanvasClaudeCard by id."""
+        from .canvas_claude_card import CanvasClaudeCard
+
+        card = self._cards.get(card_id)
+        if isinstance(card, CanvasClaudeCard):
+            return card
+        return None
+
+    def list_canvas_claude(self) -> list:
+        """Return all registered CanvasClaudeCards."""
+        from .canvas_claude_card import CanvasClaudeCard
+
+        return [c for c in self._cards.values() if isinstance(c, CanvasClaudeCard)]
 
     def list_all(self) -> list[BaseCard]:
         """Return all registered cards."""

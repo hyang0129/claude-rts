@@ -110,6 +110,13 @@
   }
   .terminal-titlebar .claude-btn:hover { background: #cba6f7; color: #1e1e2e; }
   .terminal-titlebar .claude-btn:disabled { opacity: 0.3; pointer-events: none; }
+  .terminal-titlebar .clear-session-btn {
+    padding: 2px 8px; font-size: 11px; border-radius: 3px; border: none;
+    cursor: pointer; background: #45475a; color: #cdd6f4; margin-right: 4px;
+    transition: background 0.15s;
+  }
+  .terminal-titlebar .clear-session-btn:hover { background: #89b4fa; color: #1e1e2e; }
+  .terminal-titlebar .clear-session-btn:disabled { opacity: 0.3; pointer-events: none; }
 
   .terminal-body {
     flex: 1;
@@ -855,6 +862,13 @@ function showContextMenu(sx, sy) {
     }
   }
 
+  // Canvas Claude Code section
+  html += '<div class="ctx-header">Canvas Claude Code</div>';
+  html += `<div class="ctx-item" data-canvas-claude="true">
+    <span class="symbol-preview" style="color:#cba6f7">C</span>
+    Canvas Claude Code
+  </div>`;
+
   ctxMenu.innerHTML = html;
   ctxMenu.style.left = sx + 'px';
   ctxMenu.style.top = sy + 'px';
@@ -910,6 +924,14 @@ function showContextMenu(sx, sy) {
       } catch (err) {
         console.error('Failed to start claude usage probe:', err);
       }
+    });
+  });
+
+  ctxMenu.querySelectorAll('.ctx-item[data-canvas-claude]').forEach(item => {
+    item.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      hideContextMenu();
+      await spawnCanvasClaudeCard(ctxMenuCanvasPos.x, ctxMenuCanvasPos.y);
     });
   });
 }
@@ -1410,6 +1432,53 @@ class TerminalCard extends Card {
 }
 
 // ════════════════════════════════════════════
+// CanvasClaudeCard subclass
+// ════════════════════════════════════════════
+class CanvasClaudeCard extends TerminalCard {
+  constructor(opts) {
+    super({ ...opts, type: 'canvas_claude' });
+    this.profile = opts.profile || null;
+    this.canvasName = opts.canvasName || null;
+  }
+
+  setupClaudeBtn() {
+    // Override: no default "Start Claude" button; just a Clear button
+    const titlebar = this.el.querySelector(`[data-drag="${this.id}"]`);
+    const closeBtn = titlebar.querySelector('.close-btn');
+
+    const clearBtn = document.createElement('button');
+    clearBtn.className = 'clear-session-btn';
+    clearBtn.title = 'Clear conversation history';
+    clearBtn.textContent = 'Clear';
+
+    clearBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      clearBtn.disabled = true;
+      try {
+        const sid = this.sessionId;
+        if (sid) {
+          await fetch(`/api/canvas-claude/${sid}/clear`, { method: 'POST' });
+        }
+      } catch (err) {
+        console.error('Clear session failed:', err);
+      } finally {
+        clearBtn.disabled = false;
+      }
+    });
+
+    titlebar.insertBefore(clearBtn, closeBtn);
+  }
+
+  serialize() {
+    const data = super.serialize();
+    data.type = 'canvas_claude';
+    data.profile = this.profile;
+    data.canvasName = this.canvasName;
+    return data;
+  }
+}
+
+// ════════════════════════════════════════════
 // LoaderCard subclass
 // ════════════════════════════════════════════
 class LoaderCard {
@@ -1687,6 +1756,57 @@ function spawnWidget(widgetType, x, y, w, h) {
     w: w || 360,
     h: h || 280,
     symbol: 'W',
+  });
+  card.createElement();
+  canvas.appendChild(card.el);
+  cards.push(card);
+  card.setupDrag();
+  card.setupResize();
+  card.onInit();
+  drawMinimap();
+  updateHubCount();
+  return card;
+}
+
+async function spawnCanvasClaudeCard(x, y, w, h, sessionId, profile, canvasName) {
+  // If no existing session, ask the server to create one
+  if (!sessionId) {
+    // Auto-resolve priority profile if none was explicitly set
+    if (!profile) {
+      try {
+        const pr = await fetch('/api/profiles/priority');
+        if (pr.ok) {
+          const pd = await pr.json();
+          if (pd.priority_profile && /^[a-zA-Z0-9._-]+$/.test(pd.priority_profile)) {
+            profile = pd.priority_profile;
+          }
+        }
+      } catch (_) { /* non-fatal — proceed without profile */ }
+    }
+    try {
+      const params = new URLSearchParams({ x: Math.round(x), y: Math.round(y), w: w || 960, h: h || 640 });
+      if (profile) params.set('profile', profile);
+      if (canvasName || currentCanvasName) params.set('canvas_name', canvasName || currentCanvasName || '');
+      const resp = await fetch(`/api/canvas-claude/create?${params}`, { method: 'POST' });
+      if (!resp.ok) { console.error('Failed to create Canvas Claude session:', await resp.text()); return null; }
+      const desc = await resp.json();
+      sessionId = desc.session_id;
+    } catch (err) {
+      console.error('Failed to create Canvas Claude session:', err);
+      return null;
+    }
+  }
+
+  const card = new CanvasClaudeCard({
+    hub: 'canvas-claude',
+    container: 'supreme-claudemander-util',
+    x, y,
+    w: w || 960,
+    h: h || 640,
+    symbol: 'C',
+    profile: profile || null,
+    canvasName: canvasName || currentCanvasName || null,
+    sessionId: sessionId,
   });
   card.createElement();
   canvas.appendChild(card.el);
@@ -2281,7 +2401,9 @@ async function switchCanvas(name) {
   const saved = await loadLayout();
   if (saved && saved.length > 0) {
     for (const s of saved) {
-      if (s.type === 'widget' && s.widgetType) {
+      if (s.type === 'canvas_claude') {
+        await spawnCanvasClaudeCard(s.x, s.y, s.w, s.h, s.session_id, s.profile, s.canvasName);
+      } else if (s.type === 'widget' && s.widgetType) {
         spawnWidget(s.widgetType, s.x, s.y, s.w, s.h);
       } else {
         const hub = hubs.find(h => h.hub === s.hub);
@@ -2338,9 +2460,13 @@ function connectControlWs() {
   });
 }
 
-function handleControlCardCreated(msg) {
+async function handleControlCardCreated(msg) {
   const desc = msg.descriptor;
   if (!desc) return;
+
+  // canvas_claude cards always self-create via _createAndConnect() — never spawn from
+  // the control event, which would race with the in-flight fetch and create duplicate cards.
+  if (desc.type === 'canvas_claude') return;
 
   // Avoid duplicates — check if a card with this session_id already exists
   if (desc.session_id && cards.some(c => c.sessionId === desc.session_id)) return;
@@ -2485,7 +2611,9 @@ function handleControlCardDeleted(msg) {
   if (saved && saved.length > 0) {
     // Spawn cards from saved layout
     for (const s of saved) {
-      if (s.type === 'widget' && s.widgetType) {
+      if (s.type === 'canvas_claude') {
+        await spawnCanvasClaudeCard(s.x, s.y, s.w, s.h, s.session_id, s.profile, s.canvasName);
+      } else if (s.type === 'widget' && s.widgetType) {
         spawnWidget(s.widgetType, s.x, s.y, s.w, s.h);
       } else {
         const hub = hubs.find(h => h.hub === s.hub);
@@ -2494,7 +2622,7 @@ function handleControlCardDeleted(msg) {
     }
     // Spawn any new hubs not in saved layout
     for (const hub of hubs) {
-      if (!saved.some(s => s.hub === hub.hub && s.type !== 'widget')) {
+      if (!saved.some(s => s.hub === hub.hub && s.type !== 'widget' && s.type !== 'canvas_claude')) {
         spawnCard(hub, 100 + Math.random() * 200, 100 + Math.random() * 200);
       }
     }

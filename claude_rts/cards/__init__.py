@@ -6,6 +6,7 @@ from .registry import ServiceCardRegistry
 from .claude_usage_card import ClaudeUsageCard
 from .terminal_card import TerminalCard
 from .card_registry import CardRegistry
+from .canvas_claude_card import CanvasClaudeCard
 
 __all__ = [
     "BaseCard",
@@ -14,4 +15,5 @@ __all__ = [
     "ClaudeUsageCard",
     "TerminalCard",
     "CardRegistry",
+    "CanvasClaudeCard",
 ]
