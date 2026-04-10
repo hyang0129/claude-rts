@@ -218,6 +218,102 @@ async def widget_system_info_handler(request: web.Request) -> web.Response:
     return web.json_response(data)
 
 
+_DOCKER_CMD = "docker.exe" if sys.platform == "win32" else "docker"
+
+
+# ── VM Manager API ───────────────────────────────────────────────────────────
+
+
+async def vm_discover_handler(request: web.Request) -> web.Response:
+    """Discover all Docker containers (running + stopped) with status."""
+    proc = await asyncio.create_subprocess_exec(
+        _DOCKER_CMD,
+        "ps",
+        "-a",
+        "--format",
+        "{{.Names}}|{{.State}}|{{.Image}}|{{.Status}}",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        err = stderr.decode().strip() if stderr else "docker ps failed"
+        logger.warning("vm_discover: docker ps failed: {}", err)
+        return web.json_response({"error": err}, status=500)
+
+    containers = []
+    for line in stdout.decode().strip().splitlines():
+        parts = line.split("|", 3)
+        if len(parts) < 2:
+            continue
+        name = parts[0].strip()
+        state = parts[1].strip().lower()
+        image = parts[2].strip() if len(parts) > 2 else ""
+        status_text = parts[3].strip() if len(parts) > 3 else ""
+        # Normalize state to online/offline/starting
+        if state == "running":
+            normalized = "online"
+        elif state in ("created", "restarting"):
+            normalized = "starting"
+        else:
+            normalized = "offline"
+        containers.append(
+            {
+                "name": name,
+                "state": normalized,
+                "image": image,
+                "status": status_text,
+            }
+        )
+
+    containers.sort(key=lambda c: c["name"])
+    return web.json_response(containers)
+
+
+async def vm_favorites_get_handler(request: web.Request) -> web.Response:
+    """Read the VM Manager favorites list from config."""
+    app_config: AppConfig = request.app["app_config"]
+    config = read_config(app_config)
+    vm_config = config.get("vm_manager", {})
+    favorites = vm_config.get("favorites", [])
+    return web.json_response(favorites)
+
+
+async def vm_favorites_put_handler(request: web.Request) -> web.Response:
+    """Write the VM Manager favorites list to config."""
+    app_config: AppConfig = request.app["app_config"]
+    body = await request.json()
+    favorites = body if isinstance(body, list) else body.get("favorites", [])
+    config = read_config(app_config)
+    if "vm_manager" not in config:
+        config["vm_manager"] = {}
+    config["vm_manager"]["favorites"] = favorites
+    write_config(app_config, config)
+    return web.json_response(favorites)
+
+
+async def vm_start_handler(request: web.Request) -> web.Response:
+    """Start a stopped Docker container by name."""
+    name = request.match_info["name"]
+    proc = await asyncio.create_subprocess_exec(
+        _DOCKER_CMD,
+        "start",
+        name,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        err = stderr.decode().strip() if stderr else "docker start failed"
+        logger.warning("vm_start: failed to start container '{}': {}", name, err)
+        return web.json_response({"error": err}, status=500)
+
+    logger.info("vm_start: started container '{}'", name)
+    return web.json_response({"name": name, "state": "online"})
+
+
 async def exec_websocket_handler(request: web.Request) -> web.WebSocketResponse:
     """WebSocket handler that spawns a PTY for an arbitrary command."""
     cmd = request.query.get("cmd", "").strip()
@@ -982,6 +1078,13 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_put("/api/canvases/{name}", canvas_put_handler)
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
     app.router.add_get("/api/widgets/system-info", widget_system_info_handler)
+
+    # VM Manager API
+    app.router.add_get("/api/vms/discover", vm_discover_handler)
+    app.router.add_get("/api/vms/favorites", vm_favorites_get_handler)
+    app.router.add_put("/api/vms/favorites", vm_favorites_put_handler)
+    app.router.add_post("/api/vms/{name}/start", vm_start_handler)
+
     app.router.add_get("/api/profiles", profiles_list_handler)
     app.router.add_get("/api/profiles/discover", profiles_discover_handler)
     app.router.add_get("/api/profiles/priority", priority_get_handler)

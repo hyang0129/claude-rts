@@ -63,6 +63,9 @@ DEFAULT_CONFIG = {
         "scrollback_size": 65536,
         "tmux_persistence": True,
     },
+    "vm_manager": {
+        "favorites": [],
+    },
 }
 
 # Allowed canvas name pattern: alphanumeric, hyphens, underscores

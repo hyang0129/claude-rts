@@ -1735,6 +1735,257 @@ const WIDGET_REGISTRY = {
       }
     },
   },
+  'vm-manager': {
+    label: 'VM Manager',
+    defaultRefreshInterval: 15000,
+    async render(body, card) {
+      try {
+        const esc = (s) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+        // Load favorites and discovered containers in parallel
+        const [favsResp, discoverResp, configResp] = await Promise.all([
+          fetch('/api/vms/favorites'),
+          fetch('/api/vms/discover'),
+          fetch('/api/config'),
+        ]);
+        if (!favsResp.ok) throw new Error(`Favorites: HTTP ${favsResp.status}`);
+        if (!discoverResp.ok) throw new Error(`Discover: HTTP ${discoverResp.status}`);
+
+        const favorites = await favsResp.json();
+        const allContainers = await discoverResp.json();
+        const config = configResp.ok ? await configResp.json() : {};
+        const priorityProfile = config.priority_profile || null;
+
+        // Build a lookup of discovered containers
+        const containerMap = {};
+        for (const c of allContainers) containerMap[c.name] = c;
+
+        // State indicator
+        const stateIcon = (state) => {
+          if (state === 'online') return '<span style="color:#a6e3a1" title="Online">●</span>';
+          if (state === 'starting') return '<span style="color:#f9e2af" title="Starting">●</span>';
+          return '<span style="color:#585b70" title="Offline">●</span>';
+        };
+
+        let html = '';
+
+        // ── Search / Add section ──
+        html += '<div style="padding:4px 6px;border-bottom:1px solid #313244">';
+        html += '<div style="display:flex;gap:4px;align-items:center">';
+        html += '<input type="text" data-vm-search placeholder="Search containers…" style="flex:1;background:#1e1e2e;border:1px solid #45475a;color:#cdd6f4;border-radius:4px;padding:3px 6px;font-size:11px;outline:none">';
+        html += '</div>';
+        html += '<div data-vm-search-results style="max-height:120px;overflow-y:auto;margin-top:4px;display:none"></div>';
+        html += '</div>';
+
+        // ── Favorites list ──
+        if (favorites.length === 0) {
+          html += '<div class="widget-row" style="padding:8px 6px"><span class="widget-label" style="color:#a6adc8">No favorites yet. Search above to add containers.</span></div>';
+        } else {
+          html += '<div style="overflow-y:auto;max-height:400px">';
+          for (const fav of favorites) {
+            const discovered = containerMap[fav.name];
+            const state = discovered ? discovered.state : 'offline';
+            const image = discovered ? discovered.image : '';
+            const actions = fav.actions || [{ label: 'Terminal', type: 'terminal' }];
+
+            html += '<div style="padding:6px;border-bottom:1px solid #181825">';
+            html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">';
+            html += stateIcon(state);
+            html += `<span style="font-weight:bold;font-size:12px;flex:1">${esc(fav.name)}</span>`;
+            if (state === 'offline') {
+              html += `<button data-vm-start="${esc(fav.name)}" style="background:#1e1e2e;border:1px solid #45475a;color:#a6e3a1;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:10px" title="Start container">▶ Start</button>`;
+            }
+            html += `<button data-vm-remove="${esc(fav.name)}" style="background:none;border:1px solid #45475a;color:#f38ba8;border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px" title="Remove from favorites">✕</button>`;
+            html += '</div>';
+            if (image) {
+              html += `<div style="font-size:10px;color:#6c7086;margin-bottom:3px;padding-left:18px">${esc(image)}</div>`;
+            }
+            // Action buttons
+            html += '<div style="display:flex;gap:4px;flex-wrap:wrap;padding-left:18px">';
+            for (let i = 0; i < actions.length; i++) {
+              const act = actions[i];
+              const disabled = state !== 'online' ? 'opacity:0.4;pointer-events:none;' : '';
+              html += `<button data-vm-action="${esc(fav.name)}" data-action-idx="${i}" style="${disabled}background:#1e1e2e;border:1px solid #45475a;color:#89b4fa;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:10px">${esc(act.label)}</button>`;
+            }
+            // Configure actions button
+            html += `<button data-vm-configure="${esc(fav.name)}" style="background:none;border:1px dashed #45475a;color:#6c7086;border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px" title="Configure actions">⚙</button>`;
+            html += '</div>';
+            html += '</div>';
+          }
+          html += '</div>';
+        }
+
+        body.innerHTML = html;
+
+        // ── Search functionality ──
+        const searchInput = body.querySelector('[data-vm-search]');
+        const searchResults = body.querySelector('[data-vm-search-results]');
+        if (searchInput && searchResults) {
+          searchInput.addEventListener('input', () => {
+            const q = searchInput.value.trim().toLowerCase();
+            if (!q) { searchResults.style.display = 'none'; return; }
+            const favNames = new Set(favorites.map(f => f.name));
+            const matches = allContainers.filter(c => c.name.toLowerCase().includes(q) && !favNames.has(c.name));
+            if (matches.length === 0) {
+              searchResults.innerHTML = '<div style="padding:4px 6px;color:#6c7086;font-size:11px">No matches</div>';
+            } else {
+              searchResults.innerHTML = matches.map(c =>
+                `<div style="display:flex;align-items:center;gap:6px;padding:3px 6px;cursor:pointer;font-size:11px" data-vm-add="${esc(c.name)}">
+                  ${stateIcon(c.state)} <span style="flex:1">${esc(c.name)}</span>
+                  <span style="color:#6c7086;font-size:10px">${esc(c.image)}</span>
+                  <span style="color:#a6e3a1;font-size:10px">+ Add</span>
+                </div>`
+              ).join('');
+            }
+            searchResults.style.display = 'block';
+          });
+
+          // Add to favorites
+          searchResults.addEventListener('click', async (e) => {
+            const addBtn = e.target.closest('[data-vm-add]');
+            if (!addBtn) return;
+            const name = addBtn.getAttribute('data-vm-add');
+            const newFavs = [...favorites, { name, type: 'docker', actions: [{ label: 'Terminal', type: 'terminal' }] }];
+            await fetch('/api/vms/favorites', {
+              method: 'PUT',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify(newFavs),
+            });
+            card.render();
+          });
+        }
+
+        // ── Remove from favorites ──
+        body.querySelectorAll('[data-vm-remove]').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const name = btn.getAttribute('data-vm-remove');
+            const newFavs = favorites.filter(f => f.name !== name);
+            await fetch('/api/vms/favorites', {
+              method: 'PUT',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify(newFavs),
+            });
+            card.render();
+          });
+        });
+
+        // ── Start container ──
+        body.querySelectorAll('[data-vm-start]').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const name = btn.getAttribute('data-vm-start');
+            btn.textContent = '⏳';
+            btn.disabled = true;
+            try {
+              const r = await fetch(`/api/vms/${encodeURIComponent(name)}/start`, { method: 'POST' });
+              if (!r.ok) {
+                const err = await r.json();
+                console.error('Failed to start:', err);
+              }
+            } catch (err) {
+              console.error('Start error:', err);
+            }
+            // Refresh after a short delay to let container come up
+            setTimeout(() => card.render(), 2000);
+          });
+        });
+
+        // ── Action buttons ──
+        body.querySelectorAll('[data-vm-action]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const name = btn.getAttribute('data-vm-action');
+            const idx = parseInt(btn.getAttribute('data-action-idx'), 10);
+            const fav = favorites.find(f => f.name === name);
+            if (!fav) return;
+            const act = (fav.actions || [])[idx];
+            if (!act) return;
+
+            const discovered = containerMap[name];
+            if (!discovered || discovered.state !== 'online') return;
+
+            const _docker = (navigator.platform.startsWith('Win') || navigator.userAgent.includes('Windows')) ? 'docker.exe' : 'docker';
+            let cmd;
+
+            if (act.shell_prefix) {
+              // Resolve import_keys
+              let prefix = act.shell_prefix;
+              if (act.import_keys && Array.isArray(act.import_keys)) {
+                for (const key of act.import_keys) {
+                  if (key === 'priority_credential' && priorityProfile) {
+                    prefix = prefix.replace('${priority_credential}', priorityProfile);
+                  }
+                }
+              }
+              cmd = `${_docker} exec -it ${name} bash -lc '${prefix.replace(/'/g, "'\\''")}'`;
+            } else {
+              // Default: attach terminal to container
+              cmd = `${_docker} exec -it ${name} bash -l`;
+            }
+
+            // Find or create a hub entry for spawnCard
+            const hub = { hub: name, container: name, exec: cmd };
+            if (typeof spawnCard === 'function') {
+              // Place near center of viewport
+              const vw = viewport.clientWidth;
+              const vh = viewport.clientHeight;
+              const cx = (-pan.x + vw / 2) / zoom;
+              const cy = (-pan.y + vh / 2) / zoom;
+              spawnCard(hub, cx - 480 + Math.random() * 60, cy - 320 + Math.random() * 60, 960, 640);
+            }
+          });
+        });
+
+        // ── Configure actions ──
+        body.querySelectorAll('[data-vm-configure]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const name = btn.getAttribute('data-vm-configure');
+            const fav = favorites.find(f => f.name === name);
+            if (!fav) return;
+
+            // Simple inline editor for actions
+            const dialog = document.createElement('div');
+            dialog.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:100000';
+            const box = document.createElement('div');
+            box.style.cssText = 'background:#1e1e2e;border:1px solid #45475a;border-radius:8px;padding:16px;min-width:400px;max-width:600px;color:#cdd6f4;font-size:12px';
+            box.innerHTML = `
+              <div style="font-weight:bold;margin-bottom:8px">Configure actions for ${esc(name)}</div>
+              <div style="margin-bottom:8px;color:#6c7086;font-size:11px">Edit the JSON array of actions. Each action: { "label": "...", "type": "terminal", "shell_prefix": "...", "import_keys": [...] }</div>
+              <textarea data-actions-json style="width:100%;height:150px;background:#11111b;border:1px solid #45475a;color:#cdd6f4;border-radius:4px;padding:8px;font-family:monospace;font-size:11px;resize:vertical">${esc(JSON.stringify(fav.actions || [], null, 2))}</textarea>
+              <div style="display:flex;gap:8px;margin-top:8px;justify-content:flex-end">
+                <button data-cancel style="background:none;border:1px solid #45475a;color:#cdd6f4;border-radius:4px;padding:4px 12px;cursor:pointer">Cancel</button>
+                <button data-save style="background:#89b4fa;border:none;color:#1e1e2e;border-radius:4px;padding:4px 12px;cursor:pointer;font-weight:bold">Save</button>
+              </div>
+            `;
+            dialog.appendChild(box);
+            document.body.appendChild(dialog);
+
+            dialog.querySelector('[data-cancel]').addEventListener('click', () => dialog.remove());
+            dialog.addEventListener('click', (e) => { if (e.target === dialog) dialog.remove(); });
+
+            dialog.querySelector('[data-save]').addEventListener('click', async () => {
+              try {
+                const actions = JSON.parse(box.querySelector('[data-actions-json]').value);
+                const newFavs = favorites.map(f => f.name === name ? { ...f, actions } : f);
+                await fetch('/api/vms/favorites', {
+                  method: 'PUT',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify(newFavs),
+                });
+                dialog.remove();
+                card.render();
+              } catch (err) {
+                alert('Invalid JSON: ' + err.message);
+              }
+            });
+          });
+        });
+
+        card.updateState(favorites.length > 0 ? 'working' : 'idle');
+      } catch (err) {
+        body.innerHTML = `<div class="widget-row"><span class="widget-label" style="color:#f38ba8">Error: ${err.message}</span></div>`;
+        card.updateState('dead');
+      }
+    },
+  },
 };
 
 // ════════════════════════════════════════════
