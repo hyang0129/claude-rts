@@ -81,6 +81,7 @@ CLAUDE_RTS_TEST_MODE=1 python -m claude_rts   # enables puppeting API at /api/te
 | `test_terminal_card.py` | 11 | TerminalCard lifecycle, CardRegistry, server integration |
 | `test_claude_api.py` | 30 | Claude terminal control API (CRUD, send/read, strip_ansi, /ws/control, full lifecycle integration) |
 | `test_event_bus.py` | 14 | EventBus core (subscribe, emit, unsubscribe, wildcard, async, errors, clear) + integration (ServiceCard bus emit, CardRegistry events) |
+| `test_vm_manager.py` | 12 | VM Manager API (discover containers, favorites CRUD, start container, route registration) |
 | `e2e/test_smoke.py` | 7 | Playwright Electron smoke tests — launch, spawn, drag, resize, widgets, pan/zoom, save/reload |
 
 Tests use `MockPty` to avoid needing Docker. E2E tests require Playwright and Electron (`pip install -e ".[e2e]" && python -m playwright install chromium`).
@@ -98,6 +99,9 @@ Tests use `MockPty` to avoid needing Docker. E2E tests require Playwright and El
 | GET | `/api/widgets/system-info` | System info widget data |
 | GET | `/api/profiles` | Probe profiles with usage data, sorted by burn rate |
 | GET/PUT | `/api/profiles/priority` | Read/set priority profile |
+| GET | `/api/vms/discover` | Discover all Docker containers (running + stopped) with status |
+| GET/PUT | `/api/vms/favorites` | Read/write VM Manager favorites list |
+| POST | `/api/vms/{name}/start` | Start a stopped Docker container |
 | POST | `/api/claude/terminal/create` | Create a TerminalCard + PTY session (params: cmd, hub, container, cols, rows, x, y, w, h) |
 | POST | `/api/claude/terminal/{id}/send` | Write text to a terminal PTY |
 | GET | `/api/claude/terminal/{id}/read` | Read scrollback (optional: strip_ansi, last_n) |
