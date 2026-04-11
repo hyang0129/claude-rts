@@ -395,9 +395,7 @@ async def vm_favorites_actions_put_handler(request: web.Request) -> web.Response
     except Exception:
         return web.json_response({"error": "Request body must be valid JSON"}, status=400)
     if not isinstance(actions, list):
-        return web.json_response(
-            {"error": "Request body must be a JSON array of action objects"}, status=400
-        )
+        return web.json_response({"error": "Request body must be a JSON array of action objects"}, status=400)
     target["actions"] = actions
 
     # Persist
