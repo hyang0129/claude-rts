@@ -315,6 +315,7 @@ async def vm_start_handler(request: web.Request) -> web.Response:
     proc = await asyncio.create_subprocess_exec(
         _DOCKER_CMD,
         "start",
+        "--",
         name,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -349,11 +350,11 @@ async def vm_stop_handler(request: web.Request) -> web.Response:
     cmd_args = [_DOCKER_CMD, "stop"]
     if timeout_str is not None:
         try:
-            timeout_val = int(timeout_str)
+            timeout_val = max(0, int(timeout_str))
             cmd_args.extend(["-t", str(timeout_val)])
         except ValueError:
             pass
-    cmd_args.append(name)
+    cmd_args.extend(["--", name])
 
     proc = await asyncio.create_subprocess_exec(
         *cmd_args,

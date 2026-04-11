@@ -110,6 +110,8 @@ def tool_delete_terminal(args):
 
 def tool_vm_discover_containers(args):  # noqa: ARG001
     result = http_request("GET", "/api/vms/discover")
+    if not isinstance(result, list):
+        return f"Error discovering containers: {result}"
     if not result:
         return "No containers found"
     lines = []

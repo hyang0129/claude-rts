@@ -5,6 +5,8 @@ import os
 import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from claude_rts.mcp_server import (
     handle_request,
@@ -283,8 +285,6 @@ def test_vm_set_container_actions():
 
 def test_vm_set_container_actions_missing_container():
     """vm_set_container_actions raises ValueError when container is missing."""
-    import pytest
-
     with pytest.raises(ValueError):
         tool_vm_set_container_actions({})
 
@@ -326,8 +326,6 @@ def test_vm_add_favorite_already_exists():
 
 def test_vm_add_favorite_missing_name():
     """vm_add_favorite raises ValueError when name is missing."""
-    import pytest
-
     with pytest.raises(ValueError):
         tool_vm_add_favorite({})
 
