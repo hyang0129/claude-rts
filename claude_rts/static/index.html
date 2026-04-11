@@ -1792,6 +1792,7 @@ const WIDGET_REGISTRY = {
         // ── Search / Add section ──
         html += '<div style="padding:4px 6px;border-bottom:1px solid #313244">';
         html += '<div style="display:flex;gap:4px;align-items:center">';
+        html += '<span style="color:#6c7086;font-size:11px">＋ Add:</span>';
         html += '<input type="text" data-vm-search placeholder="Search containers…" style="flex:1;background:#1e1e2e;border:1px solid #45475a;color:#cdd6f4;border-radius:4px;padding:3px 6px;font-size:11px;outline:none">';
         html += '</div>';
         html += '<div data-vm-search-results style="max-height:120px;overflow-y:auto;margin-top:4px;display:none"></div>';
@@ -1804,16 +1805,21 @@ const WIDGET_REGISTRY = {
           html += '<div style="overflow-y:auto;max-height:400px">';
           for (const fav of favorites) {
             const discovered = containerMap[fav.name];
+            const missing = !discovered;
             const state = discovered ? discovered.state : 'offline';
             const image = discovered ? discovered.image : '';
             const actions = fav.actions || [{ label: 'Terminal', type: 'terminal' }];
 
             html += '<div style="padding:6px;border-bottom:1px solid #181825">';
             html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">';
-            html += stateIcon(state);
+            html += stateIcon(missing ? 'missing' : state);
             html += `<span style="font-weight:bold;font-size:12px;flex:1">${esc(fav.name)}</span>`;
-            if (state === 'offline') {
-              html += `<button data-vm-start="${esc(fav.name)}" style="background:#1e1e2e;border:1px solid #45475a;color:#a6e3a1;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:10px" title="Start container">▶ Start</button>`;
+            if (missing) {
+              html += `<span style="color:#6c7086;font-size:10px;font-style:italic">not found</span>`;
+            } else if (state === 'offline') {
+              html += `<button data-vm-start="${esc(fav.name)}" style="background:#1e1e2e;border:1px solid #45475a;color:#a6e3a1;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:10px" title="Start container">Start</button>`;
+            } else if (state === 'online') {
+              html += `<button data-vm-stop="${esc(fav.name)}" style="background:#1e1e2e;border:1px solid #45475a;color:#f38ba8;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:10px" title="Stop container">Stop</button>`;
             }
             html += `<button data-vm-remove="${esc(fav.name)}" style="background:none;border:1px solid #45475a;color:#f38ba8;border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px" title="Remove from favorites">✕</button>`;
             html += '</div>';
@@ -1841,23 +1847,34 @@ const WIDGET_REGISTRY = {
         const searchInput = body.querySelector('[data-vm-search]');
         const searchResults = body.querySelector('[data-vm-search-results]');
         if (searchInput && searchResults) {
-          searchInput.addEventListener('input', () => {
-            const q = searchInput.value.trim().toLowerCase();
-            if (!q) { searchResults.style.display = 'none'; return; }
+          const truncate = (s, n) => s.length > n ? s.slice(0, n) + '…' : s;
+          const renderSearchResults = (q) => {
             const favNames = new Set(favorites.map(f => f.name));
-            const matches = allContainers.filter(c => c.name.toLowerCase().includes(q) && !favNames.has(c.name));
+            const matches = allContainers.filter(c => !favNames.has(c.name) && (!q || c.name.toLowerCase().includes(q)));
+            // Sort: online first, then starting, then offline
+            const stateOrder = { online: 0, starting: 1, offline: 2 };
+            matches.sort((a, b) => (stateOrder[a.state] ?? 2) - (stateOrder[b.state] ?? 2));
             if (matches.length === 0) {
               searchResults.innerHTML = '<div style="padding:4px 6px;color:#6c7086;font-size:11px">No matches</div>';
             } else {
               searchResults.innerHTML = matches.map(c =>
                 `<div style="display:flex;align-items:center;gap:6px;padding:3px 6px;cursor:pointer;font-size:11px" data-vm-add="${esc(c.name)}">
-                  ${stateIcon(c.state)} <span style="flex:1">${esc(c.name)}</span>
-                  <span style="color:#6c7086;font-size:10px">${esc(c.image)}</span>
+                  ${stateIcon(c.state)} <span style="flex:1" title="${esc(c.name)}">${esc(truncate(c.name, 20))}</span>
+                  <span style="color:#6c7086;font-size:10px">${esc(truncate(c.image, 20))}</span>
+                  <span style="color:#585b70;font-size:9px">${esc(c.status || '')}</span>
                   <span style="color:#a6e3a1;font-size:10px">+ Add</span>
                 </div>`
               ).join('');
             }
             searchResults.style.display = 'block';
+          };
+          searchInput.addEventListener('focus', () => {
+            renderSearchResults(searchInput.value.trim().toLowerCase());
+          });
+          searchInput.addEventListener('input', () => {
+            const q = searchInput.value.trim().toLowerCase();
+            if (!q) { renderSearchResults(''); return; }
+            renderSearchResults(q);
           });
 
           // Add to favorites
@@ -1904,6 +1921,7 @@ const WIDGET_REGISTRY = {
                 btn.textContent = '✗';
                 btn.title = err.error || 'Start failed';
                 btn.style.color = '#f38ba8';
+                btn.disabled = false;
                 failed = true;
               }
             } catch (err) {
@@ -1911,9 +1929,41 @@ const WIDGET_REGISTRY = {
               btn.textContent = '✗';
               btn.title = err.message || 'Start failed';
               btn.style.color = '#f38ba8';
+              btn.disabled = false;
               failed = true;
             }
             // Refresh after a short delay to let container come up
+            if (!failed) setTimeout(() => card.render(), 2000);
+          });
+        });
+
+        // ── Stop container ──
+        body.querySelectorAll('[data-vm-stop]').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const name = btn.getAttribute('data-vm-stop');
+            btn.textContent = '⏳';
+            btn.disabled = true;
+            let failed = false;
+            try {
+              const r = await fetch(`/api/vms/${encodeURIComponent(name)}/stop`, { method: 'POST' });
+              if (!r.ok) {
+                const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+                console.error('Failed to stop:', err);
+                btn.textContent = '✗';
+                btn.title = err.error || 'Stop failed';
+                btn.style.color = '#f38ba8';
+                btn.disabled = false;
+                failed = true;
+              }
+            } catch (err) {
+              console.error('Stop error:', err);
+              btn.textContent = '✗';
+              btn.title = err.message || 'Stop failed';
+              btn.style.color = '#f38ba8';
+              btn.disabled = false;
+              failed = true;
+            }
+            // Refresh after a short delay to let container stop
             if (!failed) setTimeout(() => card.render(), 2000);
           });
         });

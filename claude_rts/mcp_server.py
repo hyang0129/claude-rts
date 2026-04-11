@@ -108,12 +108,65 @@ def tool_delete_terminal(args):
     return "Terminal deleted"
 
 
+def tool_vm_discover_containers(args):  # noqa: ARG001
+    result = http_request("GET", "/api/vms/discover")
+    if not isinstance(result, list):
+        return f"Error discovering containers: {result}"
+    if not result:
+        return "No containers found"
+    lines = []
+    for c in result:
+        lines.append(
+            f"- {c.get('name')} [{c.get('state', 'unknown')}] image={c.get('image', '')} status={c.get('status', '')}"
+        )
+    return "\n".join(lines)
+
+
+def tool_vm_get_favorites(args):  # noqa: ARG001
+    result = http_request("GET", "/api/vms/favorites")
+    return json.dumps(result, indent=2)
+
+
+def tool_vm_set_container_actions(args):
+    container = args.get("container", "")
+    if not container:
+        raise ValueError("container is required")
+    actions = args.get("actions", [])
+    safe_name = urllib.parse.quote(container, safe="")
+    result = http_request(
+        "PUT",
+        f"/api/vms/favorites/{safe_name}/actions",
+        body=json.dumps(actions),
+    )
+    return f"Actions updated for {container}: {json.dumps(result)}"
+
+
+def tool_vm_add_favorite(args):
+    name = args.get("name", "")
+    if not name:
+        raise ValueError("name is required")
+    actions = args.get("actions", [{"label": "Terminal", "type": "terminal"}])
+    # GET current favorites, append, PUT back
+    favorites = http_request("GET", "/api/vms/favorites")
+    # Check if already exists
+    for fav in favorites:
+        if fav.get("name") == name:
+            return f"Container {name} is already a favorite"
+    favorites.append({"name": name, "type": "docker", "actions": actions})
+    http_request("PUT", "/api/vms/favorites", body=json.dumps(favorites))
+    return f"Added {name} to favorites with {len(actions)} action(s)"
+
+
 TOOL_HANDLERS = {
     "open_terminal": tool_open_terminal,
     "read_terminal": tool_read_terminal,
     "write_terminal": tool_write_terminal,
     "list_terminals": tool_list_terminals,
     "delete_terminal": tool_delete_terminal,
+    "vm_discover_containers": tool_vm_discover_containers,
+    "vm_get_favorites": tool_vm_get_favorites,
+    "vm_set_container_actions": tool_vm_set_container_actions,
+    "vm_add_favorite": tool_vm_add_favorite,
 }
 
 TOOL_SCHEMAS = [
@@ -178,6 +231,72 @@ TOOL_SCHEMAS = [
                 "session_id": {"type": "string", "description": "Session ID of the terminal to delete"},
             },
             "required": ["session_id"],
+        },
+    },
+    {
+        "name": "vm_discover_containers",
+        "description": "Discover all Docker containers (running + stopped) with name, state, image, and status",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "vm_get_favorites",
+        "description": "Get the current VM Manager favorites list with all actions and metadata. Each favorite has: name (string), type ('docker'), actions (array of action objects). Action schema: {label: string, type: 'terminal', shell_prefix?: string, import_keys?: string[]}",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "vm_set_container_actions",
+        "description": "Update the actions array for a specific favorite container. Action schema: {label: string, type: 'terminal', shell_prefix?: string (command prefix to run in container), import_keys?: string[] (config keys to interpolate, e.g. 'priority_credential')}",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "container": {"type": "string", "description": "Name of the favorite container to update"},
+                "actions": {
+                    "type": "array",
+                    "description": "Array of action objects: [{label, type, shell_prefix?, import_keys?}]",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "type": {"type": "string", "enum": ["terminal"]},
+                            "shell_prefix": {"type": "string"},
+                            "import_keys": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["label", "type"],
+                    },
+                },
+            },
+            "required": ["container", "actions"],
+        },
+    },
+    {
+        "name": "vm_add_favorite",
+        "description": "Add a container to the VM Manager favorites list. If the container is already a favorite, returns a message indicating so. Action schema: {label: string, type: 'terminal', shell_prefix?: string, import_keys?: string[]}",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Name of the Docker container to add"},
+                "actions": {
+                    "type": "array",
+                    "description": "Array of action objects (default: [{label: 'Terminal', type: 'terminal'}])",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "type": {"type": "string", "enum": ["terminal"]},
+                            "shell_prefix": {"type": "string"},
+                            "import_keys": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["label", "type"],
+                    },
+                },
+            },
+            "required": ["name"],
         },
     },
 ]
