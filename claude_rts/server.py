@@ -353,7 +353,7 @@ async def vm_stop_handler(request: web.Request) -> web.Response:
             timeout_val = max(0, int(timeout_str))
             cmd_args.extend(["-t", str(timeout_val)])
         except ValueError:
-            pass
+            return web.json_response({"error": "timeout must be a non-negative integer"}, status=400)
     cmd_args.extend(["--", name])
 
     proc = await asyncio.create_subprocess_exec(
@@ -390,7 +390,10 @@ async def vm_favorites_actions_put_handler(request: web.Request) -> web.Response
     if target is None:
         return web.json_response({"error": f"Favorite not found: {name}"}, status=404)
 
-    actions = await request.json()
+    try:
+        actions = await request.json()
+    except Exception:
+        return web.json_response({"error": "Request body must be valid JSON"}, status=400)
     if not isinstance(actions, list):
         return web.json_response(
             {"error": "Request body must be a JSON array of action objects"}, status=400

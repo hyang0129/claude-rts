@@ -281,6 +281,14 @@ async def test_vm_stop_with_timeout(client):
     assert "30" in call_args
 
 
+async def test_vm_stop_invalid_timeout(client):
+    """Stop with invalid timeout returns 400."""
+    resp = await client.post("/api/vms/web-app/stop?timeout=invalid")
+    assert resp.status == 400
+    body = await resp.json()
+    assert "timeout" in body["error"]
+
+
 # ── Per-container actions endpoint ──────────────────────────────────────────
 
 
