@@ -586,7 +586,11 @@ class TestVmCustomAction:
         assert action_btn.count() > 0, "Custom Claude action button should exist"
         action_btn.click()
 
-        page.wait_for_timeout(2000)
+        # Wait for new card to appear (WebSocket + render; CI can be slow)
+        page.wait_for_function(
+            f"() => document.querySelectorAll('[data-card-id]').length > {initial_count}",
+            timeout=10000,
+        )
 
         # Verify new card spawned
         new_count = page.locator("[data-card-id]").count()
@@ -1041,6 +1045,7 @@ class TestVmStopContainer:
             ],
         )
 
+        cleanup_non_vm_cards(page)
         ensure_vm_card_exists(page)
         refresh_vm_card(page)
 

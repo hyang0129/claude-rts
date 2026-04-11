@@ -162,7 +162,7 @@ class TestCardResize:
         page.mouse.move(box["x"] + box["width"] / 2 + 80, box["y"] + box["height"] / 2 + 60, steps=5)
         page.mouse.up()
 
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(1000)
 
         new_style = card.get_attribute("style") or ""
         new_w_match = re.search(r"width:\s*(-?\d+(?:\.\d+)?)px", new_style)
