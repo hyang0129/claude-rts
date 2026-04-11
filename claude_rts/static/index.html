@@ -1921,6 +1921,7 @@ const WIDGET_REGISTRY = {
                 btn.textContent = '✗';
                 btn.title = err.error || 'Start failed';
                 btn.style.color = '#f38ba8';
+                btn.disabled = false;
                 failed = true;
               }
             } catch (err) {
@@ -1928,6 +1929,7 @@ const WIDGET_REGISTRY = {
               btn.textContent = '✗';
               btn.title = err.message || 'Start failed';
               btn.style.color = '#f38ba8';
+              btn.disabled = false;
               failed = true;
             }
             // Refresh after a short delay to let container come up
@@ -1950,6 +1952,7 @@ const WIDGET_REGISTRY = {
                 btn.textContent = '✗';
                 btn.title = err.error || 'Stop failed';
                 btn.style.color = '#f38ba8';
+                btn.disabled = false;
                 failed = true;
               }
             } catch (err) {
@@ -1957,6 +1960,7 @@ const WIDGET_REGISTRY = {
               btn.textContent = '✗';
               btn.title = err.message || 'Stop failed';
               btn.style.color = '#f38ba8';
+              btn.disabled = false;
               failed = true;
             }
             // Refresh after a short delay to let container stop

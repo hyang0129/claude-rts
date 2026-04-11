@@ -252,6 +252,20 @@ async def test_vm_stop_test_mode(client):
     assert containers[0]["state"] == "offline"
 
 
+async def test_vm_stop_test_mode_not_found(client):
+    """In test mode, stop returns 500 when container name doesn't exist in mock list."""
+    containers = [
+        {"name": "other-container", "state": "online", "image": "ubuntu:22.04", "status": "Up 1h"},
+    ]
+    app = client.app
+    app["_test_vm_containers"] = containers
+
+    resp = await client.post("/api/vms/nonexistent-container/stop")
+    assert resp.status == 500
+    data = await resp.json()
+    assert "error" in data
+
+
 async def test_vm_stop_with_timeout(client):
     """Stop with optional timeout query param."""
     mock_proc = AsyncMock()

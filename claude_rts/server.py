@@ -392,7 +392,9 @@ async def vm_favorites_actions_put_handler(request: web.Request) -> web.Response
 
     actions = await request.json()
     if not isinstance(actions, list):
-        actions = actions.get("actions", [])
+        return web.json_response(
+            {"error": "Request body must be a JSON array of action objects"}, status=400
+        )
     target["actions"] = actions
 
     # Persist
