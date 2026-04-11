@@ -191,6 +191,12 @@ credential-manager widget (frontend)
 
 This applies everywhere — QA scripts, agent automation, test fixtures. If you need probe data in a test context, render the credential-manager widget or call `POST /api/credentials/{name}/probe-result` directly with fixture data. Never call `probe_usage` or `probe_usage_via_session` — those functions have been removed.
 
+## Layer 5 — E2E QA workflow (agent team, real dependencies)
+
+For features with significant frontend + backend integration, run the full E2E QA workflow described in [e2e-qa-workflow.md](e2e-qa-workflow.md). This spawns a team of 5 agents (Analyst, Designer, Implementer, Runner, Fixer) that design, implement, and iterate on E2E tests using Playwright + Electron. Unlike the layers above, this workflow defaults to **real external dependencies** (real Docker containers, real filesystem) rather than mocks — see the guide for when to use each.
+
+---
+
 ## Coverage expectations per feature type
 
 | Feature type | Required coverage |
@@ -199,6 +205,7 @@ This applies everywhere — QA scripts, agent automation, test fixtures. If you 
 | API route (new endpoint) | aiohttp_client test for happy path + error cases |
 | Docker/subprocess integration | Mock `asyncio.create_subprocess_exec` at unit level; optionally smoke with real containers |
 | Startup script (new built-in) | Unit test for card list shape; WebFetch `/api/startup` smoke on running server |
+| Frontend + backend integration | E2E QA workflow ([e2e-qa-workflow.md](e2e-qa-workflow.md)) with Playwright + real dependencies |
 | Frontend-only behaviour | Log inspection (server side) + WebFetch API endpoints; browser visual confirmation deferred to human QA |
 | Config/canvas persistence | `test_config.py` pattern — use temp dirs via `tmp_path` fixture |
 
