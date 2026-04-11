@@ -3,6 +3,7 @@
 import asyncio as _asyncio
 import base64 as _b64
 import json as _json
+import pathlib as _pathlib
 import re as _re
 import subprocess as _subprocess
 
@@ -68,10 +69,12 @@ class CanvasClaudeCard(TerminalCard):
             _validate_name(profile, "profile")
 
         # Build the MCP config JSON and base64-encode it for safe transfer.
+        # Use the absolute path to python3 so the MCP server can be spawned
+        # even if Claude Code passes env as an override (dropping PATH).
         mcp_config = {
             "mcpServers": {
                 "canvas": {
-                    "command": "python3",
+                    "command": "/usr/local/bin/python3",
                     "args": ["/home/util/mcp_server.py"],
                     "env": {"SUPREME_CLAUDEMANDER_API": api_base_url},
                 }
@@ -124,6 +127,22 @@ class CanvasClaudeCard(TerminalCard):
         return desc
 
     # ── Container helpers ──────────────────────────────────────────────
+
+    def _sync_mcp_server(self) -> None:
+        """Copy the current mcp_server.py from the host into the container.
+
+        Always runs at card start so the container has the latest tool definitions
+        without requiring an image rebuild. Runs synchronously; call from an executor.
+        """
+        src = _pathlib.Path(__file__).parent.parent / "mcp_server.py"
+        result = _subprocess.run(
+            ["docker.exe", "cp", str(src), f"{self._effective_container}:/home/util/mcp_server.py"],
+            timeout=10,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to sync mcp_server.py: {result.stderr.decode(errors='replace')}")
+        logger.debug("CanvasClaudeCard: synced mcp_server.py to {}", self._effective_container)
 
     def _write_mcp_config(self) -> None:
         """Write /tmp/mcp.json into the util container via non-interactive docker exec.
@@ -209,8 +228,9 @@ class CanvasClaudeCard(TerminalCard):
             logger.info("CanvasClaudeCard: creating new tmux session {}", TMUX_SESSION_NAME)
 
     async def start(self) -> None:
-        """Write MCP config, resolve tmux state, then start the PTY."""
+        """Sync mcp_server.py, write MCP config, resolve tmux state, then start the PTY."""
         loop = _asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._sync_mcp_server)
         await loop.run_in_executor(None, self._write_mcp_config)
         await loop.run_in_executor(None, self._ensure_tmux_session)
         await super().start()
