@@ -184,6 +184,8 @@
     padding: 4px 0;
     z-index: 2000;
     min-width: 200px;
+    max-height: calc(100vh - 20px);
+    overflow-y: auto;
     box-shadow: 0 8px 32px rgba(0,0,0,0.5);
   }
   #context-menu.visible { display: block; }
@@ -874,6 +876,15 @@ function showContextMenu(sx, sy) {
   ctxMenu.style.top = sy + 'px';
   ctxMenu.classList.add('visible');
 
+  // Clamp menu position so it doesn't overflow the viewport
+  const menuRect = ctxMenu.getBoundingClientRect();
+  if (menuRect.bottom > window.innerHeight) {
+    ctxMenu.style.top = Math.max(10, window.innerHeight - menuRect.height - 10) + 'px';
+  }
+  if (menuRect.right > window.innerWidth) {
+    ctxMenu.style.left = Math.max(10, window.innerWidth - menuRect.width - 10) + 'px';
+  }
+
   ctxMenu.querySelectorAll('.ctx-item[data-hub]').forEach(item => {
     item.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1266,8 +1277,10 @@ class TerminalCard extends Card {
     this.ws = new WebSocket(wsUrl);
     this.ws.binaryType = 'arraybuffer';
 
+    this._sessionCreatedAt = null;
     this.ws.addEventListener('open', () => {
       this._reconnectDelay = 1000;
+      this._sessionCreatedAt = Date.now();
       this.updateState('idle');
       this.ws.send(JSON.stringify({ type: 'resize', cols: this.term.cols, rows: this.term.rows }));
     });
@@ -1297,6 +1310,13 @@ class TerminalCard extends Card {
     });
     this.ws.addEventListener('close', () => {
       this.updateState('dead');
+      // If the session died within 3 seconds of creation, the command likely failed
+      // (e.g. bash not found in container). Stop reconnecting to avoid a runaway loop.
+      const sessionAge = this._sessionCreatedAt ? Date.now() - this._sessionCreatedAt : Infinity;
+      if (sessionAge < 3000) {
+        this.term.write('\r\n\x1b[31m[command failed — not reconnecting]\x1b[0m\r\n');
+        return;
+      }
       if (!this._intentionalClose) {
         this.term.write('\r\n\x1b[33m[reconnecting...]\x1b[0m\r\n');
         this._reconnectTimer = setTimeout(() => {
@@ -1875,17 +1895,26 @@ const WIDGET_REGISTRY = {
             const name = btn.getAttribute('data-vm-start');
             btn.textContent = '⏳';
             btn.disabled = true;
+            let failed = false;
             try {
               const r = await fetch(`/api/vms/${encodeURIComponent(name)}/start`, { method: 'POST' });
               if (!r.ok) {
-                const err = await r.json();
+                const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
                 console.error('Failed to start:', err);
+                btn.textContent = '✗';
+                btn.title = err.error || 'Start failed';
+                btn.style.color = '#f38ba8';
+                failed = true;
               }
             } catch (err) {
               console.error('Start error:', err);
+              btn.textContent = '✗';
+              btn.title = err.message || 'Start failed';
+              btn.style.color = '#f38ba8';
+              failed = true;
             }
             // Refresh after a short delay to let container come up
-            setTimeout(() => card.render(), 2000);
+            if (!failed) setTimeout(() => card.render(), 2000);
           });
         });
 
@@ -1915,10 +1944,10 @@ const WIDGET_REGISTRY = {
                   }
                 }
               }
-              cmd = `${_docker} exec -it ${name} bash -lc '${prefix.replace(/'/g, "'\\''")}'`;
+              cmd = `${_docker} exec -it ${name} sh -c '${prefix.replace(/'/g, "'\\''")}'`;
             } else {
-              // Default: attach terminal to container
-              cmd = `${_docker} exec -it ${name} bash -l`;
+              // Default: attach terminal to container (sh for compatibility — works on Alpine, busybox, etc.)
+              cmd = `${_docker} exec -it ${name} sh`;
             }
 
             // Find or create a hub entry for spawnCard

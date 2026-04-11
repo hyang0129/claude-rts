@@ -1,0 +1,1008 @@
+"""Playwright E2E tests for the VM Manager card.
+
+These tests launch the real backend with --dev-config vm-manager and
+verify VM Manager widget interactions via Playwright in a browser.
+
+Run:
+    pip install pytest-playwright playwright
+    python -m playwright install chromium
+    python -m pytest tests/e2e/test_vm_manager_e2e.py -v
+
+Headed mode (shows the browser window):
+    HEADED=1 python -m pytest tests/e2e/test_vm_manager_e2e.py -v
+"""
+
+import json
+
+import pytest
+
+# Skip module entirely if playwright is not installed
+pw = pytest.importorskip("playwright")
+
+
+# ── Fixtures ──────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def dev_config_preset():
+    """Use the vm-manager dev-config preset."""
+    return "vm-manager"
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def seed_containers(page, backend_port, containers):
+    """PUT fake container data to the test puppeting API."""
+    page.evaluate(
+        """async ([port, containers]) => {
+        await fetch(`http://localhost:${port}/api/test/vm-containers`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(containers),
+        });
+    }""",
+        [backend_port, containers],
+    )
+
+
+def set_favorites(page, backend_port, favorites):
+    """PUT favorites to the API."""
+    page.evaluate(
+        """async ([port, favorites]) => {
+        await fetch(`http://localhost:${port}/api/vms/favorites`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(favorites),
+        });
+    }""",
+        [backend_port, favorites],
+    )
+
+
+def get_favorites(page, backend_port):
+    """GET favorites from the API."""
+    return page.evaluate(
+        """async (port) => {
+        const r = await fetch(`http://localhost:${port}/api/vms/favorites`);
+        return r.json();
+    }""",
+        backend_port,
+    )
+
+
+def get_test_vm_containers(page, backend_port):
+    """GET test VM containers from the puppeting API."""
+    return page.evaluate(
+        """async (port) => {
+        const r = await fetch(`http://localhost:${port}/api/test/vm-containers`);
+        return r.json();
+    }""",
+        backend_port,
+    )
+
+
+def refresh_vm_card(page):
+    """Force re-render of all VM Manager widget cards on the canvas."""
+    page.evaluate(
+        """() => {
+        if (typeof cards !== 'undefined') {
+            for (const card of cards) {
+                if (card.widgetType === 'vm-manager' && typeof card.render === 'function') {
+                    card.render();
+                }
+            }
+        }
+    }"""
+    )
+    page.wait_for_timeout(1500)
+
+
+def cleanup_non_vm_cards(page):
+    """Remove all cards except VM Manager widgets to prevent overlap issues.
+
+    Terminal cards spawned by earlier tests can intercept pointer events
+    on the VM Manager card.  This helper destroys them.
+    """
+    page.evaluate(
+        """() => {
+        if (typeof cards === 'undefined') return;
+        const toRemove = [];
+        for (let i = cards.length - 1; i >= 0; i--) {
+            if (cards[i].widgetType !== 'vm-manager') {
+                if (typeof cards[i].destroy === 'function') cards[i].destroy();
+                toRemove.push(i);
+            }
+        }
+        for (const idx of toRemove) cards.splice(idx, 1);
+    }"""
+    )
+    page.wait_for_timeout(300)
+
+
+def ensure_vm_card_exists(page):
+    """Ensure at least one VM Manager card exists; spawn one if needed."""
+    vm_cards = page.locator("[data-card-id]").filter(has=page.locator("[data-vm-search]"))
+    if vm_cards.count() > 0:
+        return
+    # Spawn from context menu
+    viewport = page.locator("#viewport")
+    viewport.click(button="right", position={"x": 500, "y": 100})
+    ctx_menu = page.locator("#context-menu")
+    ctx_menu.wait_for(state="visible", timeout=3000)
+    widget_item = ctx_menu.locator('[data-widget="vm-manager"]')
+    if widget_item.count() > 0:
+        widget_item.click()
+        page.wait_for_timeout(2000)
+    # Fallback: if context menu approach didn't spawn a card, use JS directly
+    vm_cards_after = page.locator("[data-card-id]").filter(has=page.locator("[data-vm-search]"))
+    if vm_cards_after.count() == 0:
+        page.evaluate("() => spawnWidget('vm-manager', 100, 100)")
+        page.wait_for_timeout(2000)
+
+
+# ── S1: VM Manager widget spawns from context menu ───────────────────────────
+
+
+class TestVmManagerSpawn:
+    """S1: VM Manager widget spawns from context menu."""
+
+    def test_vm_manager_spawns_from_context_menu(self, page, backend_port):
+        """Right-click canvas, click vm-manager widget, verify card appears."""
+        # Clear all cards first
+        page.evaluate(
+            """() => {
+            if (typeof cards !== 'undefined') {
+                for (const card of cards) {
+                    if (typeof card.destroy === 'function') card.destroy();
+                }
+                cards.length = 0;
+            }
+            const el = document.getElementById('canvas');
+            if (el) el.innerHTML = '';
+        }"""
+        )
+        page.wait_for_timeout(500)
+
+        # Right-click on viewport
+        viewport = page.locator("#viewport")
+        viewport.click(button="right", position={"x": 500, "y": 100})
+
+        ctx_menu = page.locator("#context-menu")
+        ctx_menu.wait_for(state="visible", timeout=3000)
+
+        # Find and click vm-manager widget item
+        widget_item = ctx_menu.locator('[data-widget="vm-manager"]')
+        assert widget_item.count() > 0, "vm-manager should be in context menu"
+        widget_item.click()
+
+        page.wait_for_timeout(2000)
+
+        # Verify card appeared
+        new_cards = page.locator("[data-card-id]")
+        assert new_cards.count() > 0, "A card should appear after clicking vm-manager"
+
+        # Verify card contains the VM search input
+        search_input = page.locator("[data-vm-search]")
+        assert search_input.count() > 0, "Card should contain [data-vm-search]"
+
+
+# ── S2: Favorites render with correct status indicators ──────────────────────
+
+
+class TestVmFavoritesStatus:
+    """S2: Favorites render with correct status indicators."""
+
+    def test_favorites_status_indicators(self, page, backend_port):
+        """Seed containers, set favorites, verify status dots and button states."""
+        # Seed 3 containers
+        seed_containers(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "alpha",
+                    "state": "online",
+                    "image": "node:18",
+                    "status": "Up 2 hours",
+                },
+                {
+                    "name": "beta",
+                    "state": "offline",
+                    "image": "postgres:15",
+                    "status": "Exited",
+                },
+                {
+                    "name": "gamma",
+                    "state": "starting",
+                    "image": "redis:7",
+                    "status": "Created",
+                },
+            ],
+        )
+
+        # Set favorites
+        set_favorites(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "alpha",
+                    "type": "docker",
+                    "actions": [{"label": "Terminal", "type": "terminal"}],
+                },
+                {
+                    "name": "beta",
+                    "type": "docker",
+                    "actions": [{"label": "Terminal", "type": "terminal"}],
+                },
+                {
+                    "name": "gamma",
+                    "type": "docker",
+                    "actions": [{"label": "Terminal", "type": "terminal"}],
+                },
+            ],
+        )
+
+        ensure_vm_card_exists(page)
+        refresh_vm_card(page)
+
+        # Verify green dot for alpha (online)
+        alpha_dot = page.evaluate(
+            """() => {
+            const spans = document.querySelectorAll('span[title="Online"]');
+            for (const s of spans) {
+                if (s.closest('[data-card-id]') && s.parentElement.textContent.includes('alpha')) {
+                    return window.getComputedStyle(s).color;
+                }
+            }
+            return null;
+        }"""
+        )
+        assert alpha_dot is not None, "Alpha should have an Online indicator"
+
+        # Verify beta has a Start button
+        start_btn = page.locator('[data-vm-start="beta"]')
+        assert start_btn.count() > 0, "Offline container beta should have Start button"
+
+        # Verify alpha action buttons are NOT dimmed
+        alpha_action = page.locator('[data-vm-action="alpha"]').first
+        if alpha_action.count() > 0:
+            style = alpha_action.get_attribute("style") or ""
+            assert "opacity:0.4" not in style, "Online container actions should not be dimmed"
+
+        # Verify beta action buttons ARE dimmed
+        beta_action = page.locator('[data-vm-action="beta"]').first
+        if beta_action.count() > 0:
+            style = beta_action.get_attribute("style") or ""
+            assert "opacity:0.4" in style or "pointer-events:none" in style, (
+                "Offline container actions should be dimmed"
+            )
+
+
+# ── S3: Search discovers containers and adds to favorites ────────────────────
+
+
+class TestVmSearch:
+    """S3: Search discovers containers and adds to favorites."""
+
+    def test_search_and_add_favorite(self, page, backend_port):
+        """Type in search, find a container, click add, verify it joins favorites."""
+        # Seed containers
+        seed_containers(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "containerA",
+                    "state": "online",
+                    "image": "img:a",
+                    "status": "Up",
+                },
+                {
+                    "name": "containerB",
+                    "state": "online",
+                    "image": "img:b",
+                    "status": "Up",
+                },
+                {
+                    "name": "containerC",
+                    "state": "offline",
+                    "image": "img:c",
+                    "status": "Exited",
+                },
+                {
+                    "name": "containerD",
+                    "state": "online",
+                    "image": "img:d",
+                    "status": "Up",
+                },
+            ],
+        )
+
+        # Only containerA is a favorite
+        set_favorites(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "containerA",
+                    "type": "docker",
+                    "actions": [{"label": "Terminal", "type": "terminal"}],
+                }
+            ],
+        )
+
+        ensure_vm_card_exists(page)
+        refresh_vm_card(page)
+
+        # Click search input and type
+        search_input = page.locator("[data-vm-search]").first
+        search_input.click()
+        search_input.fill("containerB")
+
+        # Wait for search results
+        page.wait_for_timeout(500)
+        results = page.locator("[data-vm-search-results]").first
+        assert results.is_visible(), "Search results should be visible"
+
+        # Verify containerB appears in results
+        add_btn = page.locator('[data-vm-add="containerB"]')
+        assert add_btn.count() > 0, "containerB should appear in search results"
+
+        # Click add
+        add_btn.click()
+        page.wait_for_timeout(2000)
+
+        # Verify favorites now include containerB
+        favs = get_favorites(page, backend_port)
+        fav_names = [f["name"] for f in favs]
+        assert "containerA" in fav_names, "containerA should still be a favorite"
+        assert "containerB" in fav_names, "containerB should now be a favorite"
+
+
+# ── S4: Remove container from favorites ──────────────────────────────────────
+
+
+class TestVmRemoveFavorite:
+    """S4: Remove container from favorites."""
+
+    def test_remove_favorite(self, page, backend_port):
+        """Click remove button, verify container is removed from favorites."""
+        seed_containers(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "web-app",
+                    "state": "online",
+                    "image": "node:18",
+                    "status": "Up",
+                },
+                {
+                    "name": "db-server",
+                    "state": "online",
+                    "image": "pg:15",
+                    "status": "Up",
+                },
+            ],
+        )
+
+        set_favorites(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "web-app",
+                    "type": "docker",
+                    "actions": [{"label": "Terminal", "type": "terminal"}],
+                },
+                {
+                    "name": "db-server",
+                    "type": "docker",
+                    "actions": [{"label": "Terminal", "type": "terminal"}],
+                },
+            ],
+        )
+
+        ensure_vm_card_exists(page)
+        refresh_vm_card(page)
+
+        # Click remove for web-app
+        remove_btn = page.locator('[data-vm-remove="web-app"]')
+        assert remove_btn.count() > 0, "Remove button for web-app should exist"
+        remove_btn.click()
+        page.wait_for_timeout(2000)
+
+        # Verify only db-server remains
+        favs = get_favorites(page, backend_port)
+        fav_names = [f["name"] for f in favs]
+        assert "web-app" not in fav_names, "web-app should be removed"
+        assert "db-server" in fav_names, "db-server should remain"
+
+        # Verify web-app row is gone from the card
+        remove_btn_after = page.locator('[data-vm-remove="web-app"]')
+        assert remove_btn_after.count() == 0, "web-app row should be gone from card"
+
+
+# ── S5: Start offline container via Start button ─────────────────────────────
+
+
+class TestVmStartContainer:
+    """S5: Start offline container via Start button."""
+
+    def test_start_offline_container(self, page, backend_port):
+        """Click Start on offline container, verify it becomes online."""
+        seed_containers(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "my-db",
+                    "state": "offline",
+                    "image": "postgres:15",
+                    "status": "Exited",
+                },
+            ],
+        )
+
+        set_favorites(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "my-db",
+                    "type": "docker",
+                    "actions": [{"label": "Terminal", "type": "terminal"}],
+                }
+            ],
+        )
+
+        ensure_vm_card_exists(page)
+        refresh_vm_card(page)
+
+        # Verify Start button exists
+        start_btn = page.locator('[data-vm-start="my-db"]')
+        assert start_btn.count() > 0, "Start button for my-db should exist"
+
+        # Click Start
+        start_btn.click()
+
+        # Wait for re-render (container start + render delay)
+        page.wait_for_timeout(3000)
+
+        # Verify container is now online via API
+        containers = get_test_vm_containers(page, backend_port)
+        my_db = next((c for c in containers if c["name"] == "my-db"), None)
+        assert my_db is not None, "my-db should exist in test containers"
+        assert my_db["state"] == "online", "my-db should be online after start"
+
+        # Verify Start button is gone (online containers don't show it)
+        start_btn_after = page.locator('[data-vm-start="my-db"]')
+        assert start_btn_after.count() == 0, "Start button should be gone for online container"
+
+
+# ── S6: Terminal action button spawns a terminal card ────────────────────────
+
+
+class TestVmTerminalAction:
+    """S6: Terminal action button spawns a terminal card."""
+
+    def test_action_spawns_terminal(self, page, backend_port):
+        """Click Terminal action on online container, verify new card spawns."""
+        seed_containers(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "dev-web",
+                    "state": "online",
+                    "image": "node:18",
+                    "status": "Up 2 hours",
+                },
+            ],
+        )
+
+        set_favorites(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "dev-web",
+                    "type": "docker",
+                    "actions": [{"label": "Terminal", "type": "terminal"}],
+                }
+            ],
+        )
+
+        ensure_vm_card_exists(page)
+        refresh_vm_card(page)
+
+        # Count existing cards
+        initial_count = page.locator("[data-card-id]").count()
+
+        # Click Terminal action
+        action_btn = page.locator('[data-vm-action="dev-web"][data-action-idx="0"]')
+        assert action_btn.count() > 0, "Terminal action button should exist"
+        action_btn.click()
+
+        page.wait_for_timeout(2000)
+
+        # Verify new card appeared
+        new_count = page.locator("[data-card-id]").count()
+        assert new_count > initial_count, "A new card should be spawned after clicking Terminal action"
+
+
+# ── S7: Custom action with shell_prefix ──────────────────────────────────────
+
+
+class TestVmCustomAction:
+    """S7: Custom action with shell_prefix spawns terminal with correct command."""
+
+    def test_custom_action_shell_prefix(self, page, backend_port):
+        """Click custom action, verify terminal card spawns with interpolated command."""
+        seed_containers(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "claude-dev",
+                    "state": "online",
+                    "image": "ubuntu:22.04",
+                    "status": "Up 1 hour",
+                },
+            ],
+        )
+
+        set_favorites(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "claude-dev",
+                    "type": "docker",
+                    "actions": [
+                        {"label": "Terminal", "type": "terminal"},
+                        {
+                            "label": "Claude",
+                            "type": "terminal",
+                            "shell_prefix": "cd /workspace && claude --profile ${priority_credential}",
+                            "import_keys": ["priority_credential"],
+                        },
+                    ],
+                }
+            ],
+        )
+
+        cleanup_non_vm_cards(page)
+        ensure_vm_card_exists(page)
+        refresh_vm_card(page)
+
+        # Count existing cards
+        initial_count = page.locator("[data-card-id]").count()
+
+        # Click custom action (index 1)
+        action_btn = page.locator('[data-vm-action="claude-dev"][data-action-idx="1"]')
+        assert action_btn.count() > 0, "Custom Claude action button should exist"
+        action_btn.click()
+
+        page.wait_for_timeout(2000)
+
+        # Verify new card spawned
+        new_count = page.locator("[data-card-id]").count()
+        assert new_count > initial_count, "A new terminal card should be spawned for custom action"
+
+
+# ── S8: Action buttons disabled for offline containers ───────────────────────
+
+
+class TestVmActionsDisabledOffline:
+    """S8: Action buttons disabled for offline containers."""
+
+    def test_offline_actions_dimmed(self, page, backend_port):
+        """Verify action buttons are dimmed and non-interactive for offline containers."""
+        seed_containers(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "stopped-svc",
+                    "state": "offline",
+                    "image": "nginx:latest",
+                    "status": "Exited",
+                },
+            ],
+        )
+
+        set_favorites(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "stopped-svc",
+                    "type": "docker",
+                    "actions": [
+                        {"label": "Terminal", "type": "terminal"},
+                        {
+                            "label": "Logs",
+                            "type": "terminal",
+                            "shell_prefix": "tail -f /var/log/app.log",
+                        },
+                    ],
+                }
+            ],
+        )
+
+        ensure_vm_card_exists(page)
+        refresh_vm_card(page)
+
+        # Verify action buttons are dimmed
+        action_btn = page.locator('[data-vm-action="stopped-svc"]').first
+        assert action_btn.count() > 0, "Action button should exist for stopped-svc"
+        style = action_btn.get_attribute("style") or ""
+        assert "opacity:0.4" in style or "pointer-events:none" in style, (
+            "Offline container action buttons should be dimmed"
+        )
+
+        # Click should not spawn a new card
+        initial_count = page.locator("[data-card-id]").count()
+        # Force-click even though pointer-events:none (Playwright can bypass)
+        # but the JS handler checks state !== 'online' and returns early
+        action_btn.dispatch_event("click")
+        page.wait_for_timeout(1000)
+        new_count = page.locator("[data-card-id]").count()
+        assert new_count == initial_count, "No new card should spawn for offline container"
+
+
+# ── S9: Configure actions dialog opens and saves ─────────────────────────────
+
+
+class TestVmConfigureActions:
+    """S9: Configure actions dialog opens and saves."""
+
+    def test_configure_dialog_saves(self, page, backend_port):
+        """Open configure dialog, edit JSON, save, verify updated actions."""
+        seed_containers(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "my-app",
+                    "state": "online",
+                    "image": "node:18",
+                    "status": "Up 1 hour",
+                },
+            ],
+        )
+
+        set_favorites(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "my-app",
+                    "type": "docker",
+                    "actions": [{"label": "Terminal", "type": "terminal"}],
+                }
+            ],
+        )
+
+        cleanup_non_vm_cards(page)
+        ensure_vm_card_exists(page)
+        refresh_vm_card(page)
+
+        # Click configure button
+        configure_btn = page.locator('[data-vm-configure="my-app"]')
+        assert configure_btn.count() > 0, "Configure button should exist"
+        configure_btn.click()
+
+        page.wait_for_timeout(500)
+
+        # Verify dialog appeared (fixed overlay with z-index: 100000)
+        dialog = page.locator("div[style*='z-index: 100000']")
+        assert dialog.count() > 0, "Configure dialog should appear"
+
+        # Verify textarea contains current actions JSON
+        textarea = page.locator("[data-actions-json]")
+        assert textarea.count() > 0, "Actions JSON textarea should exist"
+        value = textarea.input_value()
+        assert "Terminal" in value, "Textarea should contain current actions JSON"
+
+        # Clear and type new JSON
+        new_actions = json.dumps(
+            [
+                {"label": "Terminal", "type": "terminal"},
+                {
+                    "label": "Logs",
+                    "type": "terminal",
+                    "shell_prefix": "tail -f /var/log/app.log",
+                },
+            ]
+        )
+        textarea.fill(new_actions)
+
+        # Click Save
+        save_btn = page.locator("[data-save]")
+        save_btn.click()
+
+        page.wait_for_timeout(2000)
+
+        # Verify dialog disappeared
+        dialog_after = page.locator("div[style*='z-index: 100000']")
+        assert dialog_after.count() == 0, "Dialog should be closed after save"
+
+        # Verify favorites were updated
+        favs = get_favorites(page, backend_port)
+        my_app_fav = next((f for f in favs if f["name"] == "my-app"), None)
+        assert my_app_fav is not None, "my-app should still be a favorite"
+        assert len(my_app_fav["actions"]) == 2, "my-app should now have 2 actions"
+        assert my_app_fav["actions"][1]["label"] == "Logs"
+
+
+# ── S10: Configure actions dialog cancel does not save ───────────────────────
+
+
+class TestVmConfigureCancel:
+    """S10: Configure actions dialog cancel does not save."""
+
+    def test_configure_dialog_cancel(self, page, backend_port):
+        """Open configure dialog, modify, cancel, verify actions unchanged."""
+        seed_containers(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "cancel-test",
+                    "state": "online",
+                    "image": "node:18",
+                    "status": "Up",
+                },
+            ],
+        )
+
+        set_favorites(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "cancel-test",
+                    "type": "docker",
+                    "actions": [{"label": "Terminal", "type": "terminal"}],
+                }
+            ],
+        )
+
+        cleanup_non_vm_cards(page)
+        ensure_vm_card_exists(page)
+        refresh_vm_card(page)
+
+        # Open configure dialog
+        configure_btn = page.locator('[data-vm-configure="cancel-test"]')
+        configure_btn.click()
+        page.wait_for_timeout(500)
+
+        # Modify textarea
+        textarea = page.locator("[data-actions-json]")
+        textarea.fill('[{"label":"CHANGED","type":"terminal"}]')
+
+        # Click Cancel
+        cancel_btn = page.locator("[data-cancel]")
+        cancel_btn.click()
+        page.wait_for_timeout(500)
+
+        # Verify dialog closed
+        dialog = page.locator("div[style*='z-index: 100000']")
+        assert dialog.count() == 0, "Dialog should close on cancel"
+
+        # Verify favorites unchanged
+        favs = get_favorites(page, backend_port)
+        fav = next((f for f in favs if f["name"] == "cancel-test"), None)
+        assert fav is not None
+        assert fav["actions"][0]["label"] == "Terminal", "Actions should be unchanged after cancel"
+
+
+# ── S11: Configure actions dialog rejects invalid JSON ───────────────────────
+
+
+class TestVmConfigureInvalidJson:
+    """S11: Configure actions dialog rejects invalid JSON."""
+
+    def test_configure_invalid_json_rejected(self, page, backend_port):
+        """Type invalid JSON, click Save, verify alert and dialog stays open."""
+        seed_containers(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "json-test",
+                    "state": "online",
+                    "image": "node:18",
+                    "status": "Up",
+                },
+            ],
+        )
+
+        set_favorites(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "json-test",
+                    "type": "docker",
+                    "actions": [{"label": "Terminal", "type": "terminal"}],
+                }
+            ],
+        )
+
+        cleanup_non_vm_cards(page)
+        ensure_vm_card_exists(page)
+        refresh_vm_card(page)
+
+        # Open configure dialog
+        configure_btn = page.locator('[data-vm-configure="json-test"]')
+        configure_btn.click()
+        page.wait_for_timeout(500)
+
+        # Type invalid JSON
+        textarea = page.locator("[data-actions-json]")
+        textarea.fill("not valid json")
+
+        # Intercept dialog (alert)
+        alert_message = []
+        page.on("dialog", lambda dialog: (alert_message.append(dialog.message), dialog.accept()))
+
+        # Click Save
+        save_btn = page.locator("[data-save]")
+        save_btn.click()
+        page.wait_for_timeout(500)
+
+        # Verify alert fired
+        assert len(alert_message) > 0, "An alert should fire for invalid JSON"
+        assert "Invalid JSON" in alert_message[0], "Alert should mention Invalid JSON"
+
+        # Dialog should still be open
+        dialog = page.locator("div[style*='z-index: 100000']")
+        assert dialog.count() > 0, "Dialog should remain open after invalid JSON"
+
+        # Clean up: close dialog
+        cancel_btn = page.locator("[data-cancel]")
+        if cancel_btn.count() > 0:
+            cancel_btn.click()
+
+
+# ── S12: Search filters out already-favorited containers ─────────────────────
+
+
+class TestVmSearchFilters:
+    """S12: Search filters out already-favorited containers."""
+
+    def test_search_excludes_favorites(self, page, backend_port):
+        """Search results should not include containers that are already favorites."""
+        seed_containers(
+            page,
+            backend_port,
+            [
+                {"name": "aaa", "state": "online", "image": "img:1", "status": "Up"},
+                {"name": "aab", "state": "online", "image": "img:2", "status": "Up"},
+                {"name": "aac", "state": "offline", "image": "img:3", "status": "Exited"},
+            ],
+        )
+
+        # aab is a favorite
+        set_favorites(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "aab",
+                    "type": "docker",
+                    "actions": [{"label": "Terminal", "type": "terminal"}],
+                }
+            ],
+        )
+
+        cleanup_non_vm_cards(page)
+        ensure_vm_card_exists(page)
+        refresh_vm_card(page)
+
+        # Type search query
+        search_input = page.locator("[data-vm-search]").first
+        search_input.click()
+        search_input.fill("aa")
+        page.wait_for_timeout(500)
+
+        # Verify search results
+        add_aaa = page.locator('[data-vm-add="aaa"]')
+        add_aab = page.locator('[data-vm-add="aab"]')
+        add_aac = page.locator('[data-vm-add="aac"]')
+
+        assert add_aaa.count() > 0, "aaa should be in search results"
+        assert add_aab.count() == 0, "aab should NOT be in search results (already a favorite)"
+        assert add_aac.count() > 0, "aac should be in search results"
+
+
+# ── S13: Empty favorites shows placeholder message ───────────────────────────
+
+
+class TestVmEmptyFavorites:
+    """S13: Empty favorites shows placeholder message."""
+
+    def test_empty_favorites_placeholder(self, page, backend_port):
+        """When favorites is empty, show the placeholder text."""
+        seed_containers(page, backend_port, [])
+        set_favorites(page, backend_port, [])
+
+        ensure_vm_card_exists(page)
+        refresh_vm_card(page)
+
+        # Verify placeholder text
+        body_text = page.evaluate(
+            """() => {
+            const cards = document.querySelectorAll('[data-card-id]');
+            for (const card of cards) {
+                const search = card.querySelector('[data-vm-search]');
+                if (search) return card.textContent;
+            }
+            return '';
+        }"""
+        )
+        assert "No favorites yet" in body_text, "Empty favorites should show placeholder message"
+
+
+# ── S14: VM Manager card persists across canvas save/reload ──────────────────
+
+
+class TestVmPersistence:
+    """S14: VM Manager card persists across canvas save/reload."""
+
+    def test_vm_card_persists_reload(self, page, backend_port):
+        """Save canvas, reload, verify VM Manager card is still present."""
+        # Seed some data so the card has content
+        seed_containers(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "persist-test",
+                    "state": "online",
+                    "image": "node:18",
+                    "status": "Up",
+                },
+            ],
+        )
+        set_favorites(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "persist-test",
+                    "type": "docker",
+                    "actions": [{"label": "Terminal", "type": "terminal"}],
+                }
+            ],
+        )
+
+        ensure_vm_card_exists(page)
+        refresh_vm_card(page)
+
+        # Verify VM Manager card exists
+        vm_search = page.locator("[data-vm-search]")
+        assert vm_search.count() > 0, "VM Manager card should exist before save"
+
+        # Save layout
+        page.evaluate(
+            """async () => {
+            if (typeof saveLayout === 'function') saveLayout();
+        }"""
+        )
+        page.wait_for_timeout(1000)
+
+        # Reload
+        page.goto(f"http://localhost:{backend_port}")
+        page.wait_for_load_state("networkidle")
+        page.wait_for_selector("#canvas", timeout=10000)
+        page.wait_for_timeout(3000)
+
+        # Verify VM Manager card is restored
+        vm_search_after = page.locator("[data-vm-search]")
+        assert vm_search_after.count() > 0, "VM Manager card should persist after reload"

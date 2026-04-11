@@ -58,6 +58,8 @@ To add a new preset: create a directory under `dev_presets/` with a `config.json
 
 ## Testing
 
+For E2E QA of new features, follow [`docs/e2e-qa-workflow.md`](docs/e2e-qa-workflow.md) — a 5-agent team workflow that designs, implements, and iterates on E2E tests using real dependencies (Docker containers, filesystem) by default.
+
 ```bash
 python -m pytest tests/ -v
 python -m ruff check . && python -m ruff format --check .   # lint + format check

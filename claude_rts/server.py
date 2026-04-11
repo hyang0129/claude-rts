@@ -226,6 +226,11 @@ _DOCKER_CMD = "docker.exe" if sys.platform == "win32" else "docker"
 
 async def vm_discover_handler(request: web.Request) -> web.Response:
     """Discover all Docker containers (running + stopped) with status."""
+    # In test mode, return injected mock data if available
+    test_containers = request.app.get("_test_vm_containers")
+    if test_containers is not None:
+        return web.json_response(sorted(test_containers, key=lambda c: c["name"]))
+
     proc = await asyncio.create_subprocess_exec(
         _DOCKER_CMD,
         "ps",
@@ -296,6 +301,17 @@ async def vm_favorites_put_handler(request: web.Request) -> web.Response:
 async def vm_start_handler(request: web.Request) -> web.Response:
     """Start a stopped Docker container by name."""
     name = request.match_info["name"]
+
+    # In test mode, flip mock container state instead of calling Docker
+    test_containers = request.app.get("_test_vm_containers")
+    if test_containers is not None:
+        for c in test_containers:
+            if c["name"] == name:
+                c["state"] = "online"
+                logger.info("vm_start (test): flipped '{}' to online", name)
+                return web.json_response({"name": name, "state": "online"})
+        return web.json_response({"error": f"No such container: {name}"}, status=500)
+
     proc = await asyncio.create_subprocess_exec(
         _DOCKER_CMD,
         "start",
@@ -576,6 +592,20 @@ async def test_session_delete(request: web.Request) -> web.Response:
 async def test_sessions_list(request: web.Request) -> web.Response:
     mgr: SessionManager = request.app["session_manager"]
     return web.json_response(mgr.list_sessions())
+
+
+async def test_vm_containers_put(request: web.Request) -> web.Response:
+    """PUT /api/test/vm-containers — inject fake container list for E2E tests."""
+    data = await request.json()
+    containers = data if isinstance(data, list) else data.get("containers", [])
+    request.app["_test_vm_containers"] = containers
+    return web.json_response(containers)
+
+
+async def test_vm_containers_get(request: web.Request) -> web.Response:
+    """GET /api/test/vm-containers — read back fake container list."""
+    containers = request.app.get("_test_vm_containers", [])
+    return web.json_response(containers)
 
 
 async def profiles_discover_handler(request: web.Request) -> web.Response:
@@ -1120,6 +1150,8 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
         app.router.add_get("/api/test/session/{id}/status", test_session_status)
         app.router.add_delete("/api/test/session/{id}", test_session_delete)
         app.router.add_get("/api/test/sessions", test_sessions_list)
+        app.router.add_put("/api/test/vm-containers", test_vm_containers_put)
+        app.router.add_get("/api/test/vm-containers", test_vm_containers_get)
 
     # Legacy hub WebSocket (catch-all, must be last)
     app.router.add_get("/ws/{hub}", websocket_handler)
