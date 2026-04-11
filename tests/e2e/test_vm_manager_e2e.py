@@ -1006,3 +1006,134 @@ class TestVmPersistence:
         # Verify VM Manager card is restored
         vm_search_after = page.locator("[data-vm-search]")
         assert vm_search_after.count() > 0, "VM Manager card should persist after reload"
+
+
+# ── S15: Stop button stops running container ───────────────────────────────
+
+
+class TestVmStopContainer:
+    """S15: Stop running container via Stop button."""
+
+    def test_stop_online_container(self, page, backend_port):
+        """Click Stop on online container, verify it becomes offline."""
+        seed_containers(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "running-svc",
+                    "state": "online",
+                    "image": "node:18",
+                    "status": "Up 2 hours",
+                },
+            ],
+        )
+
+        set_favorites(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "running-svc",
+                    "type": "docker",
+                    "actions": [{"label": "Terminal", "type": "terminal"}],
+                }
+            ],
+        )
+
+        ensure_vm_card_exists(page)
+        refresh_vm_card(page)
+
+        # Verify Stop button exists for running container
+        stop_btn = page.locator('[data-vm-stop="running-svc"]')
+        assert stop_btn.count() > 0, "Stop button for running-svc should exist"
+
+        # Verify no Start button for running container
+        start_btn = page.locator('[data-vm-start="running-svc"]')
+        assert start_btn.count() == 0, "Start button should not exist for online container"
+
+        # Click Stop
+        stop_btn.click()
+
+        # Wait for re-render (stop + render delay)
+        page.wait_for_timeout(3000)
+
+        # Verify container is now offline via API
+        containers = get_test_vm_containers(page, backend_port)
+        svc = next((c for c in containers if c["name"] == "running-svc"), None)
+        assert svc is not None, "running-svc should exist in test containers"
+        assert svc["state"] == "offline", "running-svc should be offline after stop"
+
+        # Verify Stop button is gone and Start button appeared
+        stop_btn_after = page.locator('[data-vm-stop="running-svc"]')
+        assert stop_btn_after.count() == 0, "Stop button should be gone for offline container"
+
+        start_btn_after = page.locator('[data-vm-start="running-svc"]')
+        assert start_btn_after.count() > 0, "Start button should appear for offline container"
+
+
+# ── S16: Search results show richer metadata and sort online-first ─────────
+
+
+class TestVmSearchMetadata:
+    """S16: Search results show image, status text, and sort online first."""
+
+    def test_search_results_metadata_and_sort(self, page, backend_port):
+        """Search results show image and status, with online containers first."""
+        seed_containers(
+            page,
+            backend_port,
+            [
+                {
+                    "name": "svc-alpha",
+                    "state": "offline",
+                    "image": "postgres:15",
+                    "status": "Exited 3 hours ago",
+                },
+                {
+                    "name": "svc-beta",
+                    "state": "online",
+                    "image": "node:18",
+                    "status": "Up 2 hours",
+                },
+                {
+                    "name": "svc-gamma",
+                    "state": "online",
+                    "image": "redis:7",
+                    "status": "Up 5 hours",
+                },
+            ],
+        )
+
+        # No favorites so all show in search
+        set_favorites(page, backend_port, [])
+
+        ensure_vm_card_exists(page)
+        refresh_vm_card(page)
+
+        # Type search query
+        search_input = page.locator("[data-vm-search]").first
+        search_input.click()
+        search_input.fill("svc-")
+        page.wait_for_timeout(500)
+
+        # Get all search result rows
+        results = page.locator("[data-vm-search-results] [data-vm-add]")
+        count = results.count()
+        assert count == 3, f"Should find 3 results, got {count}"
+
+        # Verify online containers appear first (svc-beta and svc-gamma before svc-alpha)
+        first_name = results.nth(0).get_attribute("data-vm-add")
+        second_name = results.nth(1).get_attribute("data-vm-add")
+        third_name = results.nth(2).get_attribute("data-vm-add")
+        assert first_name in ("svc-beta", "svc-gamma"), f"First result should be online, got {first_name}"
+        assert second_name in ("svc-beta", "svc-gamma"), f"Second result should be online, got {second_name}"
+        assert third_name == "svc-alpha", f"Third result should be offline svc-alpha, got {third_name}"
+
+        # Verify search results contain image text
+        result_html = page.locator("[data-vm-search-results]").first.inner_html()
+        assert "node:18" in result_html, "Search results should show image name"
+        assert "postgres:15" in result_html, "Search results should show image name"
+
+        # Verify search results contain status text
+        assert "Up 2 hours" in result_html or "Up 5 hours" in result_html, "Search results should show status text"

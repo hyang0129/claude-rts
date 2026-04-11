@@ -20,7 +20,7 @@ Verify the port is free before starting. Running multiple instances causes port 
 - **Session persistence**: SessionManager decouples PTY lifetime from WebSocket. PTYs run in server memory with a 64KB scrollback ring buffer. Orphan reaper cleans up after 5 min.
 - **Single HTML file**: All JS/CSS is inline in `index.html`. External libs (xterm.js) load from CDN. No npm, no bundler.
 - **Card class hierarchy**: `Card` base → `TerminalCard`, `WidgetCard`, `LoaderCard`. Enables mixed dashboards.
-- **No container lifecycle management**: supreme-claudemander only attaches to running containers. Starting/stopping is out of scope.
+- **Limited container lifecycle (start/stop only)**: supreme-claudemander can start and stop Docker containers via the VM Manager card. Creating, removing, and image management remain out of scope.
 - **docker.exe not docker**: On Windows, `docker` (no extension) is a shell script that `CreateProcessW` can't execute. Always use `docker.exe`.
 
 ## Dev Config Presets
@@ -83,7 +83,8 @@ CLAUDE_RTS_TEST_MODE=1 python -m claude_rts   # enables puppeting API at /api/te
 | `test_terminal_card.py` | 11 | TerminalCard lifecycle, CardRegistry, server integration |
 | `test_claude_api.py` | 30 | Claude terminal control API (CRUD, send/read, strip_ansi, /ws/control, full lifecycle integration) |
 | `test_event_bus.py` | 14 | EventBus core (subscribe, emit, unsubscribe, wildcard, async, errors, clear) + integration (ServiceCard bus emit, CardRegistry events) |
-| `test_vm_manager.py` | 12 | VM Manager API (discover containers, favorites CRUD, start container, route registration) |
+| `test_vm_manager.py` | 18 | VM Manager API (discover containers, favorites CRUD, start/stop container, per-container actions, route registration) |
+| `test_mcp_server.py` | 22 | MCP server tool functions (terminal CRUD + VM discover/favorites/actions) and JSON-RPC dispatch |
 | `e2e/test_smoke.py` | 7 | Playwright Electron smoke tests — launch, spawn, drag, resize, widgets, pan/zoom, save/reload |
 
 Tests use `MockPty` to avoid needing Docker. E2E tests require Playwright and Electron (`pip install -e ".[e2e]" && python -m playwright install chromium`).
@@ -104,6 +105,8 @@ Tests use `MockPty` to avoid needing Docker. E2E tests require Playwright and El
 | GET | `/api/vms/discover` | Discover all Docker containers (running + stopped) with status |
 | GET/PUT | `/api/vms/favorites` | Read/write VM Manager favorites list |
 | POST | `/api/vms/{name}/start` | Start a stopped Docker container |
+| POST | `/api/vms/{name}/stop` | Stop a running Docker container (optional `?timeout=N`) |
+| PUT | `/api/vms/favorites/{name}/actions` | Update actions for a specific favorite container |
 | POST | `/api/claude/terminal/create` | Create a TerminalCard + PTY session (params: cmd, hub, container, cols, rows, x, y, w, h) |
 | POST | `/api/claude/terminal/{id}/send` | Write text to a terminal PTY |
 | GET | `/api/claude/terminal/{id}/read` | Read scrollback (optional: strip_ansi, last_n) |
@@ -134,6 +137,21 @@ Stored in `~/.supreme-claudemander/config.json`:
 ```
 
 Canvas layouts stored in `~/.supreme-claudemander/canvases/{name}.json`.
+
+## VM Manager Action Schema
+
+Each favorite container has an `actions` array. Each action object:
+
+```json
+{
+  "label": "Terminal",           // Required: button label
+  "type": "terminal",            // Required: always "terminal"
+  "shell_prefix": "cd /work && claude",  // Optional: command prefix run in container
+  "import_keys": ["priority_credential"] // Optional: config keys to interpolate in shell_prefix
+}
+```
+
+When `import_keys` contains `"priority_credential"`, occurrences of `${priority_credential}` in `shell_prefix` are replaced with the current priority profile name from config.
 
 ## Adding a New Widget
 

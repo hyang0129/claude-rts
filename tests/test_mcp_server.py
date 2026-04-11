@@ -13,6 +13,10 @@ from claude_rts.mcp_server import (
     tool_open_terminal,
     tool_read_terminal,
     tool_write_terminal,
+    tool_vm_discover_containers,
+    tool_vm_get_favorites,
+    tool_vm_set_container_actions,
+    tool_vm_add_favorite,
 )
 
 
@@ -122,12 +126,22 @@ def test_handle_request_initialize():
 
 
 def test_handle_request_tools_list():
-    """tools/list returns all 5 tool schemas with required fields."""
+    """tools/list returns all 9 tool schemas with required fields."""
     msg = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
     resp = handle_request(msg)
     tools = resp["result"]["tools"]
     names = {t["name"] for t in tools}
-    assert names == {"open_terminal", "read_terminal", "write_terminal", "list_terminals", "delete_terminal"}
+    assert names == {
+        "open_terminal",
+        "read_terminal",
+        "write_terminal",
+        "list_terminals",
+        "delete_terminal",
+        "vm_discover_containers",
+        "vm_get_favorites",
+        "vm_set_container_actions",
+        "vm_add_favorite",
+    }
     for t in tools:
         assert "description" in t
         assert "inputSchema" in t
@@ -209,3 +223,123 @@ def test_handle_request_unknown_method_notification():
     msg = {"jsonrpc": "2.0", "method": "bogus/method", "params": {}}
     resp = handle_request(msg)
     assert resp is None
+
+
+# ── VM Manager MCP tool tests ──────────────────────────────────────────────
+
+
+def test_vm_discover_containers():
+    """vm_discover_containers GETs /api/vms/discover and formats result."""
+    containers = [
+        {"name": "web-app", "state": "online", "image": "node:18", "status": "Up 2 hours"},
+        {"name": "db-server", "state": "offline", "image": "postgres:15", "status": "Exited 3h ago"},
+    ]
+    mock_resp = make_mock_response(containers)
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_vm_discover_containers({})
+    assert "web-app" in result
+    assert "online" in result
+    assert "db-server" in result
+    assert "node:18" in result
+    call_args = mock_open.call_args
+    req = call_args[0][0]
+    assert "/api/vms/discover" in req.full_url
+
+
+def test_vm_discover_containers_empty():
+    """vm_discover_containers returns message when no containers."""
+    mock_resp = make_mock_response([])
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        result = tool_vm_discover_containers({})
+    assert "no" in result.lower() or result == ""
+
+
+def test_vm_get_favorites():
+    """vm_get_favorites GETs /api/vms/favorites and returns JSON."""
+    favorites = [
+        {"name": "web-app", "type": "docker", "actions": [{"label": "Terminal", "type": "terminal"}]},
+    ]
+    mock_resp = make_mock_response(favorites)
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_vm_get_favorites({})
+    parsed = json.loads(result)
+    assert len(parsed) == 1
+    assert parsed[0]["name"] == "web-app"
+    req = mock_open.call_args[0][0]
+    assert "/api/vms/favorites" in req.full_url
+
+
+def test_vm_set_container_actions():
+    """vm_set_container_actions PUTs to /api/vms/favorites/{name}/actions."""
+    actions = [{"label": "Terminal", "type": "terminal"}, {"label": "Claude", "type": "terminal"}]
+    mock_resp = make_mock_response(actions)
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_vm_set_container_actions({"container": "web-app", "actions": actions})
+    assert "web-app" in result
+    req = mock_open.call_args[0][0]
+    assert "/api/vms/favorites/web-app/actions" in req.full_url
+    assert req.method == "PUT"
+
+
+def test_vm_set_container_actions_missing_container():
+    """vm_set_container_actions raises ValueError when container is missing."""
+    import pytest
+
+    with pytest.raises(ValueError):
+        tool_vm_set_container_actions({})
+
+
+def test_vm_add_favorite():
+    """vm_add_favorite GETs favorites, appends, PUTs back."""
+    existing = [{"name": "old-container", "type": "docker", "actions": []}]
+    get_resp = make_mock_response(existing)
+    put_resp = make_mock_response(
+        existing + [{"name": "new-container", "type": "docker", "actions": [{"label": "Terminal", "type": "terminal"}]}]
+    )
+    call_count = [0]
+    responses = [get_resp, put_resp]
+
+    def mock_urlopen(req, timeout=None):
+        resp = responses[call_count[0]]
+        call_count[0] += 1
+        return resp
+
+    with patch("urllib.request.urlopen", side_effect=mock_urlopen) as mock_open:
+        result = tool_vm_add_favorite({"name": "new-container"})
+    assert "new-container" in result
+    assert "Added" in result
+    # Verify PUT was called with the new container
+    put_req = mock_open.call_args_list[1][0][0]
+    put_body = json.loads(put_req.data.decode("utf-8"))
+    assert len(put_body) == 2
+    assert put_body[1]["name"] == "new-container"
+
+
+def test_vm_add_favorite_already_exists():
+    """vm_add_favorite returns message when container already a favorite."""
+    existing = [{"name": "web-app", "type": "docker", "actions": []}]
+    mock_resp = make_mock_response(existing)
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        result = tool_vm_add_favorite({"name": "web-app"})
+    assert "already" in result.lower()
+
+
+def test_vm_add_favorite_missing_name():
+    """vm_add_favorite raises ValueError when name is missing."""
+    import pytest
+
+    with pytest.raises(ValueError):
+        tool_vm_add_favorite({})
+
+
+def test_tools_list_includes_vm_tools():
+    """tools/list response includes all 9 tools (5 terminal + 4 VM)."""
+    msg = {"jsonrpc": "2.0", "id": 10, "method": "tools/list", "params": {}}
+    resp = handle_request(msg)
+    tools = resp["result"]["tools"]
+    names = {t["name"] for t in tools}
+    assert "vm_discover_containers" in names
+    assert "vm_get_favorites" in names
+    assert "vm_set_container_actions" in names
+    assert "vm_add_favorite" in names
+    assert len(names) == 9

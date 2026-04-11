@@ -330,6 +330,79 @@ async def vm_start_handler(request: web.Request) -> web.Response:
     return web.json_response({"name": name, "state": "online"})
 
 
+async def vm_stop_handler(request: web.Request) -> web.Response:
+    """Stop a running Docker container by name."""
+    name = request.match_info["name"]
+
+    # In test mode, flip mock container state instead of calling Docker
+    test_containers = request.app.get("_test_vm_containers")
+    if test_containers is not None:
+        for c in test_containers:
+            if c["name"] == name:
+                c["state"] = "offline"
+                logger.info("vm_stop (test): flipped '{}' to offline", name)
+                return web.json_response({"name": name, "state": "offline"})
+        return web.json_response({"error": f"No such container: {name}"}, status=500)
+
+    # Optional timeout query param (default: Docker's built-in 10s)
+    timeout_str = request.query.get("timeout")
+    cmd_args = [_DOCKER_CMD, "stop"]
+    if timeout_str is not None:
+        try:
+            timeout_val = int(timeout_str)
+            cmd_args.extend(["-t", str(timeout_val)])
+        except ValueError:
+            pass
+    cmd_args.append(name)
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd_args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        err = stderr.decode().strip() if stderr else "docker stop failed"
+        logger.warning("vm_stop: failed to stop container '{}': {}", name, err)
+        return web.json_response({"error": err}, status=500)
+
+    logger.info("vm_stop: stopped container '{}'", name)
+    return web.json_response({"name": name, "state": "offline"})
+
+
+async def vm_favorites_actions_put_handler(request: web.Request) -> web.Response:
+    """Update actions for a specific favorite container by name."""
+    name = request.match_info["name"]
+    app_config: AppConfig = request.app["app_config"]
+    cfg = read_config(app_config)
+    vm_config = cfg.get("vm_manager", {})
+    favorites = vm_config.get("favorites", [])
+
+    # Find the target favorite
+    target = None
+    for fav in favorites:
+        if fav.get("name") == name:
+            target = fav
+            break
+
+    if target is None:
+        return web.json_response({"error": f"Favorite not found: {name}"}, status=404)
+
+    actions = await request.json()
+    if not isinstance(actions, list):
+        actions = actions.get("actions", [])
+    target["actions"] = actions
+
+    # Persist
+    if "vm_manager" not in cfg:
+        cfg["vm_manager"] = {}
+    cfg["vm_manager"]["favorites"] = favorites
+    write_config(app_config, cfg)
+
+    return web.json_response(actions)
+
+
 async def exec_websocket_handler(request: web.Request) -> web.WebSocketResponse:
     """WebSocket handler that spawns a PTY for an arbitrary command."""
     cmd = request.query.get("cmd", "").strip()
@@ -1114,6 +1187,8 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_get("/api/vms/favorites", vm_favorites_get_handler)
     app.router.add_put("/api/vms/favorites", vm_favorites_put_handler)
     app.router.add_post("/api/vms/{name}/start", vm_start_handler)
+    app.router.add_post("/api/vms/{name}/stop", vm_stop_handler)
+    app.router.add_put("/api/vms/favorites/{name}/actions", vm_favorites_actions_put_handler)
 
     app.router.add_get("/api/profiles", profiles_list_handler)
     app.router.add_get("/api/profiles/discover", profiles_discover_handler)

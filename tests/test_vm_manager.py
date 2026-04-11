@@ -205,8 +205,115 @@ async def test_vm_start_failure(client):
 # ── Route registration ───────────────────────────────────────────────────────
 
 
+# ── Stop container ──────────────────────────────────────────────────────────
+
+
+async def test_vm_stop_success(client):
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 0
+    mock_proc.communicate = AsyncMock(return_value=(b"web-app\n", b""))
+    with patch("claude_rts.server.asyncio.create_subprocess_exec", return_value=mock_proc):
+        resp = await client.post("/api/vms/web-app/stop")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["name"] == "web-app"
+    assert data["state"] == "offline"
+
+
+async def test_vm_stop_failure(client):
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 1
+    mock_proc.communicate = AsyncMock(return_value=(b"", b"No such container"))
+    with patch("claude_rts.server.asyncio.create_subprocess_exec", return_value=mock_proc):
+        resp = await client.post("/api/vms/nonexistent/stop")
+
+    assert resp.status == 500
+    data = await resp.json()
+    assert "error" in data
+
+
+async def test_vm_stop_test_mode(client):
+    """In test mode, stop flips container state to offline."""
+    # Inject test containers via the app directly
+    containers = [
+        {"name": "web-app", "state": "online", "image": "node:18", "status": "Up 2h"},
+    ]
+    app = client.app
+    app["_test_vm_containers"] = containers
+
+    resp = await client.post("/api/vms/web-app/stop")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["name"] == "web-app"
+    assert data["state"] == "offline"
+
+    # Verify mock container state was flipped
+    assert containers[0]["state"] == "offline"
+
+
+async def test_vm_stop_with_timeout(client):
+    """Stop with optional timeout query param."""
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 0
+    mock_proc.communicate = AsyncMock(return_value=(b"web-app\n", b""))
+    with patch("claude_rts.server.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        resp = await client.post("/api/vms/web-app/stop?timeout=30")
+
+    assert resp.status == 200
+    # Verify -t flag was passed
+    call_args = mock_exec.call_args[0]
+    assert "-t" in call_args
+    assert "30" in call_args
+
+
+# ── Per-container actions endpoint ──────────────────────────────────────────
+
+
+async def test_vm_favorites_actions_put(client):
+    """PUT actions for a specific favorite container."""
+    # First create a favorite
+    favorites = [
+        {"name": "devcontainer-web", "type": "docker", "actions": [{"label": "Terminal", "type": "terminal"}]},
+    ]
+    await client.put("/api/vms/favorites", json=favorites)
+
+    # Update actions
+    new_actions = [
+        {"label": "Terminal", "type": "terminal"},
+        {"label": "Claude", "type": "terminal", "shell_prefix": "cd /workspace && claude"},
+    ]
+    resp = await client.put("/api/vms/favorites/devcontainer-web/actions", json=new_actions)
+    assert resp.status == 200
+    data = await resp.json()
+    assert len(data) == 2
+    assert data[1]["label"] == "Claude"
+
+    # Verify persisted
+    resp2 = await client.get("/api/vms/favorites")
+    favs = await resp2.json()
+    assert len(favs[0]["actions"]) == 2
+
+
+async def test_vm_favorites_actions_not_found(client):
+    """PUT actions for a nonexistent favorite returns 404."""
+    resp = await client.put(
+        "/api/vms/favorites/nonexistent/actions",
+        json=[{"label": "Terminal", "type": "terminal"}],
+    )
+    assert resp.status == 404
+    data = await resp.json()
+    assert "error" in data
+    assert "nonexistent" in data["error"]
+
+
+# ── Route registration ───────────────────────────────────────────────────────
+
+
 async def test_vm_routes_registered(app):
     routes = [r.resource.canonical for r in app.router.routes() if hasattr(r, "resource")]
     assert "/api/vms/discover" in routes
     assert "/api/vms/favorites" in routes
     assert "/api/vms/{name}/start" in routes
+    assert "/api/vms/{name}/stop" in routes
+    assert "/api/vms/favorites/{name}/actions" in routes

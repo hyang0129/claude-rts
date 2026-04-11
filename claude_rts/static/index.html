@@ -1814,6 +1814,8 @@ const WIDGET_REGISTRY = {
             html += `<span style="font-weight:bold;font-size:12px;flex:1">${esc(fav.name)}</span>`;
             if (state === 'offline') {
               html += `<button data-vm-start="${esc(fav.name)}" style="background:#1e1e2e;border:1px solid #45475a;color:#a6e3a1;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:10px" title="Start container">▶ Start</button>`;
+            } else if (state === 'online') {
+              html += `<button data-vm-stop="${esc(fav.name)}" style="background:#1e1e2e;border:1px solid #45475a;color:#f38ba8;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:10px" title="Stop container">■ Stop</button>`;
             }
             html += `<button data-vm-remove="${esc(fav.name)}" style="background:none;border:1px solid #45475a;color:#f38ba8;border-radius:4px;padding:2px 6px;cursor:pointer;font-size:10px" title="Remove from favorites">✕</button>`;
             html += '</div>';
@@ -1846,6 +1848,9 @@ const WIDGET_REGISTRY = {
             if (!q) { searchResults.style.display = 'none'; return; }
             const favNames = new Set(favorites.map(f => f.name));
             const matches = allContainers.filter(c => c.name.toLowerCase().includes(q) && !favNames.has(c.name));
+            // Sort: online first, then starting, then offline
+            const stateOrder = { online: 0, starting: 1, offline: 2 };
+            matches.sort((a, b) => (stateOrder[a.state] ?? 2) - (stateOrder[b.state] ?? 2));
             if (matches.length === 0) {
               searchResults.innerHTML = '<div style="padding:4px 6px;color:#6c7086;font-size:11px">No matches</div>';
             } else {
@@ -1853,6 +1858,7 @@ const WIDGET_REGISTRY = {
                 `<div style="display:flex;align-items:center;gap:6px;padding:3px 6px;cursor:pointer;font-size:11px" data-vm-add="${esc(c.name)}">
                   ${stateIcon(c.state)} <span style="flex:1">${esc(c.name)}</span>
                   <span style="color:#6c7086;font-size:10px">${esc(c.image)}</span>
+                  <span style="color:#585b70;font-size:9px">${esc(c.status || '')}</span>
                   <span style="color:#a6e3a1;font-size:10px">+ Add</span>
                 </div>`
               ).join('');
@@ -1914,6 +1920,35 @@ const WIDGET_REGISTRY = {
               failed = true;
             }
             // Refresh after a short delay to let container come up
+            if (!failed) setTimeout(() => card.render(), 2000);
+          });
+        });
+
+        // ── Stop container ──
+        body.querySelectorAll('[data-vm-stop]').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const name = btn.getAttribute('data-vm-stop');
+            btn.textContent = '⏳';
+            btn.disabled = true;
+            let failed = false;
+            try {
+              const r = await fetch(`/api/vms/${encodeURIComponent(name)}/stop`, { method: 'POST' });
+              if (!r.ok) {
+                const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+                console.error('Failed to stop:', err);
+                btn.textContent = '✗';
+                btn.title = err.error || 'Stop failed';
+                btn.style.color = '#f38ba8';
+                failed = true;
+              }
+            } catch (err) {
+              console.error('Stop error:', err);
+              btn.textContent = '✗';
+              btn.title = err.message || 'Stop failed';
+              btn.style.color = '#f38ba8';
+              failed = true;
+            }
+            // Refresh after a short delay to let container stop
             if (!failed) setTimeout(() => card.render(), 2000);
           });
         });
