@@ -1,0 +1,39 @@
+{
+  "startup_script": "util-terminal",
+  "default_canvas": "human-qa",
+  "priority_profile": "hongy2",
+  "probe_profiles": ["hongy2"],
+  "sessions": {
+    "orphan_timeout": 300,
+    "scrollback_size": 65536,
+    "tmux_persistence": true
+  },
+  "util_container": {
+    "name": "supreme-claudemander-util",
+    "image": "supreme-claudemander-util:latest",
+    "auto_start": true,
+    "auto_stop": false,
+    "mounts": {
+      "~/.claude-profiles": "/profiles"
+    }
+  },
+  "vm_manager": {
+    "favorites": [
+      {
+        "name": "supreme-claudemander-util",
+        "type": "docker",
+        "actions": [
+          {"label": "Terminal", "type": "terminal"},
+          {"label": "Claude", "type": "terminal", "shell_prefix": "env CLAUDE_CONFIG_DIR=/profiles/${priority_credential} claude", "import_keys": ["priority_credential"]}
+        ]
+      },
+      {
+        "name": "does-not-exist",
+        "type": "docker",
+        "actions": [
+          {"label": "Terminal", "type": "terminal"}
+        ]
+      }
+    ]
+  }
+}
