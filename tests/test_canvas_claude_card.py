@@ -301,8 +301,10 @@ async def test_canvas_claude_card_seed_trust_settings_profile(monkeypatch):
         profile="alice",
     )
     card._seed_claude_settings()
-    # Should invoke docker exec ... bash -c "mkdir -p /profiles/alice && ..."
-    assert len(calls) == 1
+    # _seed_claude_settings makes exactly 2 subprocess.run calls when both succeed:
+    # call[0] writes trust settings JSON; call[1] runs the MCP .claude.json patch via python3.
+    assert len(calls) == 2
+    # First call: trust settings write
     cmd = calls[0]
     assert cmd[0] == "docker.exe"
     assert cmd[1] == "exec"
@@ -311,6 +313,12 @@ async def test_canvas_claude_card_seed_trust_settings_profile(monkeypatch):
     assert "/profiles/alice" in shell_script
     assert "settings.json" in shell_script
     assert "base64 -d" in shell_script
+    # Second call: MCP .claude.json patch via python3
+    mcp_cmd = calls[1]
+    assert mcp_cmd[0] == "docker.exe"
+    assert mcp_cmd[1] == "exec"
+    assert "my-container" in mcp_cmd
+    assert "python3" in mcp_cmd[-1]
     mgr.stop_all()
 
 
@@ -342,7 +350,8 @@ async def test_canvas_claude_card_seed_trust_settings_payload_decodes(monkeypatc
     captured = {}
 
     def track_run(cmd_list, **kw):
-        captured["cmd"] = cmd_list
+        # Keep only the FIRST call (trust settings write); the second call is the MCP patch.
+        captured.setdefault("cmd", cmd_list)
         return type("R", (), {"returncode": 0, "stderr": b""})()
 
     monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", track_run)
