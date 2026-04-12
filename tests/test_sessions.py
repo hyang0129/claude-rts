@@ -145,7 +145,7 @@ async def test_create_session_with_container_tmux(monkeypatch):
 
 
 async def test_create_session_fallback_no_tmux(monkeypatch):
-    """Without tmux in cache, should use the original command."""
+    """Without tmux in cache but with container, should wrap cmd in docker exec."""
     spawned_cmds = []
     original_spawn = MockPty.spawn
 
@@ -158,10 +158,37 @@ async def test_create_session_fallback_no_tmux(monkeypatch):
     MockPty.spawn = tracking_spawn
     try:
         mgr = SessionManager()
-        # No tmux cache entry
-        session = mgr.create_session("bash -l", hub="hub1", container="my-container")
-        assert spawned_cmds[-1] == "bash -l"
+        # No tmux cache entry — should still docker-exec into the container
+        session = mgr.create_session("bash", hub="hub1", container="my-container")
+        assert "docker" in spawned_cmds[-1]
+        assert "exec" in spawned_cmds[-1]
+        assert "my-container" in spawned_cmds[-1]
+        assert "bash" in spawned_cmds[-1]
         assert session.container == "my-container"
+        # cmd metadata unchanged
+        assert session.cmd == "bash"
+        mgr.stop_all()
+    finally:
+        MockPty.spawn = original_spawn
+
+
+async def test_create_session_no_tmux_no_double_wrap(monkeypatch):
+    """When cmd already starts with docker, don't double-wrap even if container is set."""
+    spawned_cmds = []
+    original_spawn = MockPty.spawn
+
+    @classmethod
+    def tracking_spawn(cls, cmd, dimensions=(24, 80)):
+        spawned_cmds.append(cmd)
+        return original_spawn(cmd, dimensions)
+
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    MockPty.spawn = tracking_spawn
+    try:
+        mgr = SessionManager()
+        full_cmd = "docker.exe exec -it my-container bash -l"
+        mgr.create_session(full_cmd, container="my-container")
+        assert spawned_cmds[-1] == full_cmd
         mgr.stop_all()
     finally:
         MockPty.spawn = original_spawn
@@ -429,7 +456,8 @@ async def test_recover_skips_non_rts_sessions(monkeypatch):
 
 
 async def test_tmux_disabled_via_config(monkeypatch):
-    """When tmux_enabled=False, sessions should not use tmux even if cached."""
+    """When tmux_enabled=False, sessions should not use tmux even if cached.
+    The cmd is still wrapped in docker exec when a container is specified."""
     spawned_cmds = []
     original_spawn = MockPty.spawn
 
@@ -444,8 +472,12 @@ async def test_tmux_disabled_via_config(monkeypatch):
         mgr = SessionManager(tmux_enabled=False)
         mgr._tmux_cache["my-container"] = True
         mgr.create_session("bash -l", container="my-container")
-        # Should use original command, not tmux
-        assert spawned_cmds[-1] == "bash -l"
+        # Should NOT use tmux, but still exec into the container
+        assert "tmux" not in spawned_cmds[-1]
+        assert "docker" in spawned_cmds[-1]
+        assert "exec" in spawned_cmds[-1]
+        assert "my-container" in spawned_cmds[-1]
+        assert "bash -l" in spawned_cmds[-1]
         mgr.stop_all()
     finally:
         MockPty.spawn = original_spawn

@@ -1,0 +1,29 @@
+{
+  "name": "vm-actions-qa",
+  "canvas_size": [3840, 2160],
+  "cards": [
+    {
+      "type": "widget",
+      "widgetType": "vm-manager",
+      "x": 100,
+      "y": 100,
+      "w": 520,
+      "h": 480
+    },
+    {
+      "type": "canvas_claude",
+      "x": 660,
+      "y": 100,
+      "w": 960,
+      "h": 640
+    },
+    {
+      "type": "widget",
+      "widgetType": "profiles",
+      "x": 100,
+      "y": 620,
+      "w": 520,
+      "h": 360
+    }
+  ]
+}

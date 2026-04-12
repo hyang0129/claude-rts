@@ -1,0 +1,31 @@
+{
+  "startup_script": "util-terminal",
+  "default_canvas": "vm-actions-qa",
+  "priority_profile": "mykey",
+  "probe_profiles": [],
+  "sessions": {
+    "orphan_timeout": 60,
+    "scrollback_size": 65536,
+    "tmux_persistence": true
+  },
+  "util_container": {
+    "name": "supreme-claudemander-util",
+    "image": "supreme-claudemander-util:latest",
+    "auto_start": true,
+    "auto_stop": false,
+    "mounts": {
+      "~/.claude-profiles": "/profiles"
+    }
+  },
+  "vm_manager": {
+    "favorites": [
+      {
+        "name": "supreme-claudemander-util",
+        "type": "docker",
+        "actions": [
+          {"label": "Terminal", "type": "terminal"}
+        ]
+      }
+    ]
+  }
+}

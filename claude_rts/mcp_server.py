@@ -264,9 +264,26 @@ TOOL_SCHEMAS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "cmd": {"type": "string", "description": "Command to run in the terminal"},
+                "cmd": {
+                    "type": "string",
+                    "description": (
+                        "Command to run. When 'container' is also set, this command runs "
+                        "inside that Docker container (the server wraps it in docker exec "
+                        "automatically). Example: cmd='bash', container='supreme-claudemander-util' "
+                        "opens a bash shell inside that container. To run claude inside a "
+                        "container: cmd='claude --dangerously-skip-permissions', "
+                        "container='supreme-claudemander-util'."
+                    ),
+                },
                 "hub": {"type": "string", "description": "Hub name (optional)"},
-                "container": {"type": "string", "description": "Docker container name (optional)"},
+                "container": {
+                    "type": "string",
+                    "description": (
+                        "Exact Docker container name to connect to. Use vm_discover_containers "
+                        "to find the correct name (e.g. 'supreme-claudemander-util'). "
+                        "When set, cmd runs inside this container."
+                    ),
+                },
                 "x": {"type": "number", "description": "X position on canvas (optional)"},
                 "y": {"type": "number", "description": "Y position on canvas (optional)"},
                 "w": {"type": "number", "description": "Width in pixels (optional)"},

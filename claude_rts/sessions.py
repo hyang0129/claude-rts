@@ -133,6 +133,11 @@ class SessionManager:
         if use_tmux:
             spawn_cmd = f"{_DOCKER} exec -it {container} tmux new-session -As {session_id}"
             logger.info("Using tmux persistence: {}", spawn_cmd)
+        elif container and not cmd.startswith(_DOCKER) and not cmd.startswith("docker"):
+            # No tmux available but a container was specified — still run the command
+            # inside the container via docker exec rather than falling back to a local shell.
+            spawn_cmd = f"{_DOCKER} exec -it {container} {cmd}"
+            logger.info("Running in container (no tmux): {}", spawn_cmd)
         else:
             spawn_cmd = cmd
 
