@@ -141,8 +141,9 @@ async def test_canvas_claude_card_cmd_includes_tmux(monkeypatch):
     card = CanvasClaudeCard(session_manager=mgr, container="my-container")
     assert "tmux new-session" in card.cmd
     assert TMUX_SESSION_NAME in card.cmd
-    assert "mcp.json" in card.cmd
     assert "my-container" in card.cmd
+    # MCP config is written into settings.json via _seed_claude_settings(),
+    # not passed as a --mcp-config flag on the command line.
 
 
 async def test_canvas_claude_card_cmd_includes_profile(monkeypatch):

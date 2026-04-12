@@ -1037,6 +1037,15 @@ async def canvas_claude_create(request: web.Request) -> web.Response:
     canvas_name = request.query.get("canvas_name", "").strip() or None
     api_base_url = request.query.get("api_base_url", "http://host.docker.internal:3000").strip()
 
+    # Fall back to the configured priority profile if none was specified.
+    if not profile:
+        app_cfg: AppConfig = request.app["app_config"]
+        cfg = read_config(app_cfg)
+        profile = cfg.get("priority_profile") or None
+
+    if not profile:
+        raise web.HTTPBadRequest(text="profile is required (no priority_profile configured)")
+
     layout: dict = {}
     try:
         for key in ("x", "y", "w", "h"):
@@ -1302,11 +1311,12 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
 
             def _log_usage(result, _p=profile):
                 logger.info(
-                    "claude-usage [{}]: 5hr={}% burn={}/hr resets={}",
+                    "claude-usage [{}]: 5hr={}% 7d={}% burn={}/day resets={}",
                     _p,
                     result.get("five_hour_pct"),
+                    result.get("seven_day_pct"),
                     result.get("burn_rate"),
-                    result.get("five_hour_resets"),
+                    result.get("seven_day_resets"),
                 )
 
             async def _start_probe(_p=profile, _cb=_log_usage):

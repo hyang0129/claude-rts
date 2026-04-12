@@ -58,7 +58,7 @@ def app_factory(tmp_path, monkeypatch):
 async def test_canvas_claude_create(aiohttp_client, app_factory):
     """POST /api/canvas-claude/create returns descriptor with session_id and type."""
     client = await aiohttp_client(app_factory())
-    resp = await client.post("/api/canvas-claude/create?container=test-container")
+    resp = await client.post("/api/canvas-claude/create?container=test-container&profile=test-profile")
     assert resp.status == 200
     data = await resp.json()
     assert "session_id" in data
@@ -77,7 +77,7 @@ async def test_canvas_claude_create_with_profile(aiohttp_client, app_factory):
 async def test_canvas_claude_create_bad_layout(aiohttp_client, app_factory):
     """Non-integer layout params return 400."""
     client = await aiohttp_client(app_factory())
-    resp = await client.post("/api/canvas-claude/create?container=test-container&x=notanint")
+    resp = await client.post("/api/canvas-claude/create?container=test-container&profile=test-profile&x=notanint")
     assert resp.status == 400
 
 
@@ -99,7 +99,7 @@ async def test_canvas_claude_new_session(aiohttp_client, app_factory):
     """POST /api/canvas-claude/{id}/new-session returns new session_id."""
     client = await aiohttp_client(app_factory())
     # Create a card first
-    resp = await client.post("/api/canvas-claude/create?container=test-container")
+    resp = await client.post("/api/canvas-claude/create?container=test-container&profile=test-profile")
     assert resp.status == 200
     data = await resp.json()
     old_sid = data["session_id"]
@@ -117,7 +117,7 @@ async def test_canvas_claude_new_session(aiohttp_client, app_factory):
 async def test_canvas_claude_clear(aiohttp_client, app_factory):
     """POST /api/canvas-claude/{id}/clear returns ok."""
     client = await aiohttp_client(app_factory())
-    resp = await client.post("/api/canvas-claude/create?container=test-container")
+    resp = await client.post("/api/canvas-claude/create?container=test-container&profile=test-profile")
     assert resp.status == 200
     sid = (await resp.json())["session_id"]
 

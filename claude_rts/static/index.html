@@ -1489,12 +1489,102 @@ class CanvasClaudeCard extends TerminalCard {
     titlebar.insertBefore(clearBtn, closeBtn);
   }
 
+  onInit() {
+    this.initTerminal();
+    this.setupInput();
+    this.setupResizeObserver();
+    this.setupClaudeBtn();
+    if (!this.sessionId) {
+      this._showNoPriorityOverlay();
+      return; // connectWs() will be called by _retryConnect() once a session exists
+    }
+    this.connectWs();
+  }
+
+  _showNoPriorityOverlay() {
+    const body = this.el.querySelector(`[data-body="${this.id}"]`);
+    body.style.position = 'relative';
+    const overlay = document.createElement('div');
+    overlay.dataset.pendingOverlay = this.id;
+    overlay.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:#1e1e2e;z-index:10;padding:24px;text-align:center';
+
+    const icon = document.createElement('div');
+    icon.textContent = '⚠';
+    icon.style.cssText = 'font-size:26px;color:#f9e2af';
+
+    const msg = document.createElement('div');
+    msg.dataset.pendingMsg = this.id;
+    msg.style.cssText = 'color:#cdd6f4;font-size:13px;font-weight:bold';
+    msg.textContent = this.profile ? `Profile: ${this.profile}` : 'No priority profile set';
+
+    const hint = document.createElement('div');
+    hint.dataset.pendingHint = this.id;
+    hint.style.cssText = 'color:#6c7086;font-size:11px;line-height:1.6;max-width:280px';
+    hint.textContent = this.profile
+      ? 'Click Retry when the util container is running and credentials are ready.'
+      : 'Set a priority profile in the Profile Manager widget, then click Retry.';
+
+    const btn = document.createElement('button');
+    btn.dataset.pendingRetry = this.id;
+    btn.textContent = 'Retry';
+    btn.style.cssText = 'margin-top:6px;padding:5px 20px;background:#313244;border:1px solid #45475a;border-radius:6px;color:#89b4fa;font-size:12px;cursor:pointer';
+    btn.addEventListener('click', () => this._retryConnect());
+
+    overlay.append(icon, msg, hint, btn);
+    body.appendChild(overlay);
+  }
+
+  async _retryConnect() {
+    const btn = this.el.querySelector(`[data-pending-retry="${this.id}"]`);
+    const hint = this.el.querySelector(`[data-pending-hint="${this.id}"]`);
+    if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+    if (hint) { hint.style.color = '#6c7086'; hint.textContent = 'Looking up priority profile…'; }
+
+    try {
+      let profile = null;
+      const pr = await fetch('/api/profiles/priority');
+      if (pr.ok) {
+        const pd = await pr.json();
+        if (pd.priority_profile && /^[a-zA-Z0-9._-]+$/.test(pd.priority_profile)) {
+          profile = pd.priority_profile;
+        }
+      }
+
+      if (!profile) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Retry'; }
+        if (hint) { hint.style.color = '#f38ba8'; hint.textContent = 'Still no priority profile. Set one in the Profile Manager and try again.'; }
+        return;
+      }
+
+      this.profile = profile;
+      const msgEl = this.el.querySelector(`[data-pending-msg="${this.id}"]`);
+      if (msgEl) msgEl.textContent = `Profile: ${profile}`;
+      const params = new URLSearchParams({ x: Math.round(this.x), y: Math.round(this.y), w: this.w, h: this.h });
+      params.set('profile', profile);
+      if (this.canvasName) params.set('canvas_name', this.canvasName);
+      const resp = await fetch(`/api/canvas-claude/create?${params}`, { method: 'POST' });
+      if (!resp.ok) throw new Error(await resp.text());
+      const desc = await resp.json();
+      this.sessionId = desc.session_id;
+      saveLayout();
+
+      const overlay = this.el.querySelector(`[data-pending-overlay="${this.id}"]`);
+      if (overlay) overlay.remove();
+      this._intentionalClose = false;
+      this.connectWs();
+    } catch (err) {
+      console.error('Canvas Claude retry failed:', err);
+      if (btn) { btn.disabled = false; btn.textContent = 'Retry'; }
+      if (hint) { hint.style.color = '#f38ba8'; hint.textContent = 'Failed to start session — check the server logs and try again.'; }
+    }
+  }
+
   connectWs() {
     // Canvas Claude cards always connect via /ws/session/{id} (never the
     // /ws/session/new path, which would bypass MCP config + tmux setup).
     // If session_not_found is received, we go through the server-side
     // create API to get a properly initialised session.
-    if (!this.sessionId) return; // should not happen — spawnCanvasClaudeCard always sets sessionId
+    if (!this.sessionId) return; // no session yet — _retryConnect() will call connectWs() once one is created
     if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
     this._intentionalClose = false;
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1502,8 +1592,10 @@ class CanvasClaudeCard extends TerminalCard {
     this.ws = new WebSocket(wsUrl);
     this.ws.binaryType = 'arraybuffer';
 
+    this._sessionCreatedAt = null;
     this.ws.addEventListener('open', () => {
       this._reconnectDelay = 1000;
+      this._sessionCreatedAt = Date.now();
       this.updateState('idle');
       this.ws.send(JSON.stringify({ type: 'resize', cols: this.term.cols, rows: this.term.rows }));
     });
@@ -1529,6 +1621,15 @@ class CanvasClaudeCard extends TerminalCard {
     });
     this.ws.addEventListener('close', () => {
       this.updateState('dead');
+      // If the session died within 10 s of connection, the canvas claude command
+      // likely failed (e.g. docker exec error, tmux session could not start).
+      // Stop reconnecting to avoid a runaway create loop — the user can click
+      // Retry to try again explicitly.
+      const sessionAge = this._sessionCreatedAt ? Date.now() - this._sessionCreatedAt : Infinity;
+      if (sessionAge < 10000) {
+        this.term.write('\r\n\x1b[31m[canvas claude failed to start — not reconnecting]\x1b[0m\r\n');
+        return;
+      }
       if (!this._intentionalClose) {
         this.term.write('\r\n\x1b[33m[reconnecting...]\x1b[0m\r\n');
         this._reconnectTimer = setTimeout(() => {
@@ -1543,11 +1644,20 @@ class CanvasClaudeCard extends TerminalCard {
   }
 
   async _recreateSession() {
+    // If we don't have a profile, we cannot start a credentialed session.
+    // Show the overlay so the user can set up credentials explicitly.
+    if (!this.profile) {
+      this.sessionId = null;
+      saveLayout();
+      this._showNoPriorityOverlay();
+      return;
+    }
+
     // Ask the server to create a fresh canvas claude session (MCP config + tmux).
     try {
       this.term.write('\r\n\x1b[33m[session expired — restarting...]\x1b[0m\r\n');
       const params = new URLSearchParams({ x: this.x, y: this.y, w: this.w, h: this.h });
-      if (this.profile) params.set('profile', this.profile);
+      params.set('profile', this.profile);
       if (this.canvasName) params.set('canvas_name', this.canvasName);
       const resp = await fetch(`/api/canvas-claude/create?${params}`, { method: 'POST' });
       if (!resp.ok) {
@@ -1708,7 +1818,7 @@ const WIDGET_REGISTRY = {
         html += '<th style="text-align:left;padding:4px 6px">Profile</th>';
         html += '<th style="text-align:left;padding:4px 6px">5h</th>';
         html += '<th style="text-align:left;padding:4px 6px">7d</th>';
-        html += '<th style="text-align:right;padding:4px 6px">Burn/hr</th>';
+        html += '<th style="text-align:right;padding:4px 6px">Burn/day</th>';
         html += '<th style="text-align:right;padding:4px 6px">Resets</th>';
         html += '<th style="text-align:center;padding:4px 6px">Priority</th>';
         html += '</tr>';
@@ -2193,9 +2303,12 @@ async function spawnCanvasClaudeCard(x, y, w, h, sessionId, profile, canvasName)
     }
   }
 
-  // If no existing session, ask the server to create one
+  // If no existing live session, show the retry overlay instead of auto-starting.
+  // This avoids launching Claude before the user has confirmed their profile and
+  // credentials are ready (first-time setup, container not yet running, etc.).
+  // _retryConnect() on the card handles the actual session creation when the user
+  // clicks Retry.  We still resolve the profile here so the overlay can display it.
   if (!sessionId) {
-    // Auto-resolve priority profile if none was explicitly set
     if (!profile) {
       try {
         const pr = await fetch('/api/profiles/priority');
@@ -2205,20 +2318,9 @@ async function spawnCanvasClaudeCard(x, y, w, h, sessionId, profile, canvasName)
             profile = pd.priority_profile;
           }
         }
-      } catch (_) { /* non-fatal — proceed without profile */ }
+      } catch (_) { /* non-fatal */ }
     }
-    try {
-      const params = new URLSearchParams({ x: Math.round(x), y: Math.round(y), w: w || 960, h: h || 640 });
-      if (profile) params.set('profile', profile);
-      if (canvasName || currentCanvasName) params.set('canvas_name', canvasName || currentCanvasName || '');
-      const resp = await fetch(`/api/canvas-claude/create?${params}`, { method: 'POST' });
-      if (!resp.ok) { console.error('Failed to create Canvas Claude session:', await resp.text()); return null; }
-      const desc = await resp.json();
-      sessionId = desc.session_id;
-    } catch (err) {
-      console.error('Failed to create Canvas Claude session:', err);
-      return null;
-    }
+    // Leave sessionId null — card.onInit() will show the retry overlay.
   }
 
   const card = new CanvasClaudeCard({

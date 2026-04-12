@@ -232,7 +232,11 @@ async def discover_profiles(app_config: AppConfig) -> list[str]:
 
 
 async def ensure_util_container(app_config: AppConfig) -> bool:
-    """Ensure the utility container is running. Start if needed.
+    """Ensure the utility container is running. Restart it if already running.
+
+    Restarting on every server start guarantees a clean slate: stale tmux
+    sessions (e.g. a canvas-claude session from a previous run) are destroyed
+    so the next attach always gets a freshly-configured session.
 
     Called during server startup if auto_start is enabled.
     """
@@ -240,4 +244,9 @@ async def ensure_util_container(app_config: AppConfig) -> bool:
     if not cfg["auto_start"]:
         logger.info("Utility container auto_start disabled, skipping")
         return False
+
+    if await is_util_running(app_config):
+        logger.info("Utility container '{}' already running — restarting for clean slate", cfg["name"])
+        await stop_container(app_config)
+
     return await start_container(app_config)

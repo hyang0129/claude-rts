@@ -283,11 +283,13 @@ class ClaudeUsageCard(ServiceCard):
 
                     five_hr_pct = parsed["five_hour_pct"]
                     five_hr_resets = parsed["five_hour_resets"]
+                    seven_day_pct = parsed["seven_day_pct"]
+                    seven_day_resets = parsed["seven_day_resets"]
                     burn_rate = None
-                    if five_hr_pct is not None and five_hr_resets:
-                        hours = _hours_until_reset(five_hr_resets)
+                    if seven_day_pct is not None and seven_day_resets:
+                        hours = _hours_until_reset(seven_day_resets)
                         if hours and hours > 0:
-                            burn_rate = float(five_hr_pct) / hours
+                            burn_rate = (100.0 - float(seven_day_pct)) / hours * 24
 
                     result = {
                         "profile": self.identity,

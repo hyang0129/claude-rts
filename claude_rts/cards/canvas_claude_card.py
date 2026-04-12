@@ -70,7 +70,14 @@ def _build_mcp_config(api_base_url: str) -> dict:
 # workspace. Claude Code 2.x checks ``hasTrustDialogAccepted`` before showing
 # the "Yes, I trust this folder" TUI prompt; pre-seeding it avoids a race
 # between the trust prompt and MCP handshake.
-_TRUST_SETTINGS = {"hasTrustDialogAccepted": True, "hasCompletedOnboarding": True}
+_TRUST_SETTINGS = {
+    "hasTrustDialogAccepted": True,
+    "hasCompletedOnboarding": True,
+    # Suppress the "WARNING: Claude Code running in Bypass Permissions mode" dialog
+    # that appears when --dangerously-skip-permissions is passed. Without this,
+    # an interactive TUI prompt blocks MCP handshake on every fresh session.
+    "skipDangerousModePermissionPrompt": True,
+}
 
 
 def _validate_name(value: str, label: str) -> None:
@@ -123,26 +130,25 @@ class CanvasClaudeCard(TerminalCard):
         if profile:
             _validate_name(profile, "profile")
 
-        # Build the MCP config JSON and base64-encode it for safe transfer.
-        # See ``_build_mcp_config`` for the belt-and-suspenders rationale.
+        # Build the MCP config JSON. Written into settings.json by
+        # _seed_claude_settings() so Claude loads it automatically on start.
         mcp_config = _build_mcp_config(api_base_url)
         mcp_json = _json.dumps(mcp_config)
         self._mcp_config = mcp_config
         self._mcp_json = mcp_json
-        self._mcp_b64 = _b64.b64encode(mcp_json.encode()).decode()
         self._mcp_sha256 = _hashlib.sha256(mcp_json.encode()).hexdigest()
 
         # Build the inner claude command (without docker/tmux wrapping).
         # The actual PTY command is determined at start() time by
         # _ensure_tmux_session(), which decides between attach vs new-session.
+        #
+        # The MCP server is registered via `claude mcp add` by _seed_claude_settings()
+        # so no --mcp-config flag is needed here.
         docker_bin = "docker.exe"  # Windows host
         if profile:
-            claude_cmd = (
-                f"env CLAUDE_CONFIG_DIR=/profiles/{profile} "
-                f"claude --dangerously-skip-permissions --mcp-config /tmp/mcp.json"
-            )
+            claude_cmd = f"env CLAUDE_CONFIG_DIR=/profiles/{profile} claude --dangerously-skip-permissions"
         else:
-            claude_cmd = "claude --dangerously-skip-permissions --mcp-config /tmp/mcp.json"
+            claude_cmd = "claude --dangerously-skip-permissions"
 
         # Default cmd is the new-session variant; start() may override with attach.
         cmd = f"{docker_bin} exec -it {effective_container} tmux new-session -s {TMUX_SESSION_NAME} {claude_cmd}"
@@ -194,26 +200,24 @@ class CanvasClaudeCard(TerminalCard):
         logger.debug("CanvasClaudeCard: synced mcp_server.py to {}", self._effective_container)
 
     def _seed_claude_settings(self) -> None:
-        """Pre-seed the claude settings file inside the container so the workspace
-        trust TUI dialog never fires on first launch.
+        """Pre-seed trust flags and the canvas MCP server inside the container.
 
-        Claude Code 2.x shows an interactive "Yes, I trust this folder" prompt on
-        first run in an untrusted directory. ``--dangerously-skip-permissions``
-        does **not** suppress this dialog, and if it appears before the MCP
-        handshake completes it can race the canvas subprocess and cause
-        ``canvas · ✘ failed``. We avoid the race by writing a settings file that
-        marks the workspace as already trusted.
+        Two operations, both idempotent:
 
-        Target file:
-          - ``/profiles/<profile>/settings.json`` if a profile is set
-            (matches ``CLAUDE_CONFIG_DIR=/profiles/<profile>`` used in
-            ``_claude_cmd``)
-          - ``/home/util/.claude/settings.json`` otherwise (the util container
-            runs as user ``util`` with home ``/home/util``; see Dockerfile.util)
+        1. **Trust settings** — writes ``settings.json`` with trust flags so
+           the workspace-trust TUI dialog never fires.  Two files are written:
+           - ``<target_dir>/settings.json`` (profile-level, matches
+             ``CLAUDE_CONFIG_DIR`` used in ``_claude_cmd``)
+           - ``/home/util/.claude/settings.json`` (fallback workspace-level)
 
-        The write is idempotent (overwrites on every start). This is safe
-        because we only control the trust flag — we do not stomp on other
-        settings that Claude Code writes elsewhere in the config dir.
+        2. **MCP registration** — runs ``claude mcp add`` (remove-then-add so
+           the entry is always current) to register the canvas MCP server in
+           ``<target_dir>/.claude.json`` under ``projects["/home/util"]``.
+           Claude Code reads MCP servers from ``.claude.json``, not from
+           ``settings.json``, so this is the only reliable registration path.
+           The ``--scope local`` default writes to the project key that matches
+           the CWD (``/home/util``) inside the container.
+
         Runs synchronously; call from an executor when inside async context.
         """
         if self.profile:
@@ -222,48 +226,79 @@ class CanvasClaudeCard(TerminalCard):
             target_dir = "/home/util/.claude"
         target_path = f"{target_dir}/settings.json"
 
+        # ── 1. Trust settings ──────────────────────────────────────────────
         settings_json = _json.dumps(_TRUST_SETTINGS)
         settings_b64 = _b64.b64encode(settings_json.encode()).decode()
 
-        # mkdir -p first, then base64-decode into the settings file.
+        workspace_dir = "/home/util/.claude"
+        workspace_path = f"{workspace_dir}/settings.json"
+        workspace_trust_b64 = _b64.b64encode(settings_json.encode()).decode()
+
         write_cmd = [
             "docker.exe",
             "exec",
             self._effective_container,
             "bash",
             "-c",
-            f"mkdir -p {target_dir} && echo {settings_b64} | base64 -d > {target_path}",
+            (
+                f"mkdir -p {target_dir} && echo {settings_b64} | base64 -d > {target_path} && "
+                f"mkdir -p {workspace_dir} && echo {workspace_trust_b64} | base64 -d > {workspace_path}"
+            ),
         ]
         result = _subprocess.run(write_cmd, timeout=10, capture_output=True)
         if result.returncode != 0:
-            # Non-fatal: log and continue. Worst case is the trust dialog still
-            # fires, which is no worse than the pre-fix baseline.
             logger.warning(
                 "CanvasClaudeCard: failed to seed trust settings at {}: {}",
                 target_path,
                 result.stderr.decode(errors="replace"),
             )
             return
-        logger.debug("CanvasClaudeCard: seeded trust settings at {}", target_path)
+        logger.debug("CanvasClaudeCard: seeded trust settings at {} and {}", target_path, workspace_path)
 
-    def _write_mcp_config(self) -> None:
-        """Write /tmp/mcp.json into the util container via non-interactive docker exec.
+        # ── 2. MCP registration via .claude.json patch ────────────────────
+        # Claude Code reads MCP servers from .claude.json under
+        # projects[cwd]["mcpServers"], not from settings.json.
+        # We patch that file directly (same result as `claude mcp add`) to avoid
+        # the variadic --env flag parsing quirk in the claude CLI.
+        # Format verified by running `claude mcp add` and inspecting the output.
+        mcp_cfg = self._mcp_config["mcpServers"]["canvas"]
+        mcp_entry = {
+            "type": "stdio",
+            "command": mcp_cfg["command"],
+            "args": mcp_cfg["args"],
+            "env": mcp_cfg.get("env", {}),
+        }
+        mcp_entry_json = _json.dumps(mcp_entry)
+        mcp_entry_b64 = _b64.b64encode(mcp_entry_json.encode()).decode()
 
-        Uses base64 so no shell-quoting issues regardless of JSON content.
-        Runs synchronously; call from an executor when inside async context.
-        """
-        write_cmd = [
+        claude_json_path = f"{target_dir}/.claude.json"
+        mcp_patch_script = (
+            f"import json, os, base64\n"
+            f"p = {claude_json_path!r}\n"
+            f"d = json.load(open(p)) if os.path.exists(p) else {{}}\n"
+            f"entry = json.loads(base64.b64decode({mcp_entry_b64!r}))\n"
+            f"d.setdefault('projects', {{}}).setdefault('/home/util', {{}})['hasTrustDialogAccepted'] = True\n"
+            f"d['projects']['/home/util'].setdefault('mcpServers', {{}})['canvas'] = entry\n"
+            f"json.dump(d, open(p, 'w'))\n"
+        )
+        mcp_patch_b64 = _b64.b64encode(mcp_patch_script.encode()).decode()
+
+        mcp_cmd = [
             "docker.exe",
             "exec",
             self._effective_container,
             "bash",
             "-c",
-            f"echo {self._mcp_b64} | base64 -d > /tmp/mcp.json",
+            f"echo {mcp_patch_b64} | base64 -d | python3",
         ]
-        result = _subprocess.run(write_cmd, timeout=10, capture_output=True)
+        result = _subprocess.run(mcp_cmd, timeout=10, capture_output=True)
         if result.returncode != 0:
-            raise RuntimeError(f"Failed to write MCP config: {result.stderr.decode(errors='replace')}")
-        logger.debug("CanvasClaudeCard: wrote /tmp/mcp.json to {}", self._effective_container)
+            logger.warning(
+                "CanvasClaudeCard: failed to register canvas MCP server in .claude.json: {}",
+                result.stderr.decode(errors="replace"),
+            )
+            return
+        logger.debug("CanvasClaudeCard: registered canvas MCP server in {}", claude_json_path)
 
     def _has_tmux_session(self) -> bool:
         """Check if the stable tmux session already exists in the container."""
@@ -342,7 +377,6 @@ class CanvasClaudeCard(TerminalCard):
         """
         loop = _asyncio.get_running_loop()
         await loop.run_in_executor(None, self._sync_mcp_server)
-        await loop.run_in_executor(None, self._write_mcp_config)
         await loop.run_in_executor(None, self._ensure_tmux_session)
 
         is_new_session = "tmux new-session" in self.cmd

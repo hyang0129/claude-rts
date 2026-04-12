@@ -40,28 +40,17 @@ API_BASE = _resolve_api_base()
 
 
 def read_message():
-    """Read one JSON-RPC message from stdin."""
-    length = None
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        line = line.decode("utf-8").strip()
-        if line.startswith("Content-Length:"):
-            length = int(line.split(":", 1)[1].strip())
-        elif line == "":
-            break
-    if length is None:
+    """Read one JSON-RPC message from stdin (NDJSON: one JSON object per line)."""
+    line = sys.stdin.buffer.readline()
+    if not line:
         return None
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode("utf-8"))
+    return json.loads(line.decode("utf-8"))
 
 
 def write_message(obj):
-    """Write one JSON-RPC message to stdout."""
-    body = json.dumps(obj).encode("utf-8")
-    header = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
-    sys.stdout.buffer.write(header + body)
+    """Write one JSON-RPC message to stdout (NDJSON: one JSON object per line)."""
+    body = json.dumps(obj).encode("utf-8") + b"\n"
+    sys.stdout.buffer.write(body)
     sys.stdout.buffer.flush()
 
 

@@ -360,10 +360,16 @@ class TestRealStartContainer:
 
 
 class TestRealStartNonExistent:
-    """S3: Start a non-existent container and verify error handling."""
+    """S3: A favorite that Docker has never seen shows 'not found' — no Start button."""
 
     def test_start_nonexistent_container_error(self, page, backend_port):
-        """Click Start on a bogus container name, verify error indicator appears."""
+        """A favorite unknown to Docker renders as 'not found', not as startable/offline.
+
+        Containers that have never been created in Docker cannot be started via
+        ``docker start``, so the UI renders them with a "not found" label instead
+        of a Start button.  The remove button must still be present so the user
+        can clean up the stale favorite.
+        """
         bogus_name = f"e2e-nonexistent-{uuid.uuid4().hex[:8]}"
 
         # Add bogus name to favorites
@@ -383,27 +389,26 @@ class TestRealStartNonExistent:
         ensure_vm_card_exists(page)
         refresh_vm_card(page)
 
-        # The bogus container won't be discovered, so it defaults to offline
-        # and should have a Start button
+        # The bogus container is not in Docker's list — UI renders it as "missing"
+        # with a "not found" label, NOT a Start button.
         start_btn = page.locator(f'[data-vm-start="{bogus_name}"]')
-        assert start_btn.count() > 0, "Start button should exist for unknown container"
+        assert start_btn.count() == 0, "Start button should NOT exist for a container Docker has never seen"
 
-        # Click Start
-        start_btn.click()
+        # Remove button must still be present so the user can clean up the stale entry
+        remove_btn = page.locator(f'[data-vm-remove="{bogus_name}"]')
+        assert remove_btn.count() > 0, "Remove button should exist for unknown favorite"
 
-        # Wait for the error response
-        page.wait_for_timeout(3000)
-
-        # The frontend sets btn.textContent = '\u2717' and btn.style.color = '#f38ba8' on failure
-        error_btn = page.locator(f'[data-vm-start="{bogus_name}"]')
-        assert error_btn.count() > 0, "Button should still exist after error"
-
-        btn_text = error_btn.text_content()
-        assert "\u2717" in btn_text, f"Button should show error mark after failed start, got: {btn_text}"
-
-        # The button title should contain the Docker error message
-        btn_title = error_btn.get_attribute("title") or ""
-        assert btn_title != "", "Button title should contain error message"
+        # The row should display "not found" to distinguish it from a stopped container
+        parent_text = page.evaluate(
+            """(name) => {
+                const btn = document.querySelector(`[data-vm-remove="${name}"]`);
+                return btn ? btn.closest('div').innerText : '';
+            }""",
+            bogus_name,
+        )
+        assert "not found" in parent_text.lower(), (
+            f"Row should contain 'not found' for undiscovered container, got: {parent_text}"
+        )
 
 
 # ── S4: Search shows real containers and adding one persists ─────────────────

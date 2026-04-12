@@ -17,3 +17,6 @@ wcwidth-*.dist-info/
 
 # QA probe logs
 qa/hongy-probe/canvases/*.json.bak
+
+# Timestamped server logs
+supreme-claudemander.*.log
