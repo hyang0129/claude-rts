@@ -93,13 +93,15 @@ async def start_container(app_config: AppConfig) -> bool:
     # Build mount args
     mount_args = ""
     for host_path, container_path in cfg["mounts"].items():
-        # Expand ~ in host path
-        expanded = host_path.replace("~", str(pathlib.Path.home()))
-        if pathlib.Path(expanded).exists():
-            mount_args += f' -v "{expanded}:{container_path}"'
-            logger.info("Mounting {} -> {}", expanded, container_path)
+        # Expand ~ in host path and normalize to forward slashes for Docker
+        expanded_path = pathlib.Path(host_path.replace("~", str(pathlib.Path.home())))
+        if expanded_path.exists():
+            # Use POSIX-style path (forward slashes) — Docker rejects mixed-slash paths
+            mount_src = expanded_path.as_posix()
+            mount_args += f' -v "{mount_src}:{container_path}"'
+            logger.info("Mounting {} -> {}", mount_src, container_path)
         else:
-            logger.warning("Mount source does not exist, skipping: {}", expanded)
+            logger.warning("Mount source does not exist, skipping: {}", expanded_path)
 
     # Remove old stopped container if exists
     await _run(f"{_DOCKER} rm -f {cfg['name']}")
@@ -232,19 +234,11 @@ async def discover_profiles(app_config: AppConfig) -> list[str]:
 
 
 async def ensure_util_container(app_config: AppConfig) -> bool:
-    """Ensure the utility container is running. Restart it if already running.
+    """Ensure the utility container is running. Start it if not already running.
 
-    Intentionally restarts the util container on every server start to guarantee
-    a clean slate. The util container is a local Docker container (not a remote
-    machine) — restarting it only affects processes running inside it:
-
-    - The canvas-claude tmux session (stale sessions from a previous run are
-      destroyed, preventing blind reattachment to a dead claude process)
-    - Terminal card PTY sessions (``docker exec -it ... bash`` processes), which
-      are re-spawned automatically when the user interacts with the card
-
-    Nothing outside the container is affected: remote machines, other containers,
-    and the Windows host are untouched.
+    If the container is already running, this is a no-op — active sessions,
+    processes, and container state are preserved. tmux session cleanup is
+    handled by CanvasClaudeCard._ensure_tmux_session() on demand.
 
     Called during server startup if auto_start is enabled.
     """
@@ -254,7 +248,7 @@ async def ensure_util_container(app_config: AppConfig) -> bool:
         return False
 
     if await is_util_running(app_config):
-        logger.info("Utility container '{}' already running — restarting for clean slate", cfg["name"])
-        await stop_container(app_config)
+        logger.info("Utility container '{}' already running", cfg["name"])
+        return True
 
     return await start_container(app_config)

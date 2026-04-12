@@ -81,10 +81,10 @@ CLAUDE_RTS_TEST_MODE=1 python -m claude_rts   # enables puppeting API at /api/te
 | `test_dev_config.py` | 8 | Dev-config preset loading and setup |
 | `test_sessions.py` | 30 | ScrollbackBuffer, SessionManager, test puppeting API |
 | `test_terminal_card.py` | 11 | TerminalCard lifecycle, CardRegistry, server integration |
-| `test_claude_api.py` | 30 | Claude terminal control API (CRUD, send/read, strip_ansi, /ws/control, full lifecycle integration) |
+| `test_claude_api.py` | 32 | Claude terminal control API (CRUD, send/read, strip_ansi, /ws/control, full lifecycle integration, ${priority_credential} interpolation) |
 | `test_event_bus.py` | 14 | EventBus core (subscribe, emit, unsubscribe, wildcard, async, errors, clear) + integration (ServiceCard bus emit, CardRegistry events) |
 | `test_vm_manager.py` | 18 | VM Manager API (discover containers, favorites CRUD, start/stop container, per-container actions, route registration) |
-| `test_mcp_server.py` | 22 | MCP server tool functions (terminal CRUD + VM discover/favorites/actions) and JSON-RPC dispatch |
+| `test_mcp_server.py` | 42 | MCP server tool functions (terminal CRUD + VM discover/favorites/actions/start/stop/append/get) and JSON-RPC dispatch |
 | `e2e/test_smoke.py` | 7 | Playwright Electron smoke tests — launch, spawn, drag, resize, widgets, pan/zoom, save/reload |
 
 Tests use `MockPty` to avoid needing Docker. E2E tests require Playwright and Electron (`pip install -e ".[e2e]" && python -m playwright install chromium`).
@@ -152,6 +152,30 @@ Each favorite container has an `actions` array. Each action object:
 ```
 
 When `import_keys` contains `"priority_credential"`, occurrences of `${priority_credential}` in `shell_prefix` are replaced with the current priority profile name from config.
+
+`POST /api/claude/terminal/create` performs the same `${priority_credential}` substitution server-side on its `cmd` query parameter, so Canvas Claude (via the `open_terminal` MCP tool) can pass the placeholder through unchanged. If no `priority_profile` is configured, the placeholder is left as-is and a warning is logged.
+
+## Canvas Claude MCP Tools
+
+The Canvas Claude card (`claude_rts/mcp_server.py`) exposes a JSON-RPC stdio MCP server so Claude Code, running inside the card, can drive the canvas programmatically. Each tool is a thin wrapper around a REST endpoint.
+
+| Tool | Wraps | Purpose |
+|---|---|---|
+| `open_terminal` | `POST /api/claude/terminal/create` | Spawn a new terminal card (supports `x, y, w, h, container, hub`). Server interpolates `${priority_credential}` in `cmd`. |
+| `read_terminal` | `GET /api/claude/terminal/{id}/read` | Read scrollback (default: strip ANSI) |
+| `write_terminal` | `POST /api/claude/terminal/{id}/send` | Write keystrokes to a terminal |
+| `list_terminals` | `GET /api/claude/terminals` | List active terminal cards |
+| `delete_terminal` | `DELETE /api/claude/terminal/{id}` | Close a terminal card |
+| `vm_discover_containers` | `GET /api/vms/discover` | List all Docker containers (running + stopped) |
+| `vm_get_favorites` | `GET /api/vms/favorites` | Read the VM Manager favorites list with all actions |
+| `vm_get_container_actions` | `GET /api/vms/favorites` (filtered) | Return one favorite's `actions` array; errors on unknown container |
+| `vm_set_container_actions` | `PUT /api/vms/favorites/{name}/actions` | Replace the full actions array for a favorite |
+| `vm_append_container_action` | `GET` + `PUT` (atomic) | Append one action without dropping existing entries |
+| `vm_add_favorite` | `GET` + `PUT /api/vms/favorites` | Add a container to favorites (default action = Terminal) |
+| `vm_start_container` | `POST /api/vms/{name}/start` | Start a stopped container |
+| `vm_stop_container` | `POST /api/vms/{name}/stop` | Stop a running container (optional `timeout`) |
+
+Removing favorites and creating/removing/pulling containers remain human-only operations (see "Limited container lifecycle" above).
 
 ## Adding a New Widget
 

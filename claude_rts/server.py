@@ -874,6 +874,24 @@ async def claude_terminal_create(request: web.Request) -> web.Response:
     if not cmd:
         raise web.HTTPBadRequest(text="Missing 'cmd' query parameter")
 
+    # Interpolate ${priority_credential} with the current priority profile from
+    # config. Mirrors the client-side substitution in static/index.html so
+    # Canvas Claude (MCP) can pass the placeholder through unchanged. If no
+    # priority profile is set, the placeholder is left as-is so callers can
+    # detect the misconfiguration downstream.
+    if "${priority_credential}" in cmd:
+        app_config: AppConfig = request.app["app_config"]
+        cfg = read_config(app_config)
+        priority_profile = cfg.get("priority_profile")
+        if priority_profile:
+            cmd = cmd.replace("${priority_credential}", str(priority_profile))
+            logger.info(
+                "claude_terminal_create: interpolated ${{priority_credential}} -> {!r}",
+                priority_profile,
+            )
+        else:
+            logger.warning("claude_terminal_create: cmd contains ${{priority_credential}} but no priority_profile set")
+
     try:
         cols = int(request.query.get("cols", 80))
         rows = int(request.query.get("rows", 24))

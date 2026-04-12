@@ -162,6 +162,69 @@ def tool_vm_set_container_actions(args):
     return f"Actions updated for {container}: {json.dumps(result)}"
 
 
+def tool_vm_get_container_actions(args):
+    """Return just one favorite's actions array; error if not found."""
+    container = args.get("container", "") or args.get("name", "")
+    if not container:
+        raise ValueError("container is required")
+    favorites = http_request("GET", "/api/vms/favorites")
+    for fav in favorites:
+        if fav.get("name") == container:
+            return json.dumps(fav.get("actions", []), indent=2)
+    raise ValueError(f"Favorite not found: {container}")
+
+
+def tool_vm_append_container_action(args):
+    """Atomically append one action to a favorite's actions array."""
+    container = args.get("container", "") or args.get("name", "")
+    if not container:
+        raise ValueError("container is required")
+    action = args.get("action")
+    if not isinstance(action, dict):
+        raise ValueError("action (object) is required")
+    favorites = http_request("GET", "/api/vms/favorites")
+    target = None
+    for fav in favorites:
+        if fav.get("name") == container:
+            target = fav
+            break
+    if target is None:
+        raise ValueError(f"Favorite not found: {container}")
+    existing = list(target.get("actions", []))
+    existing.append(action)
+    safe_name = urllib.parse.quote(container, safe="")
+    result = http_request(
+        "PUT",
+        f"/api/vms/favorites/{safe_name}/actions",
+        body=json.dumps(existing),
+    )
+    return f"Appended action to {container}: {json.dumps(result)}"
+
+
+def tool_vm_start_container(args):
+    """Start a stopped Docker container via POST /api/vms/{name}/start."""
+    name = args.get("name", "") or args.get("container", "")
+    if not name:
+        raise ValueError("name is required")
+    safe_name = urllib.parse.quote(name, safe="")
+    result = http_request("POST", f"/api/vms/{safe_name}/start")
+    return f"Started {name}: {json.dumps(result)}"
+
+
+def tool_vm_stop_container(args):
+    """Stop a running Docker container via POST /api/vms/{name}/stop."""
+    name = args.get("name", "") or args.get("container", "")
+    if not name:
+        raise ValueError("name is required")
+    safe_name = urllib.parse.quote(name, safe="")
+    path = f"/api/vms/{safe_name}/stop"
+    timeout = args.get("timeout")
+    if timeout is not None:
+        path += f"?timeout={int(timeout)}"
+    result = http_request("POST", path)
+    return f"Stopped {name}: {json.dumps(result)}"
+
+
 def tool_vm_add_favorite(args):
     name = args.get("name", "")
     if not name:
@@ -187,6 +250,10 @@ TOOL_HANDLERS = {
     "vm_discover_containers": tool_vm_discover_containers,
     "vm_get_favorites": tool_vm_get_favorites,
     "vm_set_container_actions": tool_vm_set_container_actions,
+    "vm_get_container_actions": tool_vm_get_container_actions,
+    "vm_append_container_action": tool_vm_append_container_action,
+    "vm_start_container": tool_vm_start_container,
+    "vm_stop_container": tool_vm_stop_container,
     "vm_add_favorite": tool_vm_add_favorite,
 }
 
@@ -197,9 +264,26 @@ TOOL_SCHEMAS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "cmd": {"type": "string", "description": "Command to run in the terminal"},
+                "cmd": {
+                    "type": "string",
+                    "description": (
+                        "Command to run. When 'container' is also set, this command runs "
+                        "inside that Docker container (the server wraps it in docker exec "
+                        "automatically). Example: cmd='bash', container='supreme-claudemander-util' "
+                        "opens a bash shell inside that container. To run claude inside a "
+                        "container: cmd='claude --dangerously-skip-permissions', "
+                        "container='supreme-claudemander-util'."
+                    ),
+                },
                 "hub": {"type": "string", "description": "Hub name (optional)"},
-                "container": {"type": "string", "description": "Docker container name (optional)"},
+                "container": {
+                    "type": "string",
+                    "description": (
+                        "Exact Docker container name to connect to. Use vm_discover_containers "
+                        "to find the correct name (e.g. 'supreme-claudemander-util'). "
+                        "When set, cmd runs inside this container."
+                    ),
+                },
                 "x": {"type": "number", "description": "X position on canvas (optional)"},
                 "y": {"type": "number", "description": "Y position on canvas (optional)"},
                 "w": {"type": "number", "description": "Width in pixels (optional)"},
@@ -293,6 +377,62 @@ TOOL_SCHEMAS = [
                 },
             },
             "required": ["container", "actions"],
+        },
+    },
+    {
+        "name": "vm_get_container_actions",
+        "description": "Get the actions array for a single favorite container. Returns JSON array of action objects. Errors if the container is not in favorites. Use this to inspect current actions before appending or replacing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "container": {"type": "string", "description": "Name of the favorite container"},
+            },
+            "required": ["container"],
+        },
+    },
+    {
+        "name": "vm_append_container_action",
+        "description": "Atomically append a single action to a favorite container's actions array (read-modify-write). Safer than vm_set_container_actions when you only want to add one entry without dropping existing actions. Action schema: {label: string, type: 'terminal', shell_prefix?: string, import_keys?: string[]}",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "container": {"type": "string", "description": "Name of the favorite container"},
+                "action": {
+                    "type": "object",
+                    "description": "Single action object to append",
+                    "properties": {
+                        "label": {"type": "string"},
+                        "type": {"type": "string", "enum": ["terminal"]},
+                        "shell_prefix": {"type": "string"},
+                        "import_keys": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["label", "type"],
+                },
+            },
+            "required": ["container", "action"],
+        },
+    },
+    {
+        "name": "vm_start_container",
+        "description": "Start a stopped Docker container by name (calls POST /api/vms/{name}/start). Returns the new state.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Name of the Docker container to start"},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "vm_stop_container",
+        "description": "Stop a running Docker container by name (calls POST /api/vms/{name}/stop). Optional timeout (seconds) before forced kill.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Name of the Docker container to stop"},
+                "timeout": {"type": "integer", "description": "Optional seconds to wait before forced kill"},
+            },
+            "required": ["name"],
         },
     },
     {
