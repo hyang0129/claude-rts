@@ -8,32 +8,53 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-API_BASE = os.environ.get("SUPREME_CLAUDEMANDER_API", "http://host.docker.internal:3000")
+_DEFAULT_API_BASE = "http://host.docker.internal:3000"
+
+
+def _resolve_api_base(argv: list[str] | None = None) -> str:
+    """Resolve the API base URL with a three-tier precedence.
+
+    Order (highest precedence first):
+      1. ``--api-base <url>`` on argv (or ``--api-base=<url>``)
+      2. ``SUPREME_CLAUDEMANDER_API`` environment variable
+      3. Hardcoded default (``http://host.docker.internal:3000``)
+
+    Passing the URL via argv lets the parent process (Claude Code) omit the
+    ``env`` field entirely so the MCP subprocess inherits a full environment
+    (PATH, HOME, etc). The env-var path is retained for backward compatibility
+    with any caller that still writes only ``env``.
+    """
+    args = sys.argv[1:] if argv is None else argv
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--api-base" and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith("--api-base="):
+            return a.split("=", 1)[1]
+        i += 1
+    return os.environ.get("SUPREME_CLAUDEMANDER_API", _DEFAULT_API_BASE)
+
+
+API_BASE = _resolve_api_base()
 
 
 def read_message():
-    """Read one JSON-RPC message from stdin."""
-    length = None
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        line = line.decode("utf-8").strip()
-        if line.startswith("Content-Length:"):
-            length = int(line.split(":", 1)[1].strip())
-        elif line == "":
-            break
-    if length is None:
+    """Read one JSON-RPC message from stdin (NDJSON: one JSON object per line)."""
+    line = sys.stdin.buffer.readline()
+    if not line:
         return None
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode("utf-8"))
+    try:
+        return json.loads(line.decode("utf-8"))
+    except json.JSONDecodeError:
+        print(f"mcp_server: skipping malformed line: {line[:80]!r}", file=sys.stderr, flush=True)
+        return {}
 
 
 def write_message(obj):
-    """Write one JSON-RPC message to stdout."""
-    body = json.dumps(obj).encode("utf-8")
-    header = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
-    sys.stdout.buffer.write(header + body)
+    """Write one JSON-RPC message to stdout (NDJSON: one JSON object per line)."""
+    body = json.dumps(obj).encode("utf-8") + b"\n"
+    sys.stdout.buffer.write(body)
     sys.stdout.buffer.flush()
 
 

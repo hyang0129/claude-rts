@@ -58,7 +58,7 @@ def app_factory(tmp_path, monkeypatch):
 async def test_canvas_claude_create(aiohttp_client, app_factory):
     """POST /api/canvas-claude/create returns descriptor with session_id and type."""
     client = await aiohttp_client(app_factory())
-    resp = await client.post("/api/canvas-claude/create?container=test-container")
+    resp = await client.post("/api/canvas-claude/create?container=test-container&profile=test-profile")
     assert resp.status == 200
     data = await resp.json()
     assert "session_id" in data
@@ -77,7 +77,7 @@ async def test_canvas_claude_create_with_profile(aiohttp_client, app_factory):
 async def test_canvas_claude_create_bad_layout(aiohttp_client, app_factory):
     """Non-integer layout params return 400."""
     client = await aiohttp_client(app_factory())
-    resp = await client.post("/api/canvas-claude/create?container=test-container&x=notanint")
+    resp = await client.post("/api/canvas-claude/create?container=test-container&profile=test-profile&x=notanint")
     assert resp.status == 400
 
 
@@ -99,7 +99,7 @@ async def test_canvas_claude_new_session(aiohttp_client, app_factory):
     """POST /api/canvas-claude/{id}/new-session returns new session_id."""
     client = await aiohttp_client(app_factory())
     # Create a card first
-    resp = await client.post("/api/canvas-claude/create?container=test-container")
+    resp = await client.post("/api/canvas-claude/create?container=test-container&profile=test-profile")
     assert resp.status == 200
     data = await resp.json()
     old_sid = data["session_id"]
@@ -117,7 +117,7 @@ async def test_canvas_claude_new_session(aiohttp_client, app_factory):
 async def test_canvas_claude_clear(aiohttp_client, app_factory):
     """POST /api/canvas-claude/{id}/clear returns ok."""
     client = await aiohttp_client(app_factory())
-    resp = await client.post("/api/canvas-claude/create?container=test-container")
+    resp = await client.post("/api/canvas-claude/create?container=test-container&profile=test-profile")
     assert resp.status == 200
     sid = (await resp.json())["session_id"]
 
@@ -125,3 +125,34 @@ async def test_canvas_claude_clear(aiohttp_client, app_factory):
     assert resp.status == 200
     result = await resp.json()
     assert result["status"] == "ok"
+
+
+async def test_canvas_claude_create_no_profile_no_priority_returns_400(aiohttp_client, app_factory):
+    """POST /api/canvas-claude/create without profile and no priority_profile in config returns 400."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/canvas-claude/create?container=test-container")
+    assert resp.status == 400
+    text = await resp.text()
+    assert "profile is required" in text
+
+
+async def test_canvas_claude_create_falls_back_to_priority_profile(aiohttp_client, tmp_path, monkeypatch):
+    """POST /api/canvas-claude/create without profile falls back to priority_profile from config."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", _mock_subprocess_run)
+
+    from claude_rts import config as cfg_module
+    from claude_rts.server import create_app
+
+    app_config = cfg_module.load(tmp_path / ".sc")
+    # Seed priority_profile into config before creating the app
+    cfg_module.write_config(app_config, {"priority_profile": "test-profile"})
+    app = create_app(app_config, test_mode=True)
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post("/api/canvas-claude/create?container=test-container")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data.get("profile") == "test-profile"

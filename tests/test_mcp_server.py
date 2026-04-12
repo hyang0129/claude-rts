@@ -9,6 +9,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from claude_rts.mcp_server import (
+    _DEFAULT_API_BASE,
+    _resolve_api_base,
     handle_request,
     tool_delete_terminal,
     tool_list_terminals,
@@ -20,6 +22,45 @@ from claude_rts.mcp_server import (
     tool_vm_set_container_actions,
     tool_vm_add_favorite,
 )
+
+
+# ── API base resolution (issue #114) ───────────────────────────────────────
+
+
+def test_resolve_api_base_from_argv_space_separated():
+    """--api-base http://x takes precedence over env var."""
+    with patch.dict(os.environ, {"SUPREME_CLAUDEMANDER_API": "http://env-var:1"}):
+        result = _resolve_api_base(["--api-base", "http://argv:2"])
+    assert result == "http://argv:2"
+
+
+def test_resolve_api_base_from_argv_equals_form():
+    """--api-base=http://x is recognised."""
+    with patch.dict(os.environ, {"SUPREME_CLAUDEMANDER_API": "http://env-var:1"}, clear=False):
+        result = _resolve_api_base(["--api-base=http://argv:3"])
+    assert result == "http://argv:3"
+
+
+def test_resolve_api_base_falls_back_to_env():
+    """With no argv flag, uses SUPREME_CLAUDEMANDER_API env var."""
+    with patch.dict(os.environ, {"SUPREME_CLAUDEMANDER_API": "http://env-only:4"}, clear=False):
+        result = _resolve_api_base([])
+    assert result == "http://env-only:4"
+
+
+def test_resolve_api_base_falls_back_to_default():
+    """With no argv and no env var, uses the hardcoded default."""
+    with patch.dict(os.environ, {}, clear=True):
+        result = _resolve_api_base([])
+    assert result == _DEFAULT_API_BASE
+    assert result == "http://host.docker.internal:3000"
+
+
+def test_resolve_api_base_ignores_unrelated_argv():
+    """Unknown flags don't confuse the parser."""
+    with patch.dict(os.environ, {}, clear=True):
+        result = _resolve_api_base(["--foo", "bar", "--api-base", "http://ok:9", "--baz"])
+    assert result == "http://ok:9"
 
 
 def make_mock_response(data, status=200):

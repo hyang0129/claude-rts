@@ -1,10 +1,18 @@
 """Tests for CanvasClaudeCard lifecycle and descriptor."""
 
+import base64
+import json
 import time
 
 import pytest
 
-from claude_rts.cards.canvas_claude_card import CanvasClaudeCard, TMUX_SESSION_NAME
+from claude_rts.cards.canvas_claude_card import (
+    CONTAINER_MCP_SERVER,
+    CONTAINER_PYTHON3,
+    CanvasClaudeCard,
+    TMUX_SESSION_NAME,
+    _build_mcp_config,
+)
 from claude_rts.sessions import SessionManager
 
 
@@ -133,8 +141,9 @@ async def test_canvas_claude_card_cmd_includes_tmux(monkeypatch):
     card = CanvasClaudeCard(session_manager=mgr, container="my-container")
     assert "tmux new-session" in card.cmd
     assert TMUX_SESSION_NAME in card.cmd
-    assert "mcp.json" in card.cmd
     assert "my-container" in card.cmd
+    # MCP config is written into settings.json via _seed_claude_settings(),
+    # not passed as a --mcp-config flag on the command line.
 
 
 async def test_canvas_claude_card_cmd_includes_profile(monkeypatch):
@@ -220,6 +229,191 @@ async def test_canvas_claude_card_ensure_tmux_new(monkeypatch):
     assert "tmux new-session" in card.cmd
     assert TMUX_SESSION_NAME in card.cmd
     assert "claude" in card.cmd
+
+
+# ── MCP config and trust-seeding tests (issue #114) ────────────────────────
+
+
+def test_build_mcp_config_uses_absolute_python3():
+    """_build_mcp_config uses absolute python3 path so env stripping can't break spawn."""
+    cfg = _build_mcp_config("http://host.docker.internal:3000")
+    server = cfg["mcpServers"]["canvas"]
+    assert server["command"] == CONTAINER_PYTHON3
+    assert server["command"] == "/usr/local/bin/python3"
+
+
+def test_build_mcp_config_passes_api_base_via_argv():
+    """_build_mcp_config passes --api-base <url> in args (not only in env)."""
+    cfg = _build_mcp_config("http://example.test:4000")
+    args = cfg["mcpServers"]["canvas"]["args"]
+    assert CONTAINER_MCP_SERVER in args
+    assert "--api-base" in args
+    idx = args.index("--api-base")
+    assert args[idx + 1] == "http://example.test:4000"
+
+
+def test_build_mcp_config_env_contains_inherited_keys():
+    """_build_mcp_config env re-declares PATH/HOME/USER/LANG plus API env var.
+
+    This survives the failure mode where Claude Code replaces (rather than
+    merges) the parent environment when spawning the MCP subprocess.
+    """
+    cfg = _build_mcp_config("http://host.docker.internal:3000")
+    env = cfg["mcpServers"]["canvas"]["env"]
+    for key in ("PATH", "HOME", "USER", "LANG", "SUPREME_CLAUDEMANDER_API"):
+        assert key in env, f"env missing {key}: {env}"
+    assert "/usr/local/bin" in env["PATH"]
+    assert env["SUPREME_CLAUDEMANDER_API"] == "http://host.docker.internal:3000"
+
+
+def test_build_mcp_config_round_trip_through_base64():
+    """The base64-encoded config decodes back to the same dict."""
+    cfg = _build_mcp_config("http://host.docker.internal:3000")
+    encoded = base64.b64encode(json.dumps(cfg).encode()).decode()
+    decoded = json.loads(base64.b64decode(encoded).decode())
+    assert decoded == cfg
+
+
+async def test_canvas_claude_card_stores_mcp_sha256(monkeypatch):
+    """Card exposes _mcp_sha256 for post-mortem diagnostics."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    card = CanvasClaudeCard(session_manager=mgr, container="my-container")
+    assert isinstance(card._mcp_sha256, str)
+    assert len(card._mcp_sha256) == 64  # hex digest length
+    mgr.stop_all()
+
+
+async def test_canvas_claude_card_seed_trust_settings_profile(monkeypatch):
+    """_seed_claude_settings writes into /profiles/<profile> when profile is set."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    calls = []
+
+    def track_run(cmd_list, **kw):
+        calls.append(cmd_list)
+        return type("R", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", track_run)
+    mgr = SessionManager()
+    card = CanvasClaudeCard(
+        session_manager=mgr,
+        container="my-container",
+        profile="alice",
+    )
+    card._seed_claude_settings()
+    # _seed_claude_settings makes exactly 2 subprocess.run calls when both succeed:
+    # call[0] writes trust settings JSON; call[1] runs the MCP .claude.json patch via python3.
+    assert len(calls) == 2
+    # First call: trust settings write
+    cmd = calls[0]
+    assert cmd[0] == "docker.exe"
+    assert cmd[1] == "exec"
+    assert "my-container" in cmd
+    shell_script = cmd[-1]
+    assert "/profiles/alice" in shell_script
+    assert "settings.json" in shell_script
+    assert "base64 -d" in shell_script
+    # Second call: MCP .claude.json patch via python3
+    mcp_cmd = calls[1]
+    assert mcp_cmd[0] == "docker.exe"
+    assert mcp_cmd[1] == "exec"
+    assert "my-container" in mcp_cmd
+    assert "python3" in mcp_cmd[-1]
+    mgr.stop_all()
+
+
+async def test_canvas_claude_card_seed_trust_settings_no_profile(monkeypatch):
+    """_seed_claude_settings falls back to /home/util/.claude when no profile.
+
+    The util container runs as user ``util`` with home ``/home/util`` (see
+    Dockerfile.util), so that's the correct default config dir for claude.
+    """
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    calls = []
+
+    def track_run(cmd_list, **kw):
+        calls.append(cmd_list)
+        return type("R", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", track_run)
+    mgr = SessionManager()
+    card = CanvasClaudeCard(session_manager=mgr, container="my-container")
+    card._seed_claude_settings()
+    shell_script = calls[0][-1]
+    assert "/home/util/.claude" in shell_script
+    mgr.stop_all()
+
+
+async def test_canvas_claude_card_seed_trust_settings_payload_decodes(monkeypatch):
+    """The base64 payload in the seed command decodes to the expected JSON."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    captured = {}
+
+    def track_run(cmd_list, **kw):
+        # Keep only the FIRST call (trust settings write); the second call is the MCP patch.
+        captured.setdefault("cmd", cmd_list)
+        return type("R", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", track_run)
+    mgr = SessionManager()
+    card = CanvasClaudeCard(session_manager=mgr, container="my-container")
+    card._seed_claude_settings()
+    shell_script = captured["cmd"][-1]
+    # Extract the base64 blob (appears between "echo " and " | base64 -d")
+    b64_blob = shell_script.split("echo ", 1)[1].split(" |", 1)[0]
+    decoded = json.loads(base64.b64decode(b64_blob).decode())
+    assert decoded.get("hasTrustDialogAccepted") is True
+    mgr.stop_all()
+
+
+async def test_canvas_claude_card_start_seeds_trust_on_new_session(monkeypatch):
+    """start() calls _seed_claude_settings on the new-session path."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+
+    def run_no_tmux(cmd_list, **kw):
+        # tmux has-session → rc=1 (no session) so _ensure_tmux_session picks new
+        if "has-session" in cmd_list:
+            return type("R", (), {"returncode": 1, "stderr": b""})()
+        return type("R", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", run_no_tmux)
+
+    seed_calls = {"n": 0}
+    orig_seed = CanvasClaudeCard._seed_claude_settings
+
+    def counting_seed(self):
+        seed_calls["n"] += 1
+        return orig_seed(self)
+
+    monkeypatch.setattr(CanvasClaudeCard, "_seed_claude_settings", counting_seed)
+    mgr = SessionManager()
+    card = CanvasClaudeCard(session_manager=mgr, container="my-container")
+    await card.start()
+    assert seed_calls["n"] == 1
+    assert "tmux new-session" in card.cmd
+    await card.stop()
+    mgr.stop_all()
+
+
+async def test_canvas_claude_card_start_skips_seed_on_attach(monkeypatch):
+    """start() does NOT call _seed_claude_settings on the attach path."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    # _mock_subprocess_run returns rc=0 → tmux has-session succeeds → attach
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", _mock_subprocess_run)
+
+    seed_calls = {"n": 0}
+
+    def counting_seed(self):
+        seed_calls["n"] += 1
+
+    monkeypatch.setattr(CanvasClaudeCard, "_seed_claude_settings", counting_seed)
+    mgr = SessionManager()
+    card = CanvasClaudeCard(session_manager=mgr, container="my-container")
+    await card.start()
+    assert seed_calls["n"] == 0
+    assert "tmux attach-session" in card.cmd
+    await card.stop()
+    mgr.stop_all()
 
 
 async def test_canvas_claude_card_new_session_kills_tmux(monkeypatch):

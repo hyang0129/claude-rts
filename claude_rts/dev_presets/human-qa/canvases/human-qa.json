@@ -1,0 +1,37 @@
+{
+  "name": "human-qa",
+  "canvas_size": [3840, 2160],
+  "cards": [
+    {
+      "type": "terminal",
+      "hub": "supreme-claudemander-util",
+      "x": 50,
+      "y": 50,
+      "w": 800,
+      "h": 500
+    },
+    {
+      "type": "widget",
+      "widgetType": "vm-manager",
+      "x": 900,
+      "y": 50,
+      "w": 520,
+      "h": 520
+    },
+    {
+      "type": "widget",
+      "widgetType": "profiles",
+      "x": 50,
+      "y": 620,
+      "w": 620,
+      "h": 380
+    },
+    {
+      "type": "canvas_claude",
+      "x": 900,
+      "y": 640,
+      "w": 960,
+      "h": 600
+    }
+  ]
+}

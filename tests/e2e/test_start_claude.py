@@ -98,7 +98,11 @@ class TestStartClaudeButton:
         """Clicking Start Claude sends 'env CLAUDE_CONFIG_DIR=/profiles/<name> claude'.
 
         The start-claude preset sets priority_profile to "test-profile".
-        We verify the command appears in the xterm.js buffer after clicking.
+        We verify the command appears in the server-side PTY scrollback after clicking.
+
+        We read from the server-side scrollback (not the xterm.js viewport) because
+        Claude's startup output can scroll the command echo out of the visible buffer
+        before the test reads it.
         """
         card, btn = _find_terminal_card(page)
         if btn is None:
@@ -107,16 +111,25 @@ class TestStartClaudeButton:
         # Wait for WebSocket session to be established
         page.wait_for_timeout(3000)
 
+        session_id = _get_card_session_id(page, card)
+        if not session_id:
+            pytest.skip("Could not obtain session ID for terminal card")
+
         btn.click()
 
-        # Wait for the command to be sent and echoed back
-        page.wait_for_timeout(3000)
+        # Give the PTY time to receive and echo the command
+        page.wait_for_timeout(1000)
 
-        # Check the xterm terminal buffer for the command
-        content = _get_xterm_content(page, card)
+        # Read server-side scrollback — this survives Claude's startup output
+        # scrolling the viewport, since the ring buffer holds 64KB of raw PTY data.
+        # The API returns {"output": "<raw text>", "size": N, "total_written": N}.
+        result = _read_session_scrollback(page, backend_port, session_id)
+        scrollback = result.get("output", "") if isinstance(result, dict) else ""
 
         expected_fragment = "CLAUDE_CONFIG_DIR=/profiles/test-profile"
-        assert expected_fragment in content, f"Expected '{expected_fragment}' in xterm buffer.\nGot: {content[:500]}"
+        assert expected_fragment in scrollback, (
+            f"Expected '{expected_fragment}' in server scrollback.\nGot: {scrollback[:500]}"
+        )
 
     def test_priority_profile_api_returns_test_profile(self, page, backend_port):
         """The /api/profiles/priority endpoint returns the preset's priority_profile."""

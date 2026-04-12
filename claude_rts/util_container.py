@@ -232,7 +232,19 @@ async def discover_profiles(app_config: AppConfig) -> list[str]:
 
 
 async def ensure_util_container(app_config: AppConfig) -> bool:
-    """Ensure the utility container is running. Start if needed.
+    """Ensure the utility container is running. Restart it if already running.
+
+    Intentionally restarts the util container on every server start to guarantee
+    a clean slate. The util container is a local Docker container (not a remote
+    machine) — restarting it only affects processes running inside it:
+
+    - The canvas-claude tmux session (stale sessions from a previous run are
+      destroyed, preventing blind reattachment to a dead claude process)
+    - Terminal card PTY sessions (``docker exec -it ... bash`` processes), which
+      are re-spawned automatically when the user interacts with the card
+
+    Nothing outside the container is affected: remote machines, other containers,
+    and the Windows host are untouched.
 
     Called during server startup if auto_start is enabled.
     """
@@ -240,4 +252,9 @@ async def ensure_util_container(app_config: AppConfig) -> bool:
     if not cfg["auto_start"]:
         logger.info("Utility container auto_start disabled, skipping")
         return False
+
+    if await is_util_running(app_config):
+        logger.info("Utility container '{}' already running — restarting for clean slate", cfg["name"])
+        await stop_container(app_config)
+
     return await start_container(app_config)
