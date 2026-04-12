@@ -44,7 +44,11 @@ def read_message():
     line = sys.stdin.buffer.readline()
     if not line:
         return None
-    return json.loads(line.decode("utf-8"))
+    try:
+        return json.loads(line.decode("utf-8"))
+    except json.JSONDecodeError:
+        print(f"mcp_server: skipping malformed line: {line[:80]!r}", file=sys.stderr, flush=True)
+        return {}
 
 
 def write_message(obj):

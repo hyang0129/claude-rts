@@ -232,7 +232,6 @@ class CanvasClaudeCard(TerminalCard):
 
         workspace_dir = "/home/util/.claude"
         workspace_path = f"{workspace_dir}/settings.json"
-        workspace_trust_b64 = _b64.b64encode(settings_json.encode()).decode()
 
         write_cmd = [
             "docker.exe",
@@ -242,7 +241,7 @@ class CanvasClaudeCard(TerminalCard):
             "-c",
             (
                 f"mkdir -p {target_dir} && echo {settings_b64} | base64 -d > {target_path} && "
-                f"mkdir -p {workspace_dir} && echo {workspace_trust_b64} | base64 -d > {workspace_path}"
+                f"mkdir -p {workspace_dir} && echo {settings_b64} | base64 -d > {workspace_path}"
             ),
         ]
         result = _subprocess.run(write_cmd, timeout=10, capture_output=True)
