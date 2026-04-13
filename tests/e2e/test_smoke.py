@@ -167,8 +167,9 @@ class TestCardResize:
         if box is None:
             pytest.skip("Resize handle not visible")
 
-        # hover() ensures the cursor is precisely over the handle before drag
-        handle.hover()
+        # Move directly to handle centre — bypasses Playwright's hit-test,
+        # which fails when another card's titlebar overlaps the handle corner.
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
         page.mouse.down()
         page.mouse.move(
             box["x"] + box["width"] / 2 + 100,
