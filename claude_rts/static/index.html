@@ -1224,9 +1224,13 @@ class Card {
 //   carry a `hub` field are treated as terminals (pre-type-field compatibility).
 //   Unknown type -> logs a warning and returns null so callers can skip the entry.
 //
-// - menuEntries(): returns an array of `{type, label, symbol, menuSection}` for
-//   every registered type that opted in to menu display (i.e. has a truthy
-//   `menuSection`). Preserves registration order.
+// - menuEntries(): returns an array of
+//   `{type, label, symbol, defaultSize, menuSection}` for every registered type
+//   that opted in to menu display (i.e. has a truthy `menuSection`). Preserves
+//   registration order. This helper is deliberately dormant until #124/#125
+//   migrates the context-menu build code onto the registry — do not delete it
+//   as unused; it is the sole reason `label`/`symbol`/`defaultSize`/`menuSection`
+//   are stored on registry entries in the first place.
 //
 // Adding a new card type requires only two things:
 //   1. define the class (with a `static fromSerialized(data)`)
@@ -1250,12 +1254,16 @@ const CARD_TYPE_REGISTRY = {
     } else {
       this._order.push(typeName);
     }
+    // Use nullish checks (not `||`) so intentional empty values are preserved.
+    // LoaderCard registers with `symbol: ''` on purpose — `||` would rewrite
+    // that to `'?'`. `label: ''` and an explicit `menuSection: ''` are
+    // similarly honoured if a caller passes them.
     this._types[typeName] = {
       cardClass: entry.cardClass,
-      label: entry.label || typeName,
-      symbol: entry.symbol || '?',
-      defaultSize: entry.defaultSize || { w: CARD_W, h: CARD_H },
-      menuSection: entry.menuSection || null,
+      label: entry.label != null ? entry.label : typeName,
+      symbol: entry.symbol != null ? entry.symbol : '?',
+      defaultSize: entry.defaultSize != null ? entry.defaultSize : { w: CARD_W, h: CARD_H },
+      menuSection: entry.menuSection != null ? entry.menuSection : null,
     };
   },
 
@@ -1269,14 +1277,19 @@ const CARD_TYPE_REGISTRY = {
 
   // Generic mount path. Construct the card, append it to the canvas, wire up
   // drag/resize, run onInit, and refresh minimap + hub count. Returns the
-  // mounted card instance, or null on unknown type.
+  // mounted card instance, or null on unknown type. If the caller omits `w`
+  // and/or `h`, the registry's `defaultSize` for this type is applied — this
+  // is why `defaultSize` is stored on entries.
   spawn(typeName, opts) {
     const entry = this._types[typeName];
     if (!entry) {
       console.warn('CARD_TYPE_REGISTRY.spawn: unknown type "%s"', typeName);
       return null;
     }
-    const card = new entry.cardClass(opts || {});
+    const mergedOpts = { ...(opts || {}) };
+    if (mergedOpts.w == null) mergedOpts.w = entry.defaultSize.w;
+    if (mergedOpts.h == null) mergedOpts.h = entry.defaultSize.h;
+    const card = new entry.cardClass(mergedOpts);
     return this._mount(card);
   },
 
@@ -1333,6 +1346,11 @@ const CARD_TYPE_REGISTRY = {
 
   // Returns menu-visible entries in registration order. LoaderCard and other
   // transient types register without a menuSection and are omitted.
+  //
+  // NOTE: intentionally unused by current call-sites — the context menu still
+  // builds its entries from hard-coded strings. This is the target consumer
+  // for the #124/#125 migration; keep the shape stable (type, label, symbol,
+  // defaultSize, menuSection).
   menuEntries() {
     const out = [];
     for (const typeName of this._order) {
@@ -1342,6 +1360,7 @@ const CARD_TYPE_REGISTRY = {
         type: typeName,
         label: entry.label,
         symbol: entry.symbol,
+        defaultSize: entry.defaultSize,
         menuSection: entry.menuSection,
       });
     }
@@ -1853,6 +1872,15 @@ class CanvasClaudeCard extends TerminalCard {
     return data;
   }
 
+  // WARNING: this synchronous constructor path does NOT check whether
+  // `data.session_id` is still alive on the server. `spawnCanvasClaudeCard()`
+  // (the current layout-reload path) performs an async `/api/sessions` probe
+  // before construction and drops stale IDs so zombie cards cannot appear.
+  // Until the #124/#125 migration moves layout reload onto the registry, this
+  // method is only safe to use in code paths that either (a) already know the
+  // session is live, or (b) perform their own staleness check before calling.
+  // When the migration lands, either port the probe into a post-deserialize
+  // async hook or keep `spawnCanvasClaudeCard()` as the layout-reload entry.
   static fromSerialized(data) {
     const card = new CanvasClaudeCard({
       hub: data.hub || 'canvas-claude',
@@ -2535,6 +2563,14 @@ function spawnWidget(widgetType, x, y, w, h) {
 }
 
 async function spawnCanvasClaudeCard(x, y, w, h, sessionId, profile, canvasName) {
+  // NOTE: this helper owns the async staleness-check contract for canvas-claude
+  // cards. `CanvasClaudeCard.fromSerialized()` intentionally does NOT replicate
+  // the `/api/sessions` probe below, so anything that constructs a card via the
+  // registry deserialize path must either perform its own check first or fall
+  // back to this function. When the #124/#125 migration moves layout reload
+  // onto `CARD_TYPE_REGISTRY.deserialize()`, this probe must be ported into a
+  // post-deserialize async hook or this helper must remain the reload entry.
+  //
   // If we have a saved sessionId (canvas reload / server restart), check if it is
   // still alive.  If the session is dead (server restarted, orphan reaped), drop the
   // stale ID so we fall through to the create-new path below.  This prevents zombie
