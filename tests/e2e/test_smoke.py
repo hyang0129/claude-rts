@@ -148,7 +148,17 @@ class TestCardResize:
 
         initial_w = float(initial_w_match.group(1))
 
-        # Find resize handle within this card
+        # Zoom into the card so the 16×16px resize handle is large enough to
+        # interact with reliably in headless CI (at fitAll zoom ≈ 0.25 the
+        # handle is only ~4 screen pixels, making pointer events miss it).
+        card_id = card.get_attribute("data-card-id")
+        page.evaluate(f"""
+            const c = window.cards && window.cards.find(c => String(c.id) === '{card_id}');
+            if (c && typeof zoomToCard === 'function') zoomToCard(c);
+        """)
+        page.wait_for_timeout(500)
+
+        # Find resize handle within this card (fresh bounding box after zoom)
         handle = card.locator(".resize-handle")
         if handle.count() == 0:
             pytest.skip("No resize handle found")
@@ -157,12 +167,17 @@ class TestCardResize:
         if box is None:
             pytest.skip("Resize handle not visible")
 
-        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        # hover() ensures the cursor is precisely over the handle before drag
+        handle.hover()
         page.mouse.down()
-        page.mouse.move(box["x"] + box["width"] / 2 + 80, box["y"] + box["height"] / 2 + 60, steps=5)
+        page.mouse.move(
+            box["x"] + box["width"] / 2 + 100,
+            box["y"] + box["height"] / 2 + 80,
+            steps=10,
+        )
         page.mouse.up()
 
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(1500)
 
         new_style = card.get_attribute("style") or ""
         new_w_match = re.search(r"width:\s*(-?\d+(?:\.\d+)?)px", new_style)
