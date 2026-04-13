@@ -153,7 +153,7 @@ class TestCardResize:
         # handle is only ~4 screen pixels, making pointer events miss it).
         card_id = card.get_attribute("data-card-id")
         page.evaluate(f"""
-            const c = window.cards && window.cards.find(c => String(c.id) === '{card_id}');
+            const c = typeof cards !== 'undefined' && cards.find(c => String(c.id) === '{card_id}');
             if (c && typeof zoomToCard === 'function') zoomToCard(c);
         """)
         page.wait_for_timeout(500)
