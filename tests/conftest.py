@@ -66,7 +66,7 @@ class MockSessionManager:
         self._session = session or MockSession()
         self.destroyed: list[str] = []
 
-    def create_session(self, cmd, hub=None, container=None, dimensions=(24, 80)):
+    def create_session(self, cmd, hub=None, container=None, dimensions=(24, 80), kind="user"):
         return self._session
 
     def destroy_session(self, session_id, kill_tmux=False):

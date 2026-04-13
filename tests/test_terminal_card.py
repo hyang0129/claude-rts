@@ -239,3 +239,63 @@ async def test_session_new_creates_terminal_card(aiohttp_client, tmp_path, monke
     # but we can verify the session exists
     mgr = app["session_manager"]
     assert mgr.get_session(sid) is not None
+
+
+# ── CardRegistry.by_type (#127) ────────────────────────────────────────────
+
+
+async def test_card_registry_by_type(monkeypatch):
+    """by_type('terminal') returns all TerminalCard instances in the registry."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    reg = CardRegistry()
+
+    c1 = TerminalCard(session_manager=mgr, cmd="cmd1")
+    c2 = TerminalCard(session_manager=mgr, cmd="cmd2")
+    await c1.start()
+    await c2.start()
+    reg.register(c1)
+    reg.register(c2)
+
+    terminals = reg.by_type("terminal")
+    assert len(terminals) == 2
+    assert set(t.id for t in terminals) == {c1.id, c2.id}
+
+    # Unknown type → empty list, never raises
+    assert reg.by_type("does-not-exist") == []
+
+    await c1.stop()
+    await c2.stop()
+    mgr.stop_all()
+
+
+# ── Session.kind / probe filtering (#127) ──────────────────────────────────
+
+
+async def test_session_kind_default_is_user(monkeypatch):
+    """Session.kind defaults to 'user' when create_session omits it."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+
+    session = mgr.create_session("echo hi")
+    assert session.kind == "user"
+
+    mgr.destroy_session(session.session_id)
+    mgr.stop_all()
+
+
+async def test_list_sessions_excludes_probe_sessions(monkeypatch):
+    """list_sessions() filters out sessions created with kind='probe'."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+
+    user = mgr.create_session("bash -l")
+    probe = mgr.create_session("claude --version", kind="probe")
+
+    assert probe.kind == "probe"
+
+    listed_ids = {s["session_id"] for s in mgr.list_sessions()}
+    assert user.session_id in listed_ids
+    assert probe.session_id not in listed_ids
+
+    mgr.stop_all()

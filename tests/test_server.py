@@ -54,8 +54,8 @@ async def test_hubs_endpoint_empty(client):
 
 
 async def test_websocket_404_for_unknown_hub(client):
-    with patch("claude_rts.server.discover_hubs", new_callable=AsyncMock, return_value=MOCK_HUBS):
-        resp = await client.get("/ws/nonexistent_hub")
+    # Legacy /ws/{hub} route was removed (#127); any /ws/<anything> now 404s at the router.
+    resp = await client.get("/ws/anything")
     assert resp.status == 404
 
 
@@ -92,4 +92,3 @@ async def test_app_has_all_routes(app):
     assert "/api/startup" in routes
     assert "/api/widgets/system-info" in routes
     assert "/ws/exec" in routes
-    assert "/ws/{hub}" in routes

@@ -91,6 +91,9 @@ class Session:
     read_task: Optional[asyncio.Task] = None
     alive: bool = True
     tmux_backed: bool = False
+    # "user"  — interactive TerminalCard session surfaced in /api/sessions
+    # "probe" — short-lived ServiceCard probe; hidden from /api/sessions
+    kind: str = "user"
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -120,6 +123,7 @@ class SessionManager:
         hub: str | None = None,
         container: str | None = None,
         dimensions: tuple[int, int] = (24, 80),
+        kind: str = "user",
     ) -> Session:
         """Spawn a PTY and register a new session."""
         session_id = "rts-" + uuid.uuid4().hex[:8]
@@ -151,6 +155,7 @@ class SessionManager:
             pty=pty,
             scrollback=ScrollbackBuffer(self.scrollback_size),
             tmux_backed=use_tmux,
+            kind=kind,
         )
         session.read_task = asyncio.create_task(self._pty_read_loop(session))
         self._sessions[session_id] = session
@@ -232,7 +237,12 @@ class SessionManager:
             logger.warning("Failed to kill tmux session {} in {}", session.session_id, session.container)
 
     def list_sessions(self) -> list[dict]:
-        """Return metadata for all active sessions."""
+        """Return metadata for all active user sessions.
+
+        Probe sessions (``kind == "probe"``) are excluded — they are
+        short-lived ServiceCard internals and would clutter the user-facing
+        session list (see #127).
+        """
         now = time.monotonic()
         return [
             {
@@ -247,6 +257,7 @@ class SessionManager:
                 "idle_seconds": int(now - s.last_client_time),
             }
             for s in self._sessions.values()
+            if s.kind != "probe"
         ]
 
     async def _pty_read_loop(self, session: Session) -> None:

@@ -102,6 +102,7 @@ class ServiceCard(BaseCard):
                 cmd,
                 hub=None,
                 container=None,  # Probes are one-shot; bypass tmux wrapping
+                kind="probe",
             )
         except Exception:
             logger.exception("ServiceCard {}/{}: failed to create session", self.card_type, self.identity)

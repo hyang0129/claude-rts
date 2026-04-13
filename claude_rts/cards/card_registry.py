@@ -64,6 +64,16 @@ class CardRegistry:
         """Return all registered TerminalCards."""
         return [c for c in self._cards.values() if isinstance(c, TerminalCard)]
 
+    def by_type(self, card_type: str) -> list[BaseCard]:
+        """Return all cards whose ``card_type`` matches ``card_type``.
+
+        This is the type-string equivalent of ``list_terminals``/
+        ``list_canvas_claude`` and is the preferred way for generic code to
+        fetch a homogeneous subset of the registry without importing the
+        concrete subclass.
+        """
+        return [c for c in self._cards.values() if c.card_type == card_type]
+
     def get_canvas_claude(self, card_id: str) -> "CanvasClaudeCard | None":
         """Look up a CanvasClaudeCard by id."""
         from .canvas_claude_card import CanvasClaudeCard

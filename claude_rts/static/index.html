@@ -1687,12 +1687,15 @@ class CanvasClaudeCard extends TerminalCard {
 // ════════════════════════════════════════════
 // LoaderCard subclass
 // ════════════════════════════════════════════
-class LoaderCard {
+// LoaderCard is a transient boot card shown while the startup script runs.
+// It extends Card (#127) so it participates in the `instanceof Card` contract
+// and can round-trip through serialize()/fromSerialized(), but it still renders
+// its own minimal DOM (no terminal titlebar, no drag/resize handles) — it is
+// destroyed once startup finishes and is never saved to a canvas layout.
+class LoaderCard extends Card {
   constructor({ scriptName, x, y }) {
+    super({ hub: '__loader__', container: '', x, y, w: 360, h: 140, symbol: '', type: 'loader' });
     this.scriptName = scriptName;
-    this.x = x;
-    this.y = y;
-    this.el = null;
     this.statusEl = null;
     this.error = false;
   }
@@ -1702,8 +1705,8 @@ class LoaderCard {
     el.className = 'loader-card';
     el.style.left = this.x + 'px';
     el.style.top = this.y + 'px';
-    el.style.width = '360px';
-    el.style.height = '140px';
+    el.style.width = this.w + 'px';
+    el.style.height = this.h + 'px';
     el.style.zIndex = 999;
 
     const titlebar = document.createElement('div');
@@ -1737,6 +1740,23 @@ class LoaderCard {
     this.error = true;
     if (this.el) this.el.classList.add('error');
     this.setStatus(msg);
+  }
+
+  serialize() {
+    // Loader cards are transient and never written to a saved canvas, but a
+    // valid layout object is required so LoaderCard honours the Card contract.
+    return { type: 'loader', x: this.x, y: this.y, w: this.w, h: this.h, scriptName: this.scriptName };
+  }
+
+  static fromSerialized(data) {
+    const card = new LoaderCard({
+      scriptName: data.scriptName || '',
+      x: data.x || 0,
+      y: data.y || 0,
+    });
+    if (data.w) card.w = data.w;
+    if (data.h) card.h = data.h;
+    return card;
   }
 
   destroy() {
