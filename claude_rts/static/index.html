@@ -819,7 +819,17 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideContex
 //      because they are not single card types but *factories* for one type
 //      parameterised per row.
 // All click handlers dispatch through `CARD_TYPE_REGISTRY.spawn(type, opts)`.
+// Pre-fetch blueprints for context menu. Cached on each right-click open.
+async function _refreshBlueprintCache() {
+  try {
+    const resp = await fetch('/api/blueprints');
+    if (resp.ok) window._cachedBlueprints = await resp.json();
+  } catch { /* non-fatal */ }
+}
+
 function showContextMenu(sx, sy) {
+  // Refresh blueprint cache (non-blocking — uses cached for current render)
+  _refreshBlueprintCache();
   // Build dynamic contributors for each menuSection.
   const isWin = navigator.platform.startsWith('Win') || navigator.userAgent.includes('Windows');
   const hostShells = isWin ? [
@@ -897,6 +907,52 @@ function showContextMenu(sx, sy) {
           x: ctxMenuCanvasPos.x,
           y: ctxMenuCanvasPos.y,
         });
+      },
+    });
+  }
+
+  // --- Blueprints submenu (fetched from server, max 10) ---
+  // Fetching is async but we build the menu synchronously — use a cached list
+  // that refreshes on each context menu open.
+  if (window._cachedBlueprints && window._cachedBlueprints.length > 0) {
+    html += '<div class="ctx-header">Blueprints</div>';
+    for (const name of window._cachedBlueprints.slice(0, 10)) {
+      html += `<div class="ctx-item" data-blueprint="${name}">
+        <span class="symbol-preview" style="color:#f9e2af">B</span>
+        ${name}
+      </div>`;
+    }
+    pendingHandlers.push({
+      selector: '.ctx-item[data-blueprint]',
+      async: true,
+      handler: async (item) => {
+        const name = item.dataset.blueprint;
+        try {
+          const resp = await fetch('/api/blueprints/spawn', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name,
+              x: ctxMenuCanvasPos.x,
+              y: ctxMenuCanvasPos.y,
+            }),
+          });
+          if (!resp.ok) {
+            const err = await resp.json().catch(() => ({ error: 'spawn failed' }));
+            console.error('[blueprint] spawn failed:', err);
+            return;
+          }
+          const desc = await resp.json();
+          // The BlueprintCard will appear via card_created control event
+          // but we also spawn it directly for immediate visual feedback
+          await CARD_TYPE_REGISTRY.spawn('blueprint', {
+            ...desc,
+            x: ctxMenuCanvasPos.x,
+            y: ctxMenuCanvasPos.y,
+          });
+        } catch (err) {
+          console.error('[blueprint] spawn error:', err);
+        }
       },
     });
   }
@@ -2644,6 +2700,93 @@ CARD_TYPE_REGISTRY.register('widget', {
   menuSection: 'widgets',
 });
 
+
+// ════════════════════════════════════════════
+// BlueprintCard — live execution log card
+// ════════════════════════════════════════════
+class BlueprintCard extends Card {
+  constructor(opts = {}) {
+    super({
+      ...opts,
+      type: 'blueprint',
+      symbol: 'B',
+      w: opts.w || 500,
+      h: opts.h || 340,
+    });
+    this.runId = opts.runId || opts.run_id || '';
+    this.blueprintName = opts.blueprintName || opts.blueprint_name || 'Blueprint';
+    this.cardId = opts.cardId || opts.card_id || '';
+    this._logLines = [];
+    this._status = 'running'; // running | completed | failed
+  }
+
+  createElement() {
+    super.createElement();
+    // Update title
+    const titleEl = this.el.querySelector('.card-title');
+    if (titleEl) titleEl.textContent = `Blueprint: ${this.blueprintName}`;
+    // Create log container in body
+    const body = this.el.querySelector('.card-body');
+    if (body) {
+      body.style.overflow = 'auto';
+      body.style.fontFamily = 'monospace';
+      body.style.fontSize = '11px';
+      body.style.padding = '8px';
+      body.style.lineHeight = '1.4';
+      body.style.whiteSpace = 'pre-wrap';
+      body.style.color = '#cdd6f4';
+      body.innerHTML = '<div class="blueprint-log"></div>';
+    }
+  }
+
+  appendLog(message, ts) {
+    this._logLines.push({ message, ts });
+    const body = this.el ? this.el.querySelector('.blueprint-log') : null;
+    if (body) {
+      const line = document.createElement('div');
+      line.textContent = `[${ts ? new Date(ts).toLocaleTimeString() : '??:??:??'}] ${message}`;
+      body.appendChild(line);
+      // Auto-scroll to bottom
+      const parent = body.parentElement;
+      if (parent) parent.scrollTop = parent.scrollHeight;
+    }
+  }
+
+  setStatus(status) {
+    this._status = status;
+    const titleEl = this.el ? this.el.querySelector('.card-title') : null;
+    if (titleEl) {
+      const icon = status === 'completed' ? ' [DONE]' : status === 'failed' ? ' [FAILED]' : '';
+      titleEl.textContent = `Blueprint: ${this.blueprintName}${icon}`;
+    }
+    // Color the header
+    const header = this.el ? this.el.querySelector('.card-header') : null;
+    if (header) {
+      if (status === 'completed') header.style.borderBottom = '2px solid #a6e3a1';
+      else if (status === 'failed') header.style.borderBottom = '2px solid #f38ba8';
+    }
+  }
+
+  serialize() {
+    // Blueprints are ephemeral — don't persist in canvas layouts
+    return null;
+  }
+
+  static fromSerialized(data) {
+    // Blueprints are ephemeral — they are not restored from layouts
+    return null;
+  }
+}
+
+CARD_TYPE_REGISTRY.register('blueprint', {
+  cardClass: BlueprintCard,
+  label: 'Blueprint',
+  symbol: 'B',
+  defaultSize: { w: 500, h: 340 },
+  menuSection: null, // Not in context menu — spawned via API
+});
+
+
 // ════════════════════════════════════════════
 // Terminal state management
 // ════════════════════════════════════════════
@@ -3348,6 +3491,14 @@ function connectControlWs() {
         handleControlCardCreated(msg);
       } else if (msg.type === 'card_deleted') {
         handleControlCardDeleted(msg);
+      } else if (msg.type === 'blueprint:log') {
+        handleBlueprintLog(msg);
+      } else if (msg.type === 'blueprint:completed') {
+        handleBlueprintCompleted(msg);
+      } else if (msg.type === 'blueprint:failed') {
+        handleBlueprintFailed(msg);
+      } else if (msg.type === 'blueprint:open_widget') {
+        handleBlueprintOpenWidget(msg);
       }
     } catch (err) {
       console.warn('[control-ws] bad message:', err);
@@ -3371,6 +3522,10 @@ async function handleControlCardCreated(msg) {
   // canvas_claude cards always self-create via _createAndConnect() — never spawn from
   // the control event, which would race with the in-flight fetch and create duplicate cards.
   if (desc.type === 'canvas_claude') return;
+
+  // Blueprint cards are spawned directly from context menu — skip the control event
+  // to avoid duplicates. Also skip container_starter (hidden cards).
+  if (desc.type === 'blueprint' || desc.type === 'container_starter') return;
 
   // Avoid duplicates — check if a card with this session_id already exists or was
   // recently destroyed locally (guards against queued broadcasts racing with teardown).
@@ -3425,8 +3580,9 @@ function handleControlCardDeleted(msg) {
   const cardId = msg.card_id;
   if (!cardId) return;
 
-  // Find the card by session_id (TerminalCard stores it as sessionId)
-  const idx = cards.findIndex(c => c.sessionId === cardId);
+  // Find the card by session_id (TerminalCard) or cardId (BlueprintCard)
+  let idx = cards.findIndex(c => c.sessionId === cardId);
+  if (idx === -1) idx = cards.findIndex(c => c.cardId === cardId);
   if (idx === -1) return;
 
   const card = cards[idx];
@@ -3435,6 +3591,61 @@ function handleControlCardDeleted(msg) {
   saveLayout();
   drawMinimap();
   updateHubCount();
+}
+
+// ════════════════════════════════════════════
+// Blueprint event handlers
+// ════════════════════════════════════════════
+function _findBlueprintCard(runId) {
+  return cards.find(c => c.type === 'blueprint' && c.runId === runId);
+}
+
+function handleBlueprintLog(msg) {
+  const card = _findBlueprintCard(msg.run_id);
+  if (card) card.appendLog(msg.message, msg.ts);
+}
+
+function handleBlueprintCompleted(msg) {
+  const card = _findBlueprintCard(msg.run_id);
+  if (card) {
+    card.appendLog('Blueprint completed successfully', new Date().toISOString());
+    card.setStatus('completed');
+  }
+}
+
+function handleBlueprintFailed(msg) {
+  const card = _findBlueprintCard(msg.run_id);
+  if (card) {
+    card.appendLog(`Blueprint FAILED: ${msg.error || 'unknown error'}`, new Date().toISOString());
+    card.setStatus('failed');
+  }
+}
+
+async function handleBlueprintOpenWidget(msg) {
+  // Frontend coordination for open_widget step
+  const widgetType = msg.widget_type;
+  const layout = msg.layout || {};
+  const runId = msg.run_id;
+
+  try {
+    const card = await CARD_TYPE_REGISTRY.spawn('widget', {
+      widgetType,
+      x: layout.x || 100,
+      y: layout.y || 100,
+      w: layout.w,
+      h: layout.h,
+    });
+    // Send ack back via the control WebSocket
+    if (controlWs && controlWs.readyState === WebSocket.OPEN) {
+      controlWs.send(JSON.stringify({
+        type: 'blueprint:widget_ack',
+        run_id: runId,
+        card_id: card ? card.id : null,
+      }));
+    }
+  } catch (err) {
+    console.error('[blueprint] open_widget failed:', err);
+  }
 }
 
 // ════════════════════════════════════════════
@@ -3518,6 +3729,9 @@ function handleControlCardDeleted(msg) {
 
   // Connect control WebSocket for server-pushed card events
   connectControlWs();
+
+  // Pre-fetch blueprints for context menu
+  _refreshBlueprintCache();
 
   if (hubs.length === 0) {
     document.getElementById('hub-count').textContent = 'No containers running';

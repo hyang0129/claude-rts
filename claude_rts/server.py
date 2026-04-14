@@ -18,9 +18,10 @@ from .discovery import discover_hubs  # noqa: E402
 from .startup import run_startup  # noqa: E402
 from .util_container import ensure_util_container, discover_profiles  # noqa: E402
 from .sessions import SessionManager  # noqa: E402
-from .cards import ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegistry, CanvasClaudeCard  # noqa: E402
+from .cards import ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegistry, CanvasClaudeCard, BlueprintCard  # noqa: E402
 from .event_bus import EventBus  # noqa: E402
 from .ansi_strip import strip_ansi  # noqa: E402
+from . import blueprint as blueprint_mod  # noqa: E402
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
@@ -1056,6 +1057,153 @@ async def canvas_claude_clear(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+# ── Blueprint API ──────────────────────────────────────────────────────────
+
+
+async def blueprints_list_handler(request: web.Request) -> web.Response:
+    """GET /api/blueprints — list all blueprints."""
+    app_config: AppConfig = request.app["app_config"]
+    names = blueprint_mod.list_blueprints(app_config)
+    return web.json_response(names)
+
+
+async def blueprint_get_handler(request: web.Request) -> web.Response:
+    """GET /api/blueprints/{name} — get a single blueprint."""
+    name = request.match_info["name"]
+    app_config: AppConfig = request.app["app_config"]
+    data = blueprint_mod.read_blueprint(app_config, name)
+    if data is None:
+        raise web.HTTPNotFound(text=f"Blueprint '{name}' not found")
+    return web.json_response(data)
+
+
+async def blueprint_create_handler(request: web.Request) -> web.Response:
+    """POST /api/blueprints — create a new blueprint."""
+    app_config: AppConfig = request.app["app_config"]
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="Invalid JSON")
+
+    name = body.get("name", "").strip()
+    if not name:
+        raise web.HTTPBadRequest(text="Blueprint must have a 'name' field")
+
+    # Check if already exists
+    existing = blueprint_mod.read_blueprint(app_config, name)
+    if existing is not None:
+        raise web.HTTPConflict(text=f"Blueprint '{name}' already exists")
+
+    ok = blueprint_mod.write_blueprint(app_config, name, body)
+    if not ok:
+        raise web.HTTPBadRequest(text=f"Invalid blueprint name '{name}'")
+    return web.json_response(body, status=201)
+
+
+async def blueprint_update_handler(request: web.Request) -> web.Response:
+    """PUT /api/blueprints/{name} — update an existing blueprint."""
+    name = request.match_info["name"]
+    app_config: AppConfig = request.app["app_config"]
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="Invalid JSON")
+
+    ok = blueprint_mod.write_blueprint(app_config, name, body)
+    if not ok:
+        raise web.HTTPBadRequest(text=f"Invalid blueprint name '{name}'")
+    return web.json_response(body)
+
+
+async def blueprint_delete_handler(request: web.Request) -> web.Response:
+    """DELETE /api/blueprints/{name} — delete a blueprint."""
+    name = request.match_info["name"]
+    app_config: AppConfig = request.app["app_config"]
+    ok = blueprint_mod.delete_blueprint(app_config, name)
+    if not ok:
+        raise web.HTTPNotFound(text=f"Blueprint '{name}' not found")
+    return web.json_response({"status": "ok", "name": name})
+
+
+async def blueprint_validate_handler(request: web.Request) -> web.Response:
+    """POST /api/blueprints/validate — pre-spawn validation."""
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="Invalid JSON")
+
+    blueprint_data = body.get("blueprint")
+    if not blueprint_data:
+        raise web.HTTPBadRequest(text="Request must include 'blueprint' field")
+
+    context = body.get("context", {})
+    result = blueprint_mod.validate_blueprint(blueprint_data, context)
+    return web.json_response(result)
+
+
+async def blueprint_spawn_handler(request: web.Request) -> web.Response:
+    """POST /api/blueprints/spawn — create a BlueprintCard and begin execution."""
+    app_config: AppConfig = request.app["app_config"]
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="Invalid JSON")
+
+    # Load blueprint by name or use inline definition
+    blueprint_data = body.get("blueprint")
+    bp_name = body.get("name", "").strip()
+
+    if not blueprint_data and bp_name:
+        blueprint_data = blueprint_mod.read_blueprint(app_config, bp_name)
+        if blueprint_data is None:
+            raise web.HTTPNotFound(text=f"Blueprint '{bp_name}' not found")
+    elif not blueprint_data:
+        raise web.HTTPBadRequest(text="Provide 'name' or 'blueprint' in request body")
+
+    context = body.get("context", {})
+
+    # Validate before spawning
+    validation = blueprint_mod.validate_blueprint(blueprint_data, context)
+    if not validation["valid"]:
+        return web.json_response(
+            {"error": "Validation failed", "errors": validation["errors"]},
+            status=400,
+        )
+
+    # Parse optional layout hints
+    layout = {}
+    for key in ("x", "y", "w", "h"):
+        val = body.get(key)
+        if val is not None:
+            try:
+                layout[key] = int(val)
+            except (ValueError, TypeError):
+                raise web.HTTPBadRequest(text=f"Layout param '{key}' must be an integer")
+
+    card_registry: CardRegistry = request.app["card_registry"]
+    event_bus: EventBus = request.app["event_bus"]
+
+    card = BlueprintCard(
+        blueprint=blueprint_data,
+        app=request.app,
+        context=context,
+    )
+    card.bus = event_bus
+    card.layout = layout
+    card_registry.register(card)
+
+    try:
+        await card.start()
+    except Exception:
+        logger.exception("blueprint_spawn: failed to start BlueprintCard")
+        card_registry.unregister(card.id)
+        return web.json_response({"error": "Failed to start blueprint"}, status=500)
+
+    desc = card.to_descriptor()
+    logger.info("blueprint_spawn: created BlueprintCard {} for '{}'", card.id, blueprint_data.get("name"))
+    return web.json_response(desc, status=201)
+
+
 # ── Control WebSocket — broadcast card lifecycle to frontends ─────────────
 
 
@@ -1114,6 +1262,19 @@ async def _broadcast_card_event(app: web.Application, event_type: str, payload: 
                 logger.debug("Failed to send control event to a client")
 
 
+async def _broadcast_blueprint_event(app: web.Application, event_type: str, payload: dict) -> None:
+    """Push blueprint events (log, completed, failed, open_widget) to /ws/control clients."""
+    message = {"type": event_type, **payload}
+    data = json.dumps(message)
+    clients: list = app.get("control_ws_clients", [])
+    for ws in list(clients):
+        if not ws.closed:
+            try:
+                await ws.send_str(data)
+            except Exception:
+                logger.debug("Failed to send blueprint event to a client")
+
+
 def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Application:
     app = web.Application()
     app["app_config"] = app_config
@@ -1161,6 +1322,15 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_post("/api/canvas-claude/{id}/new-session", canvas_claude_new_session)
     app.router.add_post("/api/canvas-claude/{id}/clear", canvas_claude_clear)
 
+    # Blueprint API
+    app.router.add_get("/api/blueprints", blueprints_list_handler)
+    app.router.add_post("/api/blueprints", blueprint_create_handler)
+    app.router.add_post("/api/blueprints/validate", blueprint_validate_handler)
+    app.router.add_post("/api/blueprints/spawn", blueprint_spawn_handler)
+    app.router.add_get("/api/blueprints/{name}", blueprint_get_handler)
+    app.router.add_put("/api/blueprints/{name}", blueprint_update_handler)
+    app.router.add_delete("/api/blueprints/{name}", blueprint_delete_handler)
+
     # Session routes (must be before /ws/{hub} catch-all)
     app.router.add_get("/api/sessions", sessions_list_handler)
     app.router.add_get("/ws/session/new", session_new_handler)
@@ -1202,6 +1372,15 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
 
         event_bus.subscribe("card:registered", _on_card_event)
         event_bus.subscribe("card:unregistered", _on_card_event)
+
+        # Wire blueprint events → /ws/control broadcast
+        async def _on_blueprint_event(event_type: str, payload: dict) -> None:
+            await _broadcast_blueprint_event(app, event_type, payload)
+
+        event_bus.subscribe("blueprint:log", _on_blueprint_event)
+        event_bus.subscribe("blueprint:completed", _on_blueprint_event)
+        event_bus.subscribe("blueprint:failed", _on_blueprint_event)
+        event_bus.subscribe("blueprint:open_widget", _on_blueprint_event)
 
         mgr.start_orphan_reaper()
 
