@@ -810,19 +810,17 @@ viewport.addEventListener('contextmenu', (e) => {
 document.addEventListener('click', () => hideContextMenu());
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideContextMenu(); });
 
+// Context menu is built from two sources:
+//   1. `CARD_TYPE_REGISTRY.menuEntries()` — drives the "static" card-type rows
+//      (currently only Canvas Claude Code; any future card type that registers
+//      with a menuSection will be picked up automatically).
+//   2. Data-driven contributors that are dynamic per-invocation: discovered
+//      hubs, host shells, widget types, probe profiles. These still live here
+//      because they are not single card types but *factories* for one type
+//      parameterised per row.
+// All click handlers dispatch through `CARD_TYPE_REGISTRY.spawn(type, opts)`.
 function showContextMenu(sx, sy) {
-  let html = '<div class="ctx-header">Spawn terminal</div>';
-  hubs.forEach((h, i) => {
-    const sym = hubSymbolMap[h.hub] || '?';
-    const detail = h.container ? ` <span style="color:#585b70;font-size:11px">(${h.container})</span>` : '';
-    html += `<div class="ctx-item" data-hub="${h.hub}">
-      <span class="symbol-preview">${sym}</span>
-      ${h.hub}${detail}
-    </div>`;
-  });
-
-  // Host terminal section
-  html += '<div class="ctx-header">Host terminal</div>';
+  // Build dynamic contributors for each menuSection.
   const isWin = navigator.platform.startsWith('Win') || navigator.userAgent.includes('Windows');
   const hostShells = isWin ? [
     { id: 'powershell', label: 'PowerShell', cmd: 'powershell.exe', container: 'localhost' },
@@ -833,14 +831,54 @@ function showContextMenu(sx, sy) {
     { id: 'bash', label: 'bash', cmd: '/bin/bash -l', container: 'localhost' },
     { id: 'util', label: 'Utility Container', cmd: 'docker exec -it supreme-claudemander-util bash', container: 'supreme-claudemander-util' },
   ];
+
+  let html = '';
+  const pendingHandlers = []; // {selector, handler}
+
+  // --- Spawn terminal (one row per discovered hub) ---
+  html += '<div class="ctx-header">Spawn terminal</div>';
+  hubs.forEach((h) => {
+    const sym = hubSymbolMap[h.hub] || '?';
+    const detail = h.container ? ` <span style="color:#585b70;font-size:11px">(${h.container})</span>` : '';
+    html += `<div class="ctx-item" data-hub="${h.hub}">
+      <span class="symbol-preview">${sym}</span>
+      ${h.hub}${detail}
+    </div>`;
+  });
+  pendingHandlers.push({
+    selector: '.ctx-item[data-hub]',
+    handler: (item) => {
+      const hub = hubs.find(h => h.hub === item.dataset.hub);
+      if (hub) CARD_TYPE_REGISTRY.spawn('terminal', { hub, x: ctxMenuCanvasPos.x, y: ctxMenuCanvasPos.y });
+    },
+  });
+
+  // --- Host terminal (one row per host shell) ---
+  html += '<div class="ctx-header">Host terminal</div>';
   for (const shell of hostShells) {
     html += `<div class="ctx-item" data-host-shell="${shell.id}" data-host-cmd="${shell.cmd}" data-host-container="${shell.container}">
       <span class="symbol-preview" style="color:#89b4fa">H</span>
       ${shell.label}
     </div>`;
   }
+  pendingHandlers.push({
+    selector: '.ctx-item[data-host-shell]',
+    handler: (item) => {
+      const shellId = item.dataset.hostShell;
+      const shellCmd = item.dataset.hostCmd;
+      const shellContainer = item.dataset.hostContainer || 'localhost';
+      if (!hubSymbolMap[shellId]) hubSymbolMap[shellId] = 'H';
+      CARD_TYPE_REGISTRY.spawn('terminal', {
+        hub: shellId,
+        container: shellContainer,
+        exec: shellCmd,
+        x: ctxMenuCanvasPos.x,
+        y: ctxMenuCanvasPos.y,
+      });
+    },
+  });
 
-  // Widget section
+  // --- Spawn widget (one row per widget type) ---
   const widgetTypes = Object.keys(WIDGET_REGISTRY);
   if (widgetTypes.length > 0) {
     html += '<div class="ctx-header">Spawn widget</div>';
@@ -851,9 +889,19 @@ function showContextMenu(sx, sy) {
         ${def.label || wt}
       </div>`;
     }
+    pendingHandlers.push({
+      selector: '.ctx-item[data-widget]',
+      handler: (item) => {
+        CARD_TYPE_REGISTRY.spawn('widget', {
+          widgetType: item.dataset.widget,
+          x: ctxMenuCanvasPos.x,
+          y: ctxMenuCanvasPos.y,
+        });
+      },
+    });
   }
 
-  // Claude usage probe section
+  // --- Claude usage probe (one row per configured profile) ---
   if (probeProfiles.length > 0) {
     html += '<div class="ctx-header">Claude usage probe</div>';
     for (const profile of probeProfiles) {
@@ -862,14 +910,69 @@ function showContextMenu(sx, sy) {
         ${profile}
       </div>`;
     }
+    pendingHandlers.push({
+      selector: '.ctx-item[data-probe-profile]',
+      async: true,
+      handler: async (item) => {
+        const profile = item.dataset.probeProfile;
+        try {
+          const resp = await fetch(`/api/probe/claude-usage?profile=${encodeURIComponent(profile)}`, { method: 'POST' });
+          if (!resp.ok) throw new Error(await resp.text());
+          const { session_id } = await resp.json();
+          const hubName = `claude-probe-${profile}`;
+          if (!hubSymbolMap[hubName]) hubSymbolMap[hubName] = 'P';
+          await CARD_TYPE_REGISTRY.spawn('terminal', {
+            hub: hubName,
+            container: 'supreme-claudemander-util',
+            exec: null,
+            sessionId: session_id,
+            x: ctxMenuCanvasPos.x,
+            y: ctxMenuCanvasPos.y,
+            w: 960,
+            h: 640,
+          });
+        } catch (err) {
+          console.error('Failed to start claude usage probe:', err);
+        }
+      },
+    });
   }
 
-  // Canvas Claude Code section
-  html += '<div class="ctx-header">Canvas Claude Code</div>';
-  html += `<div class="ctx-item" data-canvas-claude="true">
-    <span class="symbol-preview" style="color:#cba6f7">C</span>
-    Canvas Claude Code
-  </div>`;
+  // --- Registry-driven card-type rows ---
+  // Walk menuEntries() and render one header+row per section. Sections already
+  // handled above (terminals, widgets) are omitted here since they are
+  // contributed data-driven above. Any other section (e.g. canvas-claude) is
+  // emitted verbatim.
+  const entries = CARD_TYPE_REGISTRY.menuEntries();
+  const handledSections = new Set(['terminals', 'widgets']);
+  const seenSections = new Set();
+  for (const entry of entries) {
+    if (handledSections.has(entry.menuSection)) continue;
+    if (!seenSections.has(entry.menuSection)) {
+      // Title-case the section name for the header. E.g. "canvas-claude"
+      // becomes "Canvas Claude".
+      const headerText = entry.menuSection
+        .split(/[-_]/)
+        .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' ');
+      html += `<div class="ctx-header">${headerText}</div>`;
+      seenSections.add(entry.menuSection);
+    }
+    html += `<div class="ctx-item" data-card-type="${entry.type}">
+      <span class="symbol-preview" style="color:#cba6f7">${entry.symbol}</span>
+      ${entry.label}
+    </div>`;
+  }
+  pendingHandlers.push({
+    selector: '.ctx-item[data-card-type]',
+    async: true,
+    handler: async (item) => {
+      await CARD_TYPE_REGISTRY.spawn(item.dataset.cardType, {
+        x: ctxMenuCanvasPos.x,
+        y: ctxMenuCanvasPos.y,
+      });
+    },
+  });
 
   ctxMenu.innerHTML = html;
   ctxMenu.style.left = sx + 'px';
@@ -885,66 +988,17 @@ function showContextMenu(sx, sy) {
     ctxMenu.style.left = Math.max(10, window.innerWidth - menuRect.width - 10) + 'px';
   }
 
-  ctxMenu.querySelectorAll('.ctx-item[data-hub]').forEach(item => {
-    item.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const hubName = item.dataset.hub;
-      const hub = hubs.find(h => h.hub === hubName);
-      if (hub) spawnCard(hub, ctxMenuCanvasPos.x, ctxMenuCanvasPos.y);
-      hideContextMenu();
+  // Wire all pending click handlers in one pass.
+  for (const { selector, handler, async: isAsync } of pendingHandlers) {
+    ctxMenu.querySelectorAll(selector).forEach(item => {
+      item.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        hideContextMenu();
+        if (isAsync) await handler(item);
+        else handler(item);
+      });
     });
-  });
-
-  ctxMenu.querySelectorAll('.ctx-item[data-host-shell]').forEach(item => {
-    item.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const shellId = item.dataset.hostShell;
-      const shellCmd = item.dataset.hostCmd;
-      const shellContainer = item.dataset.hostContainer || 'localhost';
-      const hub = { hub: shellId, container: shellContainer, exec: shellCmd };
-      // Add to hubs if not already there so symbol assignment works
-      if (!hubSymbolMap[shellId]) {
-        hubSymbolMap[shellId] = 'H';
-      }
-      spawnCard(hub, ctxMenuCanvasPos.x, ctxMenuCanvasPos.y, CARD_W, CARD_H, null, shellCmd);
-      hideContextMenu();
-    });
-  });
-
-  ctxMenu.querySelectorAll('.ctx-item[data-widget]').forEach(item => {
-    item.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const widgetType = item.dataset.widget;
-      spawnWidget(widgetType, ctxMenuCanvasPos.x, ctxMenuCanvasPos.y);
-      hideContextMenu();
-    });
-  });
-
-  ctxMenu.querySelectorAll('.ctx-item[data-probe-profile]').forEach(item => {
-    item.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      hideContextMenu();
-      const profile = item.dataset.probeProfile;
-      try {
-        const resp = await fetch(`/api/probe/claude-usage?profile=${encodeURIComponent(profile)}`, { method: 'POST' });
-        if (!resp.ok) throw new Error(await resp.text());
-        const { session_id } = await resp.json();
-        const hub = { hub: `claude-probe-${profile}`, container: 'supreme-claudemander-util', exec: null };
-        if (!hubSymbolMap[hub.hub]) hubSymbolMap[hub.hub] = 'P';
-        spawnCard(hub, ctxMenuCanvasPos.x, ctxMenuCanvasPos.y, 960, 640, null, null, session_id);
-      } catch (err) {
-        console.error('Failed to start claude usage probe:', err);
-      }
-    });
-  });
-
-  ctxMenu.querySelectorAll('.ctx-item[data-canvas-claude]').forEach(item => {
-    item.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      hideContextMenu();
-      await spawnCanvasClaudeCard(ctxMenuCanvasPos.x, ctxMenuCanvasPos.y);
-    });
-  });
+  }
 }
 
 function hideContextMenu() {
@@ -1210,27 +1264,36 @@ class Card {
 // ════════════════════════════════════════════
 // Single dispatcher for card creation, deserialization, and menu generation.
 // Each card class self-registers immediately after its definition by calling
-// CARD_TYPE_REGISTRY.register(typeName, { cardClass, label, symbol, defaultSize, menuSection }).
+// CARD_TYPE_REGISTRY.register(typeName, { cardClass, label, symbol, defaultSize, menuSection, prepareOpts }).
 //
-// - spawn(typeName, opts): generic mount path — construct the class, append to the
-//   canvas, wire up drag/resize, run onInit, refresh minimap + hub count, and return
-//   the mounted card. Callers that need specialised pre-construction logic (hub
-//   symbol lookup, async session probing, etc.) continue to use the legacy
-//   spawnCard / spawnWidget / spawnCanvasClaudeCard helpers — the two coexist until
-//   call-site migration lands in #124/125.
+// - spawn(typeName, opts): generic mount path — optionally runs the registered
+//   `prepareOpts(opts)` hook (which may be async), constructs the class, appends
+//   to the canvas, wires up drag/resize, runs onInit, refreshes minimap + hub
+//   count, and returns the mounted card. This is the single entry point for all
+//   card creation — context menu, MCP control-ws, layout restore, and layoutGrid
+//   all route through here.
+//
+// - prepareOpts(opts) (optional, per-type): async hook that transforms / enriches
+//   the caller's opts before the card is constructed. Used for type-specific
+//   preparation such as hub-symbol lookup, canvas-claude session staleness
+//   probes, or priority-profile resolution. Returning `null` aborts the spawn.
+//   Returning an object replaces `opts` entirely; mutating and returning nothing
+//   (or `undefined`) keeps the mutated version.
 //
 // - deserialize(data): dispatches to `<CardClass>.fromSerialized(data)` using
 //   data.type as the key. Legacy layout entries that have no `type` field but do
 //   carry a `hub` field are treated as terminals (pre-type-field compatibility).
 //   Unknown type -> logs a warning and returns null so callers can skip the entry.
+//   NOTE: deserialize() does NOT run prepareOpts — it rebuilds the card from the
+//   already-validated serialized form. Callers that need the full async prep
+//   path (e.g. canvas-claude reload) should call `spawn()` with the layout entry
+//   as opts instead.
 //
 // - menuEntries(): returns an array of
 //   `{type, label, symbol, defaultSize, menuSection}` for every registered type
 //   that opted in to menu display (i.e. has a truthy `menuSection`). Preserves
-//   registration order. This helper is deliberately dormant until #124/#125
-//   migrates the context-menu build code onto the registry — do not delete it
-//   as unused; it is the sole reason `label`/`symbol`/`defaultSize`/`menuSection`
-//   are stored on registry entries in the first place.
+//   registration order. Consumed by `showContextMenu()` to drive the
+//   "Canvas Claude Code" section and any future menu-visible card types.
 //
 // Adding a new card type requires only two things:
 //   1. define the class (with a `static fromSerialized(data)`)
@@ -1264,6 +1327,7 @@ const CARD_TYPE_REGISTRY = {
       symbol: entry.symbol != null ? entry.symbol : '?',
       defaultSize: entry.defaultSize != null ? entry.defaultSize : { w: CARD_W, h: CARD_H },
       menuSection: entry.menuSection != null ? entry.menuSection : null,
+      prepareOpts: typeof entry.prepareOpts === 'function' ? entry.prepareOpts : null,
     };
   },
 
@@ -1275,21 +1339,36 @@ const CARD_TYPE_REGISTRY = {
     return Object.prototype.hasOwnProperty.call(this._types, typeName);
   },
 
-  // Generic mount path. Construct the card, append it to the canvas, wire up
-  // drag/resize, run onInit, and refresh minimap + hub count. Returns the
-  // mounted card instance, or null on unknown type. If the caller omits `w`
-  // and/or `h`, the registry's `defaultSize` for this type is applied — this
-  // is why `defaultSize` is stored on entries.
-  spawn(typeName, opts) {
+  // Generic mount path. Runs the per-type `prepareOpts` hook (if any),
+  // constructs the card, appends it to the canvas, wires up drag/resize, runs
+  // onInit, and refreshes minimap + hub count. Returns a Promise that resolves
+  // to the mounted card instance, or null on unknown type / aborted prep. If
+  // the caller omits `w` and/or `h`, the registry's `defaultSize` for this
+  // type is applied.
+  async spawn(typeName, opts) {
     const entry = this._types[typeName];
     if (!entry) {
       console.warn('CARD_TYPE_REGISTRY.spawn: unknown type "%s"', typeName);
       return null;
     }
-    const mergedOpts = { ...(opts || {}) };
+    let mergedOpts = { ...(opts || {}) };
+    if (entry.prepareOpts) {
+      try {
+        const result = await entry.prepareOpts(mergedOpts);
+        if (result === null) return null; // hook aborted
+        if (result && typeof result === 'object') mergedOpts = result;
+      } catch (err) {
+        console.warn('CARD_TYPE_REGISTRY.spawn: prepareOpts for "%s" threw: %o', typeName, err);
+        return null;
+      }
+    }
     if (mergedOpts.w == null) mergedOpts.w = entry.defaultSize.w;
     if (mergedOpts.h == null) mergedOpts.h = entry.defaultSize.h;
     const card = new entry.cardClass(mergedOpts);
+    // Apply savedControlGroups before _mount so its badge-update path fires.
+    if (Array.isArray(mergedOpts.controlGroups) && mergedOpts.controlGroups.length > 0) {
+      card.controlGroupNums = [...mergedOpts.controlGroups];
+    }
     return this._mount(card);
   },
 
@@ -1638,6 +1717,26 @@ CARD_TYPE_REGISTRY.register('terminal', {
   symbol: 'T',
   defaultSize: { w: CARD_W, h: CARD_H },
   menuSection: 'terminals',
+  // Resolve symbol from hubSymbolMap and normalise opts shape. Callers pass a
+  // flat `{hub, container, exec, sessionId, x, y, w, h, controlGroups}` and
+  // this hook turns it into the shape TerminalCard's constructor expects.
+  // Supports both real hubs (pre-registered in `hubs[]`) and synthetic hubs
+  // (host shells, probe-profile terminals) where the caller supplies `hub` as
+  // a string name + explicit `container`/`exec`.
+  prepareOpts(opts) {
+    // Back-compat: if caller passed a `hub` object (the pre-migration shape),
+    // flatten it into the opts record.
+    if (opts.hub && typeof opts.hub === 'object') {
+      const hubObj = opts.hub;
+      opts.hub = hubObj.hub;
+      if (opts.container == null) opts.container = hubObj.container;
+      if (opts.exec == null) opts.exec = hubObj.exec || null;
+    }
+    if (!opts.symbol) {
+      opts.symbol = (opts.hub && hubSymbolMap[opts.hub]) || '?';
+    }
+    return opts;
+  },
 });
 
 // ════════════════════════════════════════════
@@ -1872,15 +1971,16 @@ class CanvasClaudeCard extends TerminalCard {
     return data;
   }
 
-  // WARNING: this synchronous constructor path does NOT check whether
-  // `data.session_id` is still alive on the server. `spawnCanvasClaudeCard()`
-  // (the current layout-reload path) performs an async `/api/sessions` probe
-  // before construction and drops stale IDs so zombie cards cannot appear.
-  // Until the #124/#125 migration moves layout reload onto the registry, this
-  // method is only safe to use in code paths that either (a) already know the
-  // session is live, or (b) perform their own staleness check before calling.
-  // When the migration lands, either port the probe into a post-deserialize
-  // async hook or keep `spawnCanvasClaudeCard()` as the layout-reload entry.
+  // NOTE: this synchronous deserializer does NOT check whether
+  // `data.session_id` is still alive on the server — the session-staleness
+  // probe lives in the registered `prepareOpts` hook for `canvas_claude` (see
+  // the `CARD_TYPE_REGISTRY.register('canvas_claude', ...)` call below). All
+  // layout-restore / context-menu / MCP spawn paths flow through
+  // `CARD_TYPE_REGISTRY.spawn('canvas_claude', ...)` which awaits the hook
+  // before constructing the card. `fromSerialized` is called only by
+  // `CARD_TYPE_REGISTRY.deserialize()`, which currently has no consumers for
+  // canvas-claude — it is retained for symmetry with the other card types and
+  // for any future caller that wants a bare-instance path.
   static fromSerialized(data) {
     const card = new CanvasClaudeCard({
       hub: data.hub || 'canvas-claude',
@@ -1904,10 +2004,49 @@ class CanvasClaudeCard extends TerminalCard {
 
 CARD_TYPE_REGISTRY.register('canvas_claude', {
   cardClass: CanvasClaudeCard,
-  label: 'Canvas Claude',
+  label: 'Canvas Claude Code',
   symbol: 'C',
   defaultSize: { w: 960, h: 640 },
-  menuSection: 'terminals',
+  menuSection: 'canvas-claude',
+  // Async prep: (a) drop stale session IDs via `/api/sessions` probe so a
+  // restarted server doesn't leave a zombie card, (b) resolve priority profile
+  // from `/api/profiles/priority` when none was passed in, (c) fill defaults
+  // for hub / container / canvasName. This is the single owner of the
+  // staleness-check contract for canvas-claude cards.
+  async prepareOpts(opts) {
+    // Staleness check: if caller supplied a sessionId, confirm it is still
+    // alive on the server before reusing it.
+    if (opts.sessionId) {
+      try {
+        const sessions = await (await fetch('/api/sessions')).json();
+        const alive = sessions.some(s => s.session_id === opts.sessionId && s.alive);
+        if (!alive) {
+          console.log(`[canvas-claude] stale session ${opts.sessionId} — will create fresh`);
+          opts.sessionId = null;
+        }
+      } catch (_) {
+        // If the session list fetch fails, assume stale and recreate.
+        opts.sessionId = null;
+      }
+    }
+    // Resolve profile from priority credential when none provided.
+    if (!opts.sessionId && !opts.profile) {
+      try {
+        const pr = await fetch('/api/profiles/priority');
+        if (pr.ok) {
+          const pd = await pr.json();
+          if (pd.priority_profile && /^[a-zA-Z0-9._-]+$/.test(pd.priority_profile)) {
+            opts.profile = pd.priority_profile;
+          }
+        }
+      } catch (_) { /* non-fatal */ }
+    }
+    if (opts.hub == null) opts.hub = 'canvas-claude';
+    if (opts.container == null) opts.container = 'supreme-claudemander-util';
+    if (opts.canvasName == null) opts.canvasName = currentCanvasName || null;
+    if (opts.symbol == null) opts.symbol = 'C';
+    return opts;
+  },
 });
 
 // ════════════════════════════════════════════
@@ -2367,16 +2506,20 @@ const WIDGET_REGISTRY = {
               cmd = `${_docker} exec -it ${name} sh`;
             }
 
-            // Find or create a hub entry for spawnCard
-            const hub = { hub: name, container: name, exec: cmd };
-            if (typeof spawnCard === 'function') {
-              // Place near center of viewport
-              const vw = viewport.clientWidth;
-              const vh = viewport.clientHeight;
-              const cx = (-pan.x + vw / 2) / zoom;
-              const cy = (-pan.y + vh / 2) / zoom;
-              spawnCard(hub, cx - 480 + Math.random() * 60, cy - 320 + Math.random() * 60, 960, 640);
-            }
+            // Place near center of viewport
+            const vw = viewport.clientWidth;
+            const vh = viewport.clientHeight;
+            const cx = (-pan.x + vw / 2) / zoom;
+            const cy = (-pan.y + vh / 2) / zoom;
+            CARD_TYPE_REGISTRY.spawn('terminal', {
+              hub: name,
+              container: name,
+              exec: cmd,
+              x: cx - 480 + Math.random() * 60,
+              y: cy - 320 + Math.random() * 60,
+              w: 960,
+              h: 640,
+            });
           });
         });
 
@@ -2519,117 +2662,10 @@ setInterval(() => {
   }
 }, 1000);
 
-// ════════════════════════════════════════════
-// Spawn a terminal card
-// ════════════════════════════════════════════
-function spawnCard(hub, x, y, w, h, savedControlGroups, execCmd, sessionId) {
-  const symbol = hubSymbolMap[hub.hub] || '?';
-  const card = new TerminalCard({ hub: hub.hub, container: hub.container, x, y, w, h, symbol, exec: execCmd || hub.exec || null, sessionId: sessionId || null });
-  if (savedControlGroups && Array.isArray(savedControlGroups)) {
-    card.controlGroupNums = [...savedControlGroups];
-  }
-  card.createElement();
-  canvas.appendChild(card.el);
-  cards.push(card);
-  card.setupDrag();
-  card.setupResize();
-  card.onInit();
-  if (card.controlGroupNums.length > 0) {
-    updateControlGroupBadges(card);
-  }
-  drawMinimap();
-  updateHubCount();
-  return card;
-}
-
-function spawnWidget(widgetType, x, y, w, h) {
-  const card = new WidgetCard({
-    widgetType,
-    x,
-    y,
-    w: w || 360,
-    h: h || 280,
-    symbol: 'W',
-  });
-  card.createElement();
-  canvas.appendChild(card.el);
-  cards.push(card);
-  card.setupDrag();
-  card.setupResize();
-  card.onInit();
-  drawMinimap();
-  updateHubCount();
-  return card;
-}
-
-async function spawnCanvasClaudeCard(x, y, w, h, sessionId, profile, canvasName) {
-  // NOTE: this helper owns the async staleness-check contract for canvas-claude
-  // cards. `CanvasClaudeCard.fromSerialized()` intentionally does NOT replicate
-  // the `/api/sessions` probe below, so anything that constructs a card via the
-  // registry deserialize path must either perform its own check first or fall
-  // back to this function. When the #124/#125 migration moves layout reload
-  // onto `CARD_TYPE_REGISTRY.deserialize()`, this probe must be ported into a
-  // post-deserialize async hook or this helper must remain the reload entry.
-  //
-  // If we have a saved sessionId (canvas reload / server restart), check if it is
-  // still alive.  If the session is dead (server restarted, orphan reaped), drop the
-  // stale ID so we fall through to the create-new path below.  This prevents zombie
-  // canvas claude cards that appear connected but have no live PTY.
-  if (sessionId) {
-    try {
-      const sessions = await (await fetch('/api/sessions')).json();
-      const alive = sessions.some(s => s.session_id === sessionId && s.alive);
-      if (!alive) {
-        console.log(`[canvas-claude] stale session ${sessionId} — will create fresh`);
-        sessionId = null;
-      }
-    } catch (_) {
-      // If the session list fetch fails, assume stale and recreate.
-      sessionId = null;
-    }
-  }
-
-  // If no existing live session, show the retry overlay instead of auto-starting.
-  // This avoids launching Claude before the user has confirmed their profile and
-  // credentials are ready (first-time setup, container not yet running, etc.).
-  // _retryConnect() on the card handles the actual session creation when the user
-  // clicks Retry.  We still resolve the profile here so the overlay can display it.
-  if (!sessionId) {
-    if (!profile) {
-      try {
-        const pr = await fetch('/api/profiles/priority');
-        if (pr.ok) {
-          const pd = await pr.json();
-          if (pd.priority_profile && /^[a-zA-Z0-9._-]+$/.test(pd.priority_profile)) {
-            profile = pd.priority_profile;
-          }
-        }
-      } catch (_) { /* non-fatal */ }
-    }
-    // Leave sessionId null — card.onInit() will show the retry overlay.
-  }
-
-  const card = new CanvasClaudeCard({
-    hub: 'canvas-claude',
-    container: 'supreme-claudemander-util',
-    x, y,
-    w: w || 960,
-    h: h || 640,
-    symbol: 'C',
-    profile: profile || null,
-    canvasName: canvasName || currentCanvasName || null,
-    sessionId: sessionId,
-  });
-  card.createElement();
-  canvas.appendChild(card.el);
-  cards.push(card);
-  card.setupDrag();
-  card.setupResize();
-  card.onInit();
-  drawMinimap();
-  updateHubCount();
-  return card;
-}
+// Card creation now flows exclusively through `CARD_TYPE_REGISTRY.spawn(type, opts)`.
+// Type-specific prep (hub symbol lookup for terminals, canvas-claude session
+// staleness probe + priority-profile resolution) lives in per-type
+// `prepareOpts` hooks registered next to each card class definition.
 
 function destroyCard(id) {
   const idx = cards.findIndex(c => c.id === id);
@@ -2655,6 +2691,52 @@ function updateHubCount() {
   const parts = [`${hubs.length} hub(s)`, `${termCount} terminal(s)`];
   if (widgetCount > 0) parts.push(`${widgetCount} widget(s)`);
   document.getElementById('hub-count').textContent = parts.join(' | ');
+}
+
+// Dispatch a saved layout entry through CARD_TYPE_REGISTRY.spawn so the full
+// type-specific prep (symbol lookup, canvas-claude session probe, profile
+// resolution) runs uniformly. Used by switchCanvas and the boot loader.
+// Terminals resolve their hub from `hubs[]` when possible; if the hub is not
+// currently discovered the entry is skipped (matching legacy behaviour).
+// Entries without a `type` but with a `hub` field are treated as terminals
+// (pre-type-field compatibility).
+async function spawnFromSerialized(s) {
+  let typeName = s.type;
+  if (!typeName && s.hub) typeName = 'terminal';
+  if (!typeName) {
+    console.warn('spawnFromSerialized: entry has no type and no hub, skipping', s);
+    return null;
+  }
+  if (typeName === 'terminal') {
+    const hub = hubs.find(h => h.hub === s.hub);
+    if (!hub) return null; // undiscovered hub — skip, like the old ladder did
+    return CARD_TYPE_REGISTRY.spawn('terminal', {
+      hub,
+      x: s.x, y: s.y, w: s.w, h: s.h,
+      exec: s.exec,
+      sessionId: s.session_id,
+      controlGroups: s.controlGroups,
+    });
+  }
+  if (typeName === 'widget') {
+    if (!s.widgetType) return null;
+    return CARD_TYPE_REGISTRY.spawn('widget', {
+      widgetType: s.widgetType,
+      x: s.x, y: s.y, w: s.w, h: s.h,
+      refreshInterval: s.refreshInterval,
+    });
+  }
+  if (typeName === 'canvas_claude') {
+    return CARD_TYPE_REGISTRY.spawn('canvas_claude', {
+      x: s.x, y: s.y, w: s.w, h: s.h,
+      sessionId: s.session_id,
+      profile: s.profile,
+      canvasName: s.canvasName,
+    });
+  }
+  // Unknown type: fall back to the registry so any future card type that
+  // registers itself is handled automatically.
+  return CARD_TYPE_REGISTRY.spawn(typeName, { ...s, sessionId: s.session_id });
 }
 
 // ════════════════════════════════════════════
@@ -2785,7 +2867,7 @@ function layoutGrid(hubList) {
     const row = Math.floor(i / cols);
     const x = startX + col * (CARD_W + CARD_GAP);
     const y = startY + row * (CARD_H + CARD_GAP);
-    spawnCard(hub, x, y);
+    CARD_TYPE_REGISTRY.spawn('terminal', { hub, x, y });
   });
 }
 
@@ -3213,14 +3295,7 @@ async function switchCanvas(name) {
   const saved = await loadLayout();
   if (saved && saved.length > 0) {
     for (const s of saved) {
-      if (s.type === 'canvas_claude') {
-        await spawnCanvasClaudeCard(s.x, s.y, s.w, s.h, s.session_id, s.profile, s.canvasName);
-      } else if (s.type === 'widget' && s.widgetType) {
-        spawnWidget(s.widgetType, s.x, s.y, s.w, s.h);
-      } else {
-        const hub = hubs.find(h => h.hub === s.hub);
-        if (hub) spawnCard(hub, s.x, s.y, s.w, s.h, s.controlGroups, s.exec, s.session_id);
-      }
+      await spawnFromSerialized(s);
     }
     rebuildControlGroupsFromCards();
   }
@@ -3284,10 +3359,8 @@ async function handleControlCardCreated(msg) {
   if (desc.session_id && cards.some(c => c.sessionId === desc.session_id)) return;
 
   if (desc.type === 'terminal') {
-    // Build a hub-like object for spawnCard
     const hubName = desc.hub || desc.exec || 'api-terminal';
     const container = desc.container || '';
-    const hub = hubs.find(entry => entry.hub === hubName) || { hub: hubName, container: container, exec: desc.exec || null };
 
     // Place near center of current viewport if no layout hints
     const vw = viewport.clientWidth;
@@ -3296,8 +3369,6 @@ async function handleControlCardCreated(msg) {
     const cy = (-pan.y + vh / 2) / zoom;
     const x = desc.x != null ? desc.x : cx - CARD_W / 2 + Math.random() * 60;
     const y = desc.y != null ? desc.y : cy - CARD_H / 2 + Math.random() * 60;
-    const w = desc.w || CARD_W;
-    const h = desc.h || CARD_H;
 
     // Ensure hub is in the hubs array so it shows in sidebar / can be found on reload
     if (!hubs.find(entry => entry.hub === hubName)) {
@@ -3305,7 +3376,15 @@ async function handleControlCardCreated(msg) {
       hubSymbolMap[hubName] = HUB_SYMBOLS[hubs.length % HUB_SYMBOLS.length];
     }
 
-    spawnCard(hub, x, y, w, h, null, desc.exec || null, desc.session_id);
+    await CARD_TYPE_REGISTRY.spawn('terminal', {
+      hub: hubName,
+      container: container,
+      exec: desc.exec || null,
+      sessionId: desc.session_id,
+      x, y,
+      w: desc.w || CARD_W,
+      h: desc.h || CARD_H,
+    });
     saveLayout();
   }
 }
@@ -3423,19 +3502,21 @@ function handleControlCardDeleted(msg) {
   if (saved && saved.length > 0) {
     // Spawn cards from saved layout
     for (const s of saved) {
-      if (s.type === 'canvas_claude') {
-        await spawnCanvasClaudeCard(s.x, s.y, s.w, s.h, s.session_id, s.profile, s.canvasName);
-      } else if (s.type === 'widget' && s.widgetType) {
-        spawnWidget(s.widgetType, s.x, s.y, s.w, s.h);
-      } else {
-        const hub = hubs.find(h => h.hub === s.hub);
-        if (hub) spawnCard(hub, s.x, s.y, s.w, s.h, s.controlGroups, s.exec, s.session_id);
-      }
+      await spawnFromSerialized(s);
     }
-    // Spawn any new hubs not in saved layout
+    // Spawn any new hubs not in saved layout. Treat layout entries as
+    // "terminal for hub" when type is absent (pre-type-field compat).
     for (const hub of hubs) {
-      if (!saved.some(s => s.hub === hub.hub && s.type !== 'widget' && s.type !== 'canvas_claude')) {
-        spawnCard(hub, 100 + Math.random() * 200, 100 + Math.random() * 200);
+      const alreadySaved = saved.some(s => {
+        const asTerminal = (s.type === 'terminal') || (!s.type && s.hub);
+        return asTerminal && s.hub === hub.hub;
+      });
+      if (!alreadySaved) {
+        await CARD_TYPE_REGISTRY.spawn('terminal', {
+          hub,
+          x: 100 + Math.random() * 200,
+          y: 100 + Math.random() * 200,
+        });
       }
     }
     rebuildControlGroupsFromCards();

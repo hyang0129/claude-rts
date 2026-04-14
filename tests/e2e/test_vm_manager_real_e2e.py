@@ -213,7 +213,7 @@ def ensure_vm_card_exists(page):
     if vm_cards.count() > 0:
         return
     # Spawn via JS directly
-    page.evaluate("() => spawnWidget('vm-manager', 100, 100)")
+    page.evaluate("() => CARD_TYPE_REGISTRY.spawn('widget', {widgetType: 'vm-manager', x: 100, y: 100})")
     page.wait_for_timeout(2000)
 
 

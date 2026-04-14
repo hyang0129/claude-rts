@@ -68,7 +68,7 @@ startup.py: run_startup("qa-m6")
 [{"type":"terminal","name":"rts-test-a","container":"rts-test-a","exec":"docker.exe exec -it rts-test-a bash"}, ...]
     │
     ▼
-frontend: hubs = descriptors.map(...)  →  spawnCard() per hub  →  TerminalCards on canvas
+frontend: hubs = descriptors.map(...)  →  CARD_TYPE_REGISTRY.spawn('terminal', {hub, ...}) per hub  →  TerminalCards on canvas
 ```
 
 If the startup script returns cards **and** a saved canvas layout exists for `default_canvas`, the frontend uses the saved positions/sizes but only for hubs that appear in both lists. New hubs not in the saved layout are placed at a random offset.
