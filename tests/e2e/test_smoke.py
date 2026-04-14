@@ -147,41 +147,44 @@ class TestCardResize:
             pytest.skip("Card has no inline width style")
 
         initial_w = float(initial_w_match.group(1))
-
-        # Zoom into the card so the 16×16px resize handle is large enough to
-        # interact with reliably in headless CI (at fitAll zoom ≈ 0.25 the
-        # handle is only ~4 screen pixels, making pointer events miss it).
         card_id = card.get_attribute("data-card-id")
-        page.evaluate(f"""
-            const c = typeof cards !== 'undefined' && cards.find(c => String(c.id) === '{card_id}');
-            if (c && typeof zoomToCard === 'function') zoomToCard(c);
-        """)
-        page.wait_for_timeout(500)
 
-        # Find resize handle within this card (fresh bounding box after zoom)
         handle = card.locator(".resize-handle")
         if handle.count() == 0:
             pytest.skip("No resize handle found")
 
-        box = handle.bounding_box()
-        if box is None:
-            pytest.skip("Resize handle not visible")
+        # Dispatch PointerEvents directly via JS rather than Playwright mouse
+        # simulation.  page.mouse.move/down/up is unreliable in headless Linux
+        # Chromium because:
+        #   - The handle is only ~5px at fitAll zoom, making hit-testing miss it.
+        #   - Drag targets below y≈720 are silently dropped outside the viewport.
+        # dispatchEvent on the handle element and document bypasses both
+        # constraints and exercises the JS resize handler directly.
+        result = page.evaluate(f"""() => {{
+            const handle = document.querySelector('[data-resize="{card_id}"]');
+            if (!handle) return 'no-handle';
+            const rect = handle.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            handle.dispatchEvent(new PointerEvent('pointerdown', {{
+                bubbles: true, cancelable: true,
+                clientX: cx, clientY: cy, buttons: 1,
+            }}));
+            document.dispatchEvent(new PointerEvent('pointermove', {{
+                bubbles: true, cancelable: true,
+                clientX: cx + 200, clientY: cy, buttons: 1,
+            }}));
+            document.dispatchEvent(new PointerEvent('pointerup', {{
+                bubbles: true, cancelable: true,
+                clientX: cx + 200, clientY: cy,
+            }}));
+            return 'ok';
+        }}""")
 
-        # Move directly to handle centre — bypasses Playwright's hit-test,
-        # which fails when another card's titlebar overlaps the handle corner.
-        # Drag right (+150) and UP (-60) so the pointer stays within the
-        # 1280×720 viewport.  At fitAll zoom the handle sits near the bottom
-        # of the window; dragging downward (+80) pushes y above 720 and Linux
-        # headless Chromium silently drops pointer events outside the viewport,
-        # so the resize never fires.  Dragging upward avoids that entirely.
-        cx = box["x"] + box["width"] / 2
-        cy = box["y"] + box["height"] / 2
-        page.mouse.move(cx, cy)
-        page.mouse.down()
-        page.mouse.move(cx + 150, cy - 60, steps=10)
-        page.mouse.up()
+        if result == "no-handle":
+            pytest.skip("No resize handle found in DOM")
 
-        page.wait_for_timeout(1500)
+        page.wait_for_timeout(300)
 
         new_style = card.get_attribute("style") or ""
         new_w_match = re.search(r"width:\s*(-?\d+(?:\.\d+)?)px", new_style)
