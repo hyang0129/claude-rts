@@ -12,6 +12,7 @@ from .container_starter_card import ContainerStarterCard
 from ..blueprint import (
     interpolate_value,
     DEFAULT_TIMEOUTS,
+    _VAR_NAME_RE,
 )
 
 
@@ -120,6 +121,7 @@ class BlueprintCard(BaseCard):
 
         await self._log(f"Starting blueprint '{bp_name}' (run_id={self.run_id})")
 
+        i = -1
         try:
             for i, step in enumerate(steps):
                 action = step.get("action", "unknown")
@@ -127,10 +129,16 @@ class BlueprintCard(BaseCard):
 
                 timeout = step.get("timeout", DEFAULT_TIMEOUTS.get(action, 30))
 
+                # Add a 5s buffer to the outer wait_for so that steps with
+                # their own internal timeouts (e.g. start_container via
+                # ContainerStarterCard, open_widget ack) fire first and
+                # produce a more descriptive error.
+                outer_timeout = timeout + 5
+
                 try:
                     result = await asyncio.wait_for(
                         self._execute_step(step, i),
-                        timeout=timeout,
+                        timeout=outer_timeout,
                     )
                 except asyncio.TimeoutError:
                     raise RuntimeError(f"Step {i} ({action}) timed out after {timeout}s")
@@ -160,7 +168,7 @@ class BlueprintCard(BaseCard):
                     {
                         "run_id": self.run_id,
                         "blueprint_name": bp_name,
-                        "step": i if "i" in dir() else -1,
+                        "step": i,
                         "error": str(exc),
                     },
                 )
@@ -435,11 +443,13 @@ class BlueprintCard(BaseCard):
         # Resolve the list reference. If it's a bare $variable reference
         # pointing to a list, retrieve the list directly instead of
         # string-interpolating it (which would stringify the list).
-        import re
-
-        _bare_var = re.match(r"^\$([a-zA-Z_][a-zA-Z0-9_]*)$", list_var) if isinstance(list_var, str) else None
+        _bare_var = None
+        if isinstance(list_var, str) and list_var.startswith("$"):
+            candidate = list_var[1:]
+            if _VAR_NAME_RE.match(candidate):
+                _bare_var = candidate
         if _bare_var:
-            var_name = _bare_var.group(1)
+            var_name = _bare_var
             if var_name not in self.variables:
                 raise RuntimeError(f"Unresolvable variable: ${var_name}")
             list_value = self.variables[var_name]

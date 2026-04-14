@@ -1223,8 +1223,19 @@ async def ws_control_handler(request: web.Request) -> web.WebSocketResponse:
 
     try:
         async for msg in ws:
-            # The control channel is server→client only; ignore client messages.
-            if msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
+            if msg.type == web.WSMsgType.TEXT:
+                # Route blueprint:widget_ack from the frontend to the EventBus
+                # so BlueprintCard._step_open_widget() receives the ack.
+                try:
+                    data = json.loads(msg.data)
+                    msg_type = data.get("type", "")
+                    if msg_type == "blueprint:widget_ack":
+                        event_bus: EventBus | None = request.app.get("event_bus")
+                        if event_bus:
+                            await event_bus.emit("blueprint:widget_ack", data)
+                except (json.JSONDecodeError, Exception):
+                    pass
+            elif msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
                 break
     finally:
         control_clients.remove(ws)
