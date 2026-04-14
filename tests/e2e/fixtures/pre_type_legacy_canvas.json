@@ -1,0 +1,24 @@
+{
+  "cards": [
+    {
+      "hub": "__PLACEHOLDER_HUB__",
+      "container": "__PLACEHOLDER_CONTAINER__",
+      "exec": null,
+      "x": 100,
+      "y": 100,
+      "w": 400,
+      "h": 300
+    },
+    {
+      "hub": "__PLACEHOLDER_HUB__",
+      "container": "__PLACEHOLDER_CONTAINER__",
+      "exec": null,
+      "x": 550,
+      "y": 100,
+      "w": 400,
+      "h": 300
+    }
+  ],
+  "pan": {"x": 0, "y": 0},
+  "zoom": 1
+}

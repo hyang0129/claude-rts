@@ -20,3 +20,6 @@ qa/hongy-probe/canvases/*.json.bak
 
 # Timestamped server logs
 supreme-claudemander.*.log
+
+# Claude Code local state
+.claude/

@@ -1452,7 +1452,7 @@ const CARD_TYPE_REGISTRY = {
 // ════════════════════════════════════════════
 class TerminalCard extends Card {
   constructor(opts) {
-    super({ ...opts, type: 'terminal' });
+    super({ type: 'terminal', ...opts });
     this.execCmd = opts.exec || null;
     this.sessionId = opts.sessionId || null; // persistent session ID
     this.term = null;
@@ -1480,6 +1480,7 @@ class TerminalCard extends Card {
   }
 
   onDestroy() {
+    if (this.sessionId) _markSessionDestroyed(this.sessionId);
     if (this.ro) this.ro.disconnect();
     this._intentionalClose = true;
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
@@ -3295,7 +3296,12 @@ async function switchCanvas(name) {
   const saved = await loadLayout();
   if (saved && saved.length > 0) {
     for (const s of saved) {
-      await spawnFromSerialized(s);
+      // Isolate per-entry failures so one bad entry cannot abort the rest.
+      try {
+        await spawnFromSerialized(s);
+      } catch (err) {
+        console.warn('switchCanvas: restore entry failed, skipping:', s, err);
+      }
     }
     rebuildControlGroupsFromCards();
   }
@@ -3312,6 +3318,17 @@ async function switchCanvas(name) {
 // ════════════════════════════════════════════
 // Control WebSocket — server-pushed card events
 // ════════════════════════════════════════════
+
+// Short-TTL set of session_ids that were explicitly destroyed locally.
+// Prevents a queued card_created broadcast from re-spawning a card that was
+// just deleted (e.g. during test teardown or rapid user close).
+const _recentlyDestroyedSessions = new Set();
+function _markSessionDestroyed(sessionId) {
+  if (!sessionId) return;
+  _recentlyDestroyedSessions.add(sessionId);
+  setTimeout(() => _recentlyDestroyedSessions.delete(sessionId), 5000);
+}
+
 let controlWs = null;
 let controlWsReconnectTimer = null;
 
@@ -3355,8 +3372,12 @@ async function handleControlCardCreated(msg) {
   // the control event, which would race with the in-flight fetch and create duplicate cards.
   if (desc.type === 'canvas_claude') return;
 
-  // Avoid duplicates — check if a card with this session_id already exists
-  if (desc.session_id && cards.some(c => c.sessionId === desc.session_id)) return;
+  // Avoid duplicates — check if a card with this session_id already exists or was
+  // recently destroyed locally (guards against queued broadcasts racing with teardown).
+  if (desc.session_id && (
+    cards.some(c => c.sessionId === desc.session_id) ||
+    _recentlyDestroyedSessions.has(desc.session_id)
+  )) return;
 
   if (desc.type === 'terminal') {
     const hubName = desc.hub || desc.exec || 'api-terminal';
