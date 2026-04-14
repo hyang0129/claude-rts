@@ -169,13 +169,16 @@ class TestCardResize:
 
         # Move directly to handle centre — bypasses Playwright's hit-test,
         # which fails when another card's titlebar overlaps the handle corner.
-        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        # Drag right (+150) and UP (-60) so the pointer stays within the
+        # 1280×720 viewport.  At fitAll zoom the handle sits near the bottom
+        # of the window; dragging downward (+80) pushes y above 720 and Linux
+        # headless Chromium silently drops pointer events outside the viewport,
+        # so the resize never fires.  Dragging upward avoids that entirely.
+        cx = box["x"] + box["width"] / 2
+        cy = box["y"] + box["height"] / 2
+        page.mouse.move(cx, cy)
         page.mouse.down()
-        page.mouse.move(
-            box["x"] + box["width"] / 2 + 100,
-            box["y"] + box["height"] / 2 + 80,
-            steps=10,
-        )
+        page.mouse.move(cx + 150, cy - 60, steps=10)
         page.mouse.up()
 
         page.wait_for_timeout(1500)
