@@ -1206,6 +1206,169 @@ class Card {
 }
 
 // ════════════════════════════════════════════
+// CARD_TYPE_REGISTRY
+// ════════════════════════════════════════════
+// Single dispatcher for card creation, deserialization, and menu generation.
+// Each card class self-registers immediately after its definition by calling
+// CARD_TYPE_REGISTRY.register(typeName, { cardClass, label, symbol, defaultSize, menuSection }).
+//
+// - spawn(typeName, opts): generic mount path — construct the class, append to the
+//   canvas, wire up drag/resize, run onInit, refresh minimap + hub count, and return
+//   the mounted card. Callers that need specialised pre-construction logic (hub
+//   symbol lookup, async session probing, etc.) continue to use the legacy
+//   spawnCard / spawnWidget / spawnCanvasClaudeCard helpers — the two coexist until
+//   call-site migration lands in #124/125.
+//
+// - deserialize(data): dispatches to `<CardClass>.fromSerialized(data)` using
+//   data.type as the key. Legacy layout entries that have no `type` field but do
+//   carry a `hub` field are treated as terminals (pre-type-field compatibility).
+//   Unknown type -> logs a warning and returns null so callers can skip the entry.
+//
+// - menuEntries(): returns an array of
+//   `{type, label, symbol, defaultSize, menuSection}` for every registered type
+//   that opted in to menu display (i.e. has a truthy `menuSection`). Preserves
+//   registration order. This helper is deliberately dormant until #124/#125
+//   migrates the context-menu build code onto the registry — do not delete it
+//   as unused; it is the sole reason `label`/`symbol`/`defaultSize`/`menuSection`
+//   are stored on registry entries in the first place.
+//
+// Adding a new card type requires only two things:
+//   1. define the class (with a `static fromSerialized(data)`)
+//   2. call CARD_TYPE_REGISTRY.register(...) once after the class body
+// No other file or call-site changes are needed.
+const CARD_TYPE_REGISTRY = {
+  _types: {},
+  _order: [],
+
+  register(typeName, entry) {
+    if (!typeName || typeof typeName !== 'string') {
+      console.warn('CARD_TYPE_REGISTRY.register: invalid typeName', typeName);
+      return;
+    }
+    if (!entry || typeof entry.cardClass !== 'function') {
+      console.warn('CARD_TYPE_REGISTRY.register: "%s" missing cardClass', typeName);
+      return;
+    }
+    if (this._types[typeName]) {
+      console.warn('CARD_TYPE_REGISTRY.register: replacing existing entry for "%s"', typeName);
+    } else {
+      this._order.push(typeName);
+    }
+    // Use nullish checks (not `||`) so intentional empty values are preserved.
+    // LoaderCard registers with `symbol: ''` on purpose — `||` would rewrite
+    // that to `'?'`. `label: ''` and an explicit `menuSection: ''` are
+    // similarly honoured if a caller passes them.
+    this._types[typeName] = {
+      cardClass: entry.cardClass,
+      label: entry.label != null ? entry.label : typeName,
+      symbol: entry.symbol != null ? entry.symbol : '?',
+      defaultSize: entry.defaultSize != null ? entry.defaultSize : { w: CARD_W, h: CARD_H },
+      menuSection: entry.menuSection != null ? entry.menuSection : null,
+    };
+  },
+
+  get(typeName) {
+    return this._types[typeName] || null;
+  },
+
+  has(typeName) {
+    return Object.prototype.hasOwnProperty.call(this._types, typeName);
+  },
+
+  // Generic mount path. Construct the card, append it to the canvas, wire up
+  // drag/resize, run onInit, and refresh minimap + hub count. Returns the
+  // mounted card instance, or null on unknown type. If the caller omits `w`
+  // and/or `h`, the registry's `defaultSize` for this type is applied — this
+  // is why `defaultSize` is stored on entries.
+  spawn(typeName, opts) {
+    const entry = this._types[typeName];
+    if (!entry) {
+      console.warn('CARD_TYPE_REGISTRY.spawn: unknown type "%s"', typeName);
+      return null;
+    }
+    const mergedOpts = { ...(opts || {}) };
+    if (mergedOpts.w == null) mergedOpts.w = entry.defaultSize.w;
+    if (mergedOpts.h == null) mergedOpts.h = entry.defaultSize.h;
+    const card = new entry.cardClass(mergedOpts);
+    return this._mount(card);
+  },
+
+  // Mount an already-constructed card onto the canvas. Split out from spawn()
+  // so deserialize() and future migration call-sites can reuse the same path.
+  _mount(card) {
+    if (!card) return null;
+    card.createElement();
+    canvas.appendChild(card.el);
+    cards.push(card);
+    if (typeof card.setupDrag === 'function') card.setupDrag();
+    if (typeof card.setupResize === 'function') card.setupResize();
+    if (typeof card.onInit === 'function') card.onInit();
+    if (Array.isArray(card.controlGroupNums) && card.controlGroupNums.length > 0) {
+      if (typeof updateControlGroupBadges === 'function') updateControlGroupBadges(card);
+    }
+    if (typeof drawMinimap === 'function') drawMinimap();
+    if (typeof updateHubCount === 'function') updateHubCount();
+    return card;
+  },
+
+  // Reconstruct a card instance from a serialized layout entry. Does NOT mount
+  // the card — returns the bare instance (or null). Callers decide whether to
+  // push through _mount() or hand off to a specialised spawn helper.
+  deserialize(data) {
+    if (!data || typeof data !== 'object') {
+      console.warn('CARD_TYPE_REGISTRY.deserialize: invalid data', data);
+      return null;
+    }
+    // Legacy layouts: entries without an explicit `type` but carrying a `hub`
+    // field are pre-type-field terminal cards.
+    let typeName = data.type;
+    if (!typeName && data.hub) typeName = 'terminal';
+    if (!typeName) {
+      console.warn('CARD_TYPE_REGISTRY.deserialize: entry has no type and no hub, skipping');
+      return null;
+    }
+    const entry = this._types[typeName];
+    if (!entry) {
+      console.warn('CARD_TYPE_REGISTRY: unknown type "%s", skipping', typeName);
+      return null;
+    }
+    if (typeof entry.cardClass.fromSerialized !== 'function') {
+      console.warn('CARD_TYPE_REGISTRY: "%s" has no static fromSerialized, skipping', typeName);
+      return null;
+    }
+    try {
+      return entry.cardClass.fromSerialized(data);
+    } catch (err) {
+      console.warn('CARD_TYPE_REGISTRY: fromSerialized threw for "%s": %o', typeName, err);
+      return null;
+    }
+  },
+
+  // Returns menu-visible entries in registration order. LoaderCard and other
+  // transient types register without a menuSection and are omitted.
+  //
+  // NOTE: intentionally unused by current call-sites — the context menu still
+  // builds its entries from hard-coded strings. This is the target consumer
+  // for the #124/#125 migration; keep the shape stable (type, label, symbol,
+  // defaultSize, menuSection).
+  menuEntries() {
+    const out = [];
+    for (const typeName of this._order) {
+      const entry = this._types[typeName];
+      if (!entry || !entry.menuSection) continue;
+      out.push({
+        type: typeName,
+        label: entry.label,
+        symbol: entry.symbol,
+        defaultSize: entry.defaultSize,
+        menuSection: entry.menuSection,
+      });
+    }
+    return out;
+  },
+};
+
+// ════════════════════════════════════════════
 // TerminalCard subclass
 // ════════════════════════════════════════════
 class TerminalCard extends Card {
@@ -1449,7 +1612,33 @@ class TerminalCard extends Card {
 
     titlebar.insertBefore(btn, closeBtn);
   }
+
+  static fromSerialized(data) {
+    const card = new TerminalCard({
+      hub: data.hub,
+      container: data.container || '',
+      x: data.x || 0,
+      y: data.y || 0,
+      w: data.w,
+      h: data.h,
+      symbol: (typeof hubSymbolMap !== 'undefined' && hubSymbolMap[data.hub]) || '?',
+      exec: data.exec || null,
+      sessionId: data.session_id || null,
+    });
+    if (Array.isArray(data.controlGroups)) {
+      card.controlGroupNums = [...data.controlGroups];
+    }
+    return card;
+  }
 }
+
+CARD_TYPE_REGISTRY.register('terminal', {
+  cardClass: TerminalCard,
+  label: 'Terminal',
+  symbol: 'T',
+  defaultSize: { w: CARD_W, h: CARD_H },
+  menuSection: 'terminals',
+});
 
 // ════════════════════════════════════════════
 // CanvasClaudeCard subclass
@@ -1682,7 +1871,44 @@ class CanvasClaudeCard extends TerminalCard {
     data.canvasName = this.canvasName;
     return data;
   }
+
+  // WARNING: this synchronous constructor path does NOT check whether
+  // `data.session_id` is still alive on the server. `spawnCanvasClaudeCard()`
+  // (the current layout-reload path) performs an async `/api/sessions` probe
+  // before construction and drops stale IDs so zombie cards cannot appear.
+  // Until the #124/#125 migration moves layout reload onto the registry, this
+  // method is only safe to use in code paths that either (a) already know the
+  // session is live, or (b) perform their own staleness check before calling.
+  // When the migration lands, either port the probe into a post-deserialize
+  // async hook or keep `spawnCanvasClaudeCard()` as the layout-reload entry.
+  static fromSerialized(data) {
+    const card = new CanvasClaudeCard({
+      hub: data.hub || 'canvas-claude',
+      container: data.container || 'supreme-claudemander-util',
+      x: data.x || 0,
+      y: data.y || 0,
+      w: data.w || 960,
+      h: data.h || 640,
+      symbol: 'C',
+      exec: data.exec || null,
+      sessionId: data.session_id || null,
+      profile: data.profile || null,
+      canvasName: data.canvasName || null,
+    });
+    if (Array.isArray(data.controlGroups)) {
+      card.controlGroupNums = [...data.controlGroups];
+    }
+    return card;
+  }
 }
+
+CARD_TYPE_REGISTRY.register('canvas_claude', {
+  cardClass: CanvasClaudeCard,
+  label: 'Canvas Claude',
+  symbol: 'C',
+  defaultSize: { w: 960, h: 640 },
+  menuSection: 'terminals',
+});
 
 // ════════════════════════════════════════════
 // LoaderCard subclass
@@ -1765,6 +1991,17 @@ class LoaderCard extends Card {
     }
   }
 }
+
+// LoaderCard is transient — it registers so that deserialize() can round-trip
+// it through the registry, but intentionally has no menuSection so it never
+// appears in the spawn context menu.
+CARD_TYPE_REGISTRY.register('loader', {
+  cardClass: LoaderCard,
+  label: 'Loader',
+  symbol: '',
+  defaultSize: { w: 360, h: 140 },
+  menuSection: null,
+});
 
 // ════════════════════════════════════════════
 // Widget registry
@@ -2240,7 +2477,28 @@ class WidgetCard extends Card {
     data.refreshInterval = this.refreshInterval;
     return data;
   }
+
+  static fromSerialized(data) {
+    const card = new WidgetCard({
+      widgetType: data.widgetType,
+      x: data.x || 0,
+      y: data.y || 0,
+      w: data.w || 360,
+      h: data.h || 280,
+      symbol: 'W',
+      refreshInterval: data.refreshInterval,
+    });
+    return card;
+  }
 }
+
+CARD_TYPE_REGISTRY.register('widget', {
+  cardClass: WidgetCard,
+  label: 'Widget',
+  symbol: 'W',
+  defaultSize: { w: 360, h: 280 },
+  menuSection: 'widgets',
+});
 
 // ════════════════════════════════════════════
 // Terminal state management
@@ -2305,6 +2563,14 @@ function spawnWidget(widgetType, x, y, w, h) {
 }
 
 async function spawnCanvasClaudeCard(x, y, w, h, sessionId, profile, canvasName) {
+  // NOTE: this helper owns the async staleness-check contract for canvas-claude
+  // cards. `CanvasClaudeCard.fromSerialized()` intentionally does NOT replicate
+  // the `/api/sessions` probe below, so anything that constructs a card via the
+  // registry deserialize path must either perform its own check first or fall
+  // back to this function. When the #124/#125 migration moves layout reload
+  // onto `CARD_TYPE_REGISTRY.deserialize()`, this probe must be ported into a
+  // post-deserialize async hook or this helper must remain the reload entry.
+  //
   // If we have a saved sessionId (canvas reload / server restart), check if it is
   // still alive.  If the session is dead (server restarted, orphan reaped), drop the
   // stale ID so we fall through to the create-new path below.  This prevents zombie
