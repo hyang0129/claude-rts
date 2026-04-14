@@ -137,7 +137,7 @@ def ensure_vm_card_exists(page):
     # Fallback: if context menu approach didn't spawn a card, use JS directly
     vm_cards_after = page.locator("[data-card-id]").filter(has=page.locator("[data-vm-search]"))
     if vm_cards_after.count() == 0:
-        page.evaluate("() => spawnWidget('vm-manager', 100, 100)")
+        page.evaluate("() => CARD_TYPE_REGISTRY.spawn('widget', {widgetType: 'vm-manager', x: 100, y: 100})")
         page.wait_for_timeout(2000)
 
 
