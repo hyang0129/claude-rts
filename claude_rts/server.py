@@ -449,7 +449,6 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
             container=container or None,
         )
         await card.start()
-        card_registry.register(card)
     except Exception:
         logger.exception("Failed to create session for cmd={!r}", cmd)
         await ws.send_str(json.dumps({"error": "Failed to spawn terminal"}))
@@ -457,7 +456,14 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
         return ws
 
     session = card.session
+    # Send session_id BEFORE registering the card.  card_registry.register()
+    # schedules a card_created broadcast via the EventBus async task.  If the
+    # broadcast fires before the browser's terminal WS receives session_id, the
+    # client-side duplicate guard (cards.some(c => c.sessionId === ...)) sees
+    # sessionId as null and spawns a ghost card.  Sending session_id first
+    # closes that race window.
     await ws.send_str(json.dumps({"session_id": session.session_id, "tmux": session.tmux_backed}))
+    card_registry.register(card)
     await mgr.attach(session.session_id, ws)
 
     # Send resize if client sends it as first message

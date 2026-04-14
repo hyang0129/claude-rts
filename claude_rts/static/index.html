@@ -3383,6 +3383,17 @@ async function handleControlCardCreated(msg) {
     const hubName = desc.hub || desc.exec || 'api-terminal';
     const container = desc.container || '';
 
+    // Belt-and-suspenders guard: if a locally-spawned terminal with the same
+    // hub+container is already in cards[] but hasn't received its sessionId yet
+    // (card_created broadcast beat the terminal's own WS message), skip — the
+    // card exists and will assign sessionId itself.
+    if (cards.some(c =>
+      c.type === 'terminal' &&
+      c.hub === hubName &&
+      (c.container || '') === container &&
+      c.sessionId == null
+    )) return;
+
     // Place near center of current viewport if no layout hints
     const vw = viewport.clientWidth;
     const vh = viewport.clientHeight;
