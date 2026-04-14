@@ -112,7 +112,11 @@ class TestUnknownTypeSkip:
     def test_unknown_type_no_error(self, page):
         """Load canvas with unknown type 'foo'; no JS error thrown."""
         page_errors = []
-        page.on("pageerror", lambda err: page_errors.append(str(err)))
+
+        def _on_page_error(err):
+            page_errors.append(str(err))
+
+        page.on("pageerror", _on_page_error)
 
         fixture = json.loads((FIXTURES_DIR / "unknown_type_canvas.json").read_text())
 
@@ -122,7 +126,7 @@ class TestUnknownTypeSkip:
         page.evaluate("() => switchCanvas('compat-unknown-type')")
         page.wait_for_timeout(2000)
 
-        page.remove_listener("pageerror", lambda err: page_errors.append(str(err)))
+        page.remove_listener("pageerror", _on_page_error)
         assert len(page_errors) == 0, f"Unexpected page error(s): {page_errors}"
 
     def test_unknown_type_correct_card_count(self, page):
