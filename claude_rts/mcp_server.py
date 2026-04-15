@@ -260,48 +260,115 @@ TOOL_HANDLERS = {
 TOOL_SCHEMAS = [
     {
         "name": "open_terminal",
-        "description": "Open a new terminal card on the canvas and return its session_id",
+        "description": (
+            "Open a new terminal card on the canvas and return its session_id. "
+            "You can control the card's size and position on the canvas using w, h, x, y — "
+            "use these to make cards large, small, or place them in specific screen regions. "
+            "The canvas is 3840x2160 (4K). To run a command inside a Docker container, set "
+            "both 'cmd' and 'container'. The server handles docker exec automatically. "
+            "The special placeholder ${priority_credential} in cmd is replaced server-side "
+            "with the user's priority profile name (useful for launching claude with a "
+            "specific API credential)."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "cmd": {
                     "type": "string",
                     "description": (
-                        "Command to run. When 'container' is also set, this command runs "
-                        "inside that Docker container (the server wraps it in docker exec "
-                        "automatically). Example: cmd='bash', container='supreme-claudemander-util' "
-                        "opens a bash shell inside that container. To run claude inside a "
-                        "container: cmd='claude --dangerously-skip-permissions', "
-                        "container='supreme-claudemander-util'."
+                        "Command to run in the terminal. When 'container' is also set, this "
+                        "command runs inside that Docker container (the server wraps it in "
+                        "docker exec automatically). Examples: "
+                        "cmd='bash', container='my-dev' opens a bash shell in the container. "
+                        "cmd='claude --dangerously-skip-permissions', container='my-dev' "
+                        "launches Claude Code inside the container. "
+                        "The placeholder ${priority_credential} in cmd is replaced server-side "
+                        "with the current priority profile name from config — e.g. "
+                        "cmd='claude --profile ${priority_credential}' becomes "
+                        "cmd='claude --profile my-key'. If no priority profile is set, the "
+                        "placeholder is left as-is and a warning is logged."
                     ),
                 },
-                "hub": {"type": "string", "description": "Hub name (optional)"},
+                "hub": {
+                    "type": "string",
+                    "description": (
+                        "Hub name for devcontainer-based sessions (optional). "
+                        "Usually not needed when using 'container' directly."
+                    ),
+                },
                 "container": {
                     "type": "string",
                     "description": (
-                        "Exact Docker container name to connect to. Use vm_discover_containers "
-                        "to find the correct name (e.g. 'supreme-claudemander-util'). "
-                        "When set, cmd runs inside this container."
+                        "Exact Docker container name to connect to. When set, cmd runs inside "
+                        "this container via docker exec. Use vm_discover_containers to find "
+                        "available container names (e.g. 'supreme-claudemander-util'). "
+                        "The container must be running — use vm_start_container first if needed."
                     ),
                 },
-                "x": {"type": "number", "description": "X position on canvas (optional)"},
-                "y": {"type": "number", "description": "Y position on canvas (optional)"},
-                "w": {"type": "number", "description": "Width in pixels (optional)"},
-                "h": {"type": "number", "description": "Height in pixels (optional)"},
+                "x": {
+                    "type": "number",
+                    "description": (
+                        "X position (left edge) of the card on the canvas, in pixels. "
+                        "Canvas is 3840px wide. Default: auto-centered. "
+                        "Examples: x=0 for left edge, x=1920 for center, x=3120 for right side "
+                        "(leaving room for a 720px-wide card)."
+                    ),
+                },
+                "y": {
+                    "type": "number",
+                    "description": (
+                        "Y position (top edge) of the card on the canvas, in pixels. "
+                        "Canvas is 2160px tall. Default: auto-centered. "
+                        "Examples: y=0 for top edge, y=840 for vertically centered, "
+                        "y=1680 for bottom area (leaving room for a 480px-tall card)."
+                    ),
+                },
+                "w": {
+                    "type": "number",
+                    "description": (
+                        "Width of the card in pixels. Default: 720. Minimum: 300. "
+                        "Use larger values for wide terminals: w=1200 for a wide card, "
+                        "w=1800 for an extra-wide card that spans half the canvas. "
+                        "A 'big' or 'large' terminal typically means w=1200, h=800 or larger."
+                    ),
+                },
+                "h": {
+                    "type": "number",
+                    "description": (
+                        "Height of the card in pixels. Default: 480. Minimum: 200. "
+                        "Use larger values for tall terminals: h=800 for a tall card, "
+                        "h=1200 for a very tall card. Combine with w for a 'big' terminal: "
+                        "w=1200, h=800 gives a large card. w=1800, h=1400 fills most of "
+                        "the canvas."
+                    ),
+                },
             },
             "required": ["cmd"],
         },
     },
     {
         "name": "read_terminal",
-        "description": "Read the current output (scrollback) of a terminal card",
+        "description": (
+            "Read the current scrollback output of a terminal card. Returns plain text "
+            "with ANSI escape codes stripped by default. Use last_n to read only recent "
+            "output (e.g. last_n=2000 for the last 2KB). Useful for checking command "
+            "results, monitoring long-running processes, or verifying that a terminal "
+            "is ready for input."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "session_id": {"type": "string", "description": "Session ID of the terminal to read"},
+                "session_id": {
+                    "type": "string",
+                    "description": "Session ID of the terminal to read (returned by open_terminal or list_terminals)",
+                },
                 "last_n": {
                     "type": "integer",
-                    "description": "Only return the last N bytes of output (optional, default: full scrollback)",
+                    "description": (
+                        "Only return the last N bytes of output. Omit to get full scrollback "
+                        "(up to 64KB buffer). Use last_n=500 for a quick status check, "
+                        "last_n=2000 for recent context."
+                    ),
                 },
             },
             "required": ["session_id"],
@@ -309,19 +376,38 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "write_terminal",
-        "description": "Write text to a terminal card (as keyboard input)",
+        "description": (
+            "Send keystrokes to a terminal card. The text is written as keyboard input "
+            "to the terminal's PTY. Include '\\n' at the end to press Enter and execute "
+            "a command (e.g. text='ls -la\\n'). You can also send special keys and control "
+            "sequences (e.g. text='\\x03' for Ctrl+C to interrupt a running process)."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "session_id": {"type": "string", "description": "Session ID of the terminal"},
-                "text": {"type": "string", "description": "Text to send to the terminal"},
+                "session_id": {
+                    "type": "string",
+                    "description": "Session ID of the terminal (returned by open_terminal or list_terminals)",
+                },
+                "text": {
+                    "type": "string",
+                    "description": (
+                        "Text to send as keyboard input. Include '\\n' to press Enter. "
+                        "Examples: 'ls -la\\n' runs a command, '\\x03' sends Ctrl+C, "
+                        "'exit\\n' closes the shell."
+                    ),
+                },
             },
             "required": ["session_id", "text"],
         },
     },
     {
         "name": "list_terminals",
-        "description": "List all active terminal cards on the canvas",
+        "description": (
+            "List all active terminal cards on the canvas with their session IDs, "
+            "commands, and alive status. Use this to find session IDs for read_terminal, "
+            "write_terminal, or delete_terminal. Returns one line per terminal."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -329,18 +415,30 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "delete_terminal",
-        "description": "Delete a terminal card from the canvas",
+        "description": (
+            "Close and remove a terminal card from the canvas. Stops the PTY session "
+            "and cleans up the card. The terminal is gone permanently — use open_terminal "
+            "to create a new one if needed."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "session_id": {"type": "string", "description": "Session ID of the terminal to delete"},
+                "session_id": {
+                    "type": "string",
+                    "description": "Session ID of the terminal to delete (from open_terminal or list_terminals)",
+                },
             },
             "required": ["session_id"],
         },
     },
     {
         "name": "vm_discover_containers",
-        "description": "Discover all Docker containers (running + stopped) with name, state, image, and status",
+        "description": (
+            "List all Docker containers on the host (both running and stopped). "
+            "Returns each container's name, state (online/offline), image, and status. "
+            "Use the container names from this list as the 'container' or 'name' parameter "
+            "in other tools (open_terminal, vm_start_container, vm_add_favorite, etc.)."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -348,7 +446,14 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "vm_get_favorites",
-        "description": "Get the current VM Manager favorites list with all actions and metadata. Each favorite has: name (string), type ('docker'), actions (array of action objects). Action schema: {label: string, type: 'terminal', shell_prefix?: string, import_keys?: string[]}",
+        "description": (
+            "Get the VM Manager favorites list — containers the user has bookmarked "
+            "for quick access. Each favorite has: name (string), type ('docker'), "
+            "actions (array of action objects). Actions define buttons in the UI. "
+            "Action schema: {label: string, type: 'terminal', shell_prefix?: string, "
+            "import_keys?: string[]}. Use this to see what containers and actions are "
+            "already configured before making changes."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -356,14 +461,31 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "vm_set_container_actions",
-        "description": "Update the actions array for a specific favorite container. Action schema: {label: string, type: 'terminal', shell_prefix?: string (command prefix to run in container), import_keys?: string[] (config keys to interpolate, e.g. 'priority_credential')}",
+        "description": (
+            "REPLACE the entire actions array for a favorite container. WARNING: this "
+            "overwrites all existing actions — if you only want to add one action without "
+            "losing the others, use vm_append_container_action instead. "
+            "Action schema: {label: string, type: 'terminal', shell_prefix?: string "
+            "(command prefix run in container), import_keys?: string[] (config keys to "
+            "interpolate, e.g. ['priority_credential'] causes ${priority_credential} in "
+            "shell_prefix to be replaced with the active profile name)}."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "container": {"type": "string", "description": "Name of the favorite container to update"},
+                "container": {
+                    "type": "string",
+                    "description": (
+                        "Name of the favorite container to update. "
+                        "Must already be in the favorites list (use vm_add_favorite first if needed)."
+                    ),
+                },
                 "actions": {
                     "type": "array",
-                    "description": "Array of action objects: [{label, type, shell_prefix?, import_keys?}]",
+                    "description": (
+                        "Complete replacement actions array. All existing actions are removed "
+                        "and replaced with this list. Format: [{label, type, shell_prefix?, import_keys?}]"
+                    ),
                     "items": {
                         "type": "object",
                         "properties": {
@@ -381,25 +503,56 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "vm_get_container_actions",
-        "description": "Get the actions array for a single favorite container. Returns JSON array of action objects. Errors if the container is not in favorites. Use this to inspect current actions before appending or replacing.",
+        "description": (
+            "Get the actions array for a single favorite container. Returns a JSON array "
+            "of action objects. Errors if the container is not in favorites. Use this to "
+            "inspect current actions before appending or replacing. Accepts either "
+            "'container' or 'name' as the parameter key (both work identically)."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "container": {"type": "string", "description": "Name of the favorite container"},
+                "container": {
+                    "type": "string",
+                    "description": (
+                        "Name of the favorite container (also accepted as 'name'). "
+                        "Must be an exact match for a container in the favorites list."
+                    ),
+                },
             },
             "required": ["container"],
         },
     },
     {
         "name": "vm_append_container_action",
-        "description": "Atomically append a single action to a favorite container's actions array (read-modify-write). Safer than vm_set_container_actions when you only want to add one entry without dropping existing actions. Action schema: {label: string, type: 'terminal', shell_prefix?: string, import_keys?: string[]}",
+        "description": (
+            "Add one action to a favorite container WITHOUT removing existing actions. "
+            "This is an atomic read-modify-write: it fetches the current actions, appends "
+            "the new one, and saves the updated list in a single operation. Prefer this over "
+            "vm_set_container_actions when you only need to add an action — it is safer "
+            "because it never drops existing entries. Accepts either 'container' or 'name' "
+            "as the parameter key. "
+            "Action schema: {label: string, type: 'terminal', shell_prefix?: string, "
+            "import_keys?: string[]}."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "container": {"type": "string", "description": "Name of the favorite container"},
+                "container": {
+                    "type": "string",
+                    "description": (
+                        "Name of the favorite container (also accepted as 'name'). "
+                        "Must already be in the favorites list."
+                    ),
+                },
                 "action": {
                     "type": "object",
-                    "description": "Single action object to append",
+                    "description": (
+                        "Single action object to append. Example: "
+                        "{label: 'Claude', type: 'terminal', "
+                        "shell_prefix: 'claude --dangerously-skip-permissions', "
+                        "import_keys: ['priority_credential']}"
+                    ),
                     "properties": {
                         "label": {"type": "string"},
                         "type": {"type": "string", "enum": ["terminal"]},
@@ -414,37 +567,84 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "vm_start_container",
-        "description": "Start a stopped Docker container by name (calls POST /api/vms/{name}/start). Returns the new state.",
+        "description": (
+            "Start a stopped Docker container. Use vm_discover_containers first to check "
+            "the container's current state. After starting, you can open a terminal in it "
+            "with open_terminal. Accepts either 'name' or 'container' as the parameter key."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Name of the Docker container to start"},
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Name of the Docker container to start (also accepted as 'container'). "
+                        "Use the exact name from vm_discover_containers."
+                    ),
+                },
             },
             "required": ["name"],
         },
     },
     {
         "name": "vm_stop_container",
-        "description": "Stop a running Docker container by name (calls POST /api/vms/{name}/stop). Optional timeout (seconds) before forced kill.",
+        "description": (
+            "Stop a running Docker container. Use vm_discover_containers first to confirm "
+            "it is running. Optionally set a timeout (seconds) before the container is "
+            "force-killed. Accepts either 'name' or 'container' as the parameter key."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Name of the Docker container to stop"},
-                "timeout": {"type": "integer", "description": "Optional seconds to wait before forced kill"},
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Name of the Docker container to stop (also accepted as 'container'). "
+                        "Use the exact name from vm_discover_containers."
+                    ),
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": (
+                        "Seconds to wait before force-killing the container (optional). "
+                        "Default: Docker's default (usually 10s). Set higher for graceful "
+                        "shutdown of services."
+                    ),
+                },
             },
             "required": ["name"],
         },
     },
     {
         "name": "vm_add_favorite",
-        "description": "Add a container to the VM Manager favorites list. If the container is already a favorite, returns a message indicating so. Action schema: {label: string, type: 'terminal', shell_prefix?: string, import_keys?: string[]}",
+        "description": (
+            "Add a Docker container to the VM Manager favorites list so it appears in "
+            "the sidebar for quick access. If the container is already a favorite, returns "
+            "a message and does nothing. Optionally provide custom actions (buttons); "
+            "default is a single 'Terminal' action that opens a shell. "
+            "Action schema: {label: string, type: 'terminal', shell_prefix?: string, "
+            "import_keys?: string[]}."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Name of the Docker container to add"},
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Name of the Docker container to add to favorites. "
+                        "Use the exact name from vm_discover_containers."
+                    ),
+                },
                 "actions": {
                     "type": "array",
-                    "description": "Array of action objects (default: [{label: 'Terminal', type: 'terminal'}])",
+                    "description": (
+                        "Custom actions for this favorite (optional). Default: "
+                        "[{label: 'Terminal', type: 'terminal'}]. Example with Claude action: "
+                        "[{label: 'Terminal', type: 'terminal'}, "
+                        "{label: 'Claude', type: 'terminal', "
+                        "shell_prefix: 'claude --dangerously-skip-permissions', "
+                        "import_keys: ['priority_credential']}]"
+                    ),
                     "items": {
                         "type": "object",
                         "properties": {
