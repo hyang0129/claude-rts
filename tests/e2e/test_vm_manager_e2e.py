@@ -82,6 +82,20 @@ def get_test_vm_containers(page, backend_port):
     )
 
 
+def save_blueprint(page, backend_port, name, blueprint_def):
+    """PUT a blueprint definition to the API."""
+    page.evaluate(
+        """async ([port, name, blueprint]) => {
+        await fetch(`http://localhost:${port}/api/blueprints/${name}`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(blueprint),
+        });
+    }""",
+        [backend_port, name, blueprint_def],
+    )
+
+
 def refresh_vm_card(page):
     """Force re-render of all VM Manager widget cards on the canvas."""
     page.evaluate(
@@ -486,10 +500,10 @@ class TestVmStartContainer:
 
 
 class TestVmTerminalAction:
-    """S6: Terminal action button spawns a terminal card."""
+    """S6: Blueprint action button spawns a card."""
 
     def test_action_spawns_terminal(self, page, backend_port):
-        """Click Terminal action on online container, verify new card spawns."""
+        """Click blueprint action on online container, verify new card spawns."""
         seed_containers(
             page,
             backend_port,
@@ -503,6 +517,14 @@ class TestVmTerminalAction:
             ],
         )
 
+        # Save a minimal blueprint that opens a local terminal (no container required)
+        save_blueprint(
+            page,
+            backend_port,
+            "test-shell",
+            {"name": "test-shell", "steps": [{"action": "open_terminal"}]},
+        )
+
         set_favorites(
             page,
             backend_port,
@@ -510,7 +532,7 @@ class TestVmTerminalAction:
                 {
                     "name": "dev-web",
                     "type": "docker",
-                    "actions": [{"label": "Terminal", "type": "terminal"}],
+                    "actions": [{"label": "Terminal", "blueprint": "test-shell"}],
                 }
             ],
         )
@@ -526,21 +548,24 @@ class TestVmTerminalAction:
         assert action_btn.count() > 0, "Terminal action button should exist"
         action_btn.click()
 
-        page.wait_for_timeout(2000)
+        # BlueprintCard registers on the server immediately; wait for it to appear
+        page.wait_for_function(
+            f"() => document.querySelectorAll('[data-card-id]').length > {initial_count}",
+            timeout=5000,
+        )
 
-        # Verify new card appeared
         new_count = page.locator("[data-card-id]").count()
-        assert new_count > initial_count, "A new card should be spawned after clicking Terminal action"
+        assert new_count > initial_count, "A new card should be spawned after clicking blueprint action"
 
 
-# ── S7: Custom action with shell_prefix ──────────────────────────────────────
+# ── S7: Multiple blueprint actions on one favorite ───────────────────────────
 
 
-class TestVmCustomAction:
-    """S7: Custom action with shell_prefix spawns terminal with correct command."""
+class TestVmBlueprintAction:
+    """S7: Multiple blueprint actions render and each spawns a card when clicked."""
 
-    def test_custom_action_shell_prefix(self, page, backend_port):
-        """Click custom action, verify terminal card spawns with interpolated command."""
+    def test_blueprint_action_spawns_card(self, page, backend_port):
+        """Click the second blueprint action, verify a new card spawns."""
         seed_containers(
             page,
             backend_port,
@@ -554,6 +579,14 @@ class TestVmCustomAction:
             ],
         )
 
+        # Save a minimal blueprint (local terminal, no Docker dependency)
+        save_blueprint(
+            page,
+            backend_port,
+            "test-shell",
+            {"name": "test-shell", "steps": [{"action": "open_terminal"}]},
+        )
+
         set_favorites(
             page,
             backend_port,
@@ -562,13 +595,8 @@ class TestVmCustomAction:
                     "name": "claude-dev",
                     "type": "docker",
                     "actions": [
-                        {"label": "Terminal", "type": "terminal"},
-                        {
-                            "label": "Claude",
-                            "type": "terminal",
-                            "shell_prefix": "cd /workspace && claude --profile ${priority_credential}",
-                            "import_keys": ["priority_credential"],
-                        },
+                        {"label": "Terminal", "blueprint": "test-shell"},
+                        {"label": "Dev Shell", "blueprint": "test-shell"},
                     ],
                 }
             ],
@@ -581,20 +609,19 @@ class TestVmCustomAction:
         # Count existing cards
         initial_count = page.locator("[data-card-id]").count()
 
-        # Click custom action (index 1)
+        # Click second action (index 1)
         action_btn = page.locator('[data-vm-action="claude-dev"][data-action-idx="1"]')
-        assert action_btn.count() > 0, "Custom Claude action button should exist"
+        assert action_btn.count() > 0, "Second blueprint action button should exist"
         action_btn.click()
 
-        # Wait for new card to appear (WebSocket + render; CI can be slow)
+        # BlueprintCard registers on the server immediately; wait for it to appear
         page.wait_for_function(
             f"() => document.querySelectorAll('[data-card-id]').length > {initial_count}",
             timeout=10000,
         )
 
-        # Verify new card spawned
         new_count = page.locator("[data-card-id]").count()
-        assert new_count > initial_count, "A new terminal card should be spawned for custom action"
+        assert new_count > initial_count, "A new card should be spawned for blueprint action"
 
 
 # ── S8: Action buttons disabled for offline containers ───────────────────────
