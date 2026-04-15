@@ -25,6 +25,11 @@ from claude_rts.mcp_server import (
     tool_vm_append_container_action,
     tool_vm_start_container,
     tool_vm_stop_container,
+    tool_blueprint_list,
+    tool_blueprint_get,
+    tool_blueprint_save,
+    tool_blueprint_delete,
+    tool_blueprint_spawn,
 )
 
 
@@ -192,6 +197,11 @@ def test_handle_request_tools_list():
         "vm_start_container",
         "vm_stop_container",
         "vm_add_favorite",
+        "blueprint_list",
+        "blueprint_get",
+        "blueprint_save",
+        "blueprint_delete",
+        "blueprint_spawn",
     }
     for t in tools:
         assert "description" in t
@@ -308,7 +318,7 @@ def test_vm_discover_containers_empty():
 def test_vm_get_favorites():
     """vm_get_favorites GETs /api/vms/favorites and returns JSON."""
     favorites = [
-        {"name": "web-app", "type": "docker", "actions": [{"label": "Terminal", "type": "terminal"}]},
+        {"name": "web-app", "type": "docker", "actions": [{"label": "Dev Shell", "blueprint": "dev-shell"}]},
     ]
     mock_resp = make_mock_response(favorites)
     with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
@@ -322,7 +332,7 @@ def test_vm_get_favorites():
 
 def test_vm_set_container_actions():
     """vm_set_container_actions PUTs to /api/vms/favorites/{name}/actions."""
-    actions = [{"label": "Terminal", "type": "terminal"}, {"label": "Claude", "type": "terminal"}]
+    actions = [{"label": "Dev Shell", "blueprint": "dev-shell"}, {"label": "Claude", "blueprint": "claude-session"}]
     mock_resp = make_mock_response(actions)
     with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
         result = tool_vm_set_container_actions({"container": "web-app", "actions": actions})
@@ -339,12 +349,10 @@ def test_vm_set_container_actions_missing_container():
 
 
 def test_vm_add_favorite():
-    """vm_add_favorite GETs favorites, appends, PUTs back."""
+    """vm_add_favorite GETs favorites, appends, PUTs back with empty default actions."""
     existing = [{"name": "old-container", "type": "docker", "actions": []}]
     get_resp = make_mock_response(existing)
-    put_resp = make_mock_response(
-        existing + [{"name": "new-container", "type": "docker", "actions": [{"label": "Terminal", "type": "terminal"}]}]
-    )
+    put_resp = make_mock_response(existing + [{"name": "new-container", "type": "docker", "actions": []}])
     call_count = [0]
     responses = [get_resp, put_resp]
 
@@ -357,11 +365,12 @@ def test_vm_add_favorite():
         result = tool_vm_add_favorite({"name": "new-container"})
     assert "new-container" in result
     assert "Added" in result
-    # Verify PUT was called with the new container
+    # Verify PUT was called with the new container and empty actions
     put_req = mock_open.call_args_list[1][0][0]
     put_body = json.loads(put_req.data.decode("utf-8"))
     assert len(put_body) == 2
     assert put_body[1]["name"] == "new-container"
+    assert put_body[1]["actions"] == []
 
 
 def test_vm_add_favorite_already_exists():
@@ -379,8 +388,8 @@ def test_vm_add_favorite_missing_name():
         tool_vm_add_favorite({})
 
 
-def test_tools_list_includes_vm_tools():
-    """tools/list response includes all tools (5 terminal + 8 VM)."""
+def test_tools_list_includes_vm_and_blueprint_tools():
+    """tools/list response includes all tools (5 terminal + 8 VM + 5 blueprint)."""
     msg = {"jsonrpc": "2.0", "id": 10, "method": "tools/list", "params": {}}
     resp = handle_request(msg)
     tools = resp["result"]["tools"]
@@ -393,7 +402,12 @@ def test_tools_list_includes_vm_tools():
     assert "vm_start_container" in names
     assert "vm_stop_container" in names
     assert "vm_add_favorite" in names
-    assert len(names) == 13
+    assert "blueprint_list" in names
+    assert "blueprint_get" in names
+    assert "blueprint_save" in names
+    assert "blueprint_delete" in names
+    assert "blueprint_spawn" in names
+    assert len(names) == 18
 
 
 # ── vm_get_container_actions ──────────────────────────────────────────────
@@ -402,14 +416,14 @@ def test_tools_list_includes_vm_tools():
 def test_vm_get_container_actions_returns_one():
     """vm_get_container_actions filters favorites to one container's actions."""
     favorites = [
-        {"name": "web-app", "type": "docker", "actions": [{"label": "A", "type": "terminal"}]},
-        {"name": "db", "type": "docker", "actions": [{"label": "B", "type": "terminal"}]},
+        {"name": "web-app", "type": "docker", "actions": [{"label": "Dev Shell", "blueprint": "dev-shell"}]},
+        {"name": "db", "type": "docker", "actions": [{"label": "DB Admin", "blueprint": "db-admin"}]},
     ]
     mock_resp = make_mock_response(favorites)
     with patch("urllib.request.urlopen", return_value=mock_resp):
         result = tool_vm_get_container_actions({"container": "web-app"})
     parsed = json.loads(result)
-    assert parsed == [{"label": "A", "type": "terminal"}]
+    assert parsed == [{"label": "Dev Shell", "blueprint": "dev-shell"}]
 
 
 def test_vm_get_container_actions_unknown_raises():
@@ -436,12 +450,12 @@ def test_vm_append_container_action_preserves_existing():
         {
             "name": "web-app",
             "type": "docker",
-            "actions": [{"label": "Terminal", "type": "terminal"}],
+            "actions": [{"label": "Dev Shell", "blueprint": "dev-shell"}],
         }
     ]
     put_result = [
-        {"label": "Terminal", "type": "terminal"},
-        {"label": "Claude", "type": "terminal", "shell_prefix": "claude"},
+        {"label": "Dev Shell", "blueprint": "dev-shell"},
+        {"label": "Claude", "blueprint": "claude-session"},
     ]
     get_resp = make_mock_response(existing_favs)
     put_resp = make_mock_response(put_result)
@@ -452,7 +466,7 @@ def test_vm_append_container_action_preserves_existing():
         calls.append(req)
         return responses[len(calls) - 1]
 
-    new_action = {"label": "Claude", "type": "terminal", "shell_prefix": "claude"}
+    new_action = {"label": "Claude", "blueprint": "claude-session"}
     with patch("urllib.request.urlopen", side_effect=mock_urlopen):
         result = tool_vm_append_container_action({"container": "web-app", "action": new_action})
 
@@ -464,9 +478,9 @@ def test_vm_append_container_action_preserves_existing():
     assert "/api/vms/favorites/web-app/actions" in calls[1].full_url
     put_body = json.loads(calls[1].data.decode("utf-8"))
     assert len(put_body) == 2
-    assert put_body[0]["label"] == "Terminal"
+    assert put_body[0]["label"] == "Dev Shell"
     assert put_body[1]["label"] == "Claude"
-    assert put_body[1]["shell_prefix"] == "claude"
+    assert put_body[1]["blueprint"] == "claude-session"
 
 
 def test_vm_append_container_action_unknown_container():
@@ -476,7 +490,7 @@ def test_vm_append_container_action_unknown_container():
     with patch("urllib.request.urlopen", return_value=mock_resp):
         with pytest.raises(ValueError, match="Favorite not found: nonexistent-xyz"):
             tool_vm_append_container_action(
-                {"container": "nonexistent-xyz", "action": {"label": "X", "type": "terminal"}}
+                {"container": "nonexistent-xyz", "action": {"label": "X", "blueprint": "test"}}
             )
 
 
@@ -489,7 +503,7 @@ def test_vm_append_container_action_missing_action():
 def test_vm_append_container_action_missing_container():
     """vm_append_container_action raises ValueError when container is missing."""
     with pytest.raises(ValueError, match="container is required"):
-        tool_vm_append_container_action({"action": {"label": "X", "type": "terminal"}})
+        tool_vm_append_container_action({"action": {"label": "X", "blueprint": "test"}})
 
 
 # ── vm_start_container / vm_stop_container ────────────────────────────────
@@ -537,3 +551,166 @@ def test_vm_stop_container_missing_name():
     """vm_stop_container raises ValueError when name is missing."""
     with pytest.raises(ValueError, match="name is required"):
         tool_vm_stop_container({})
+
+
+# ── Blueprint MCP tool tests ─────────────────────────────────────────────
+
+
+def test_blueprint_list_returns_names():
+    """blueprint_list GETs /api/blueprints and formats result."""
+    mock_resp = make_mock_response(["dev-shell", "claude-session"])
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_blueprint_list({})
+    assert "dev-shell" in result
+    assert "claude-session" in result
+    req = mock_open.call_args[0][0]
+    assert "/api/blueprints" in req.full_url
+
+
+def test_blueprint_list_empty():
+    """blueprint_list returns message when no blueprints exist."""
+    mock_resp = make_mock_response([])
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        result = tool_blueprint_list({})
+    assert "no" in result.lower()
+
+
+def test_blueprint_get_returns_definition():
+    """blueprint_get GETs /api/blueprints/{name} and returns JSON."""
+    bp_data = {"name": "dev-shell", "steps": [{"action": "open_terminal", "cmd": "bash"}]}
+    mock_resp = make_mock_response(bp_data)
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_blueprint_get({"name": "dev-shell"})
+    parsed = json.loads(result)
+    assert parsed["name"] == "dev-shell"
+    req = mock_open.call_args[0][0]
+    assert "/api/blueprints/dev-shell" in req.full_url
+
+
+def test_blueprint_get_missing_name():
+    """blueprint_get raises ValueError when name is missing."""
+    with pytest.raises(ValueError, match="name is required"):
+        tool_blueprint_get({})
+
+
+def test_blueprint_save_creates_new():
+    """blueprint_save tries PUT then falls back to POST for new blueprints."""
+    import urllib.error
+
+    bp = {"name": "dev-shell", "steps": [{"action": "open_terminal", "cmd": "bash"}]}
+    # First call (PUT) raises 404, second call (POST) succeeds
+    put_error = urllib.error.HTTPError("http://test/api/blueprints/dev-shell", 404, "Not Found", {}, None)
+    post_resp = make_mock_response({"name": "dev-shell", "status": "created"})
+    calls = []
+
+    def mock_urlopen(req, timeout=None):
+        calls.append(req)
+        if len(calls) == 1:
+            raise put_error
+        return post_resp
+
+    with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+        result = tool_blueprint_save({"name": "dev-shell", "blueprint": bp})
+    assert "dev-shell" in result
+    assert "created" in result.lower() or "saved" in result.lower()
+    assert calls[0].method == "PUT"
+    assert calls[1].method == "POST"
+
+
+def test_blueprint_save_updates_existing():
+    """blueprint_save PUTs to update an existing blueprint."""
+    bp = {"name": "dev-shell", "steps": [{"action": "open_terminal", "cmd": "bash"}]}
+    mock_resp = make_mock_response({"name": "dev-shell", "status": "updated"})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_blueprint_save({"name": "dev-shell", "blueprint": bp})
+    assert "dev-shell" in result
+    assert "updated" in result.lower() or "saved" in result.lower()
+    req = mock_open.call_args[0][0]
+    assert req.method == "PUT"
+
+
+def test_blueprint_save_missing_name():
+    """blueprint_save raises ValueError when name is missing."""
+    with pytest.raises(ValueError, match="name is required"):
+        tool_blueprint_save({"blueprint": {}})
+
+
+def test_blueprint_save_missing_blueprint():
+    """blueprint_save raises ValueError when blueprint is missing."""
+    with pytest.raises(ValueError, match="blueprint"):
+        tool_blueprint_save({"name": "test"})
+
+
+def test_blueprint_delete_calls_rest():
+    """blueprint_delete DELETEs /api/blueprints/{name}."""
+    mock_resp = make_mock_response({"status": "ok"})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_blueprint_delete({"name": "dev-shell"})
+    assert "dev-shell" in result
+    assert "deleted" in result.lower()
+    req = mock_open.call_args[0][0]
+    assert req.method == "DELETE"
+    assert "/api/blueprints/dev-shell" in req.full_url
+
+
+def test_blueprint_delete_missing_name():
+    """blueprint_delete raises ValueError when name is missing."""
+    with pytest.raises(ValueError, match="name is required"):
+        tool_blueprint_delete({})
+
+
+def test_blueprint_spawn_calls_rest():
+    """blueprint_spawn POSTs to /api/blueprints/spawn with name and context."""
+    mock_resp = make_mock_response({"id": "bp-card-123", "type": "blueprint"})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_blueprint_spawn({"name": "dev-shell", "context": {"container": "my-dev"}})
+    assert "bp-card-123" in result
+    assert "dev-shell" in result
+    req = mock_open.call_args[0][0]
+    assert req.method == "POST"
+    assert "/api/blueprints/spawn" in req.full_url
+    body = json.loads(req.data.decode("utf-8"))
+    assert body["name"] == "dev-shell"
+    assert body["context"]["container"] == "my-dev"
+
+
+def test_blueprint_spawn_with_layout():
+    """blueprint_spawn passes layout parameters to the API."""
+    mock_resp = make_mock_response({"id": "bp-card-456", "type": "blueprint"})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_blueprint_spawn({"name": "dev-shell", "x": 100, "y": 200, "w": 960, "h": 640})
+    assert "bp-card-456" in result
+    req = mock_open.call_args[0][0]
+    body = json.loads(req.data.decode("utf-8"))
+    assert body["x"] == 100
+    assert body["y"] == 200
+    assert body["w"] == 960
+    assert body["h"] == 640
+
+
+def test_blueprint_spawn_missing_name():
+    """blueprint_spawn raises ValueError when name is missing."""
+    with pytest.raises(ValueError, match="name is required"):
+        tool_blueprint_spawn({})
+
+
+def test_vm_add_favorite_default_actions_empty():
+    """vm_add_favorite defaults to empty actions array (no terminal default)."""
+    existing = []
+    get_resp = make_mock_response(existing)
+    put_resp = make_mock_response([{"name": "test-vm", "type": "docker", "actions": []}])
+    responses = [get_resp, put_resp]
+    call_count = [0]
+
+    def mock_urlopen(req, timeout=None):
+        resp = responses[call_count[0]]
+        call_count[0] += 1
+        return resp
+
+    with patch("urllib.request.urlopen", side_effect=mock_urlopen) as mock_open:
+        result = tool_vm_add_favorite({"name": "test-vm"})
+    assert "test-vm" in result
+    assert "0 action(s)" in result
+    put_req = mock_open.call_args_list[1][0][0]
+    put_body = json.loads(put_req.data.decode("utf-8"))
+    assert put_body[0]["actions"] == []
