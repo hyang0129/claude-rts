@@ -308,13 +308,18 @@ class BlueprintCard(BaseCard):
                 self.bus.unsubscribe(f"container:failed:{container_name}", on_failed)
 
     async def _step_open_terminal(self, step: dict) -> dict:
-        """Open a terminal card via the server API."""
+        """Open a terminal card via the server API.
+
+        Always starts an interactive shell session. When a ``cmd`` is provided
+        it is injected into the PTY after the shell settles, matching the ADR
+        "injected into terminal's PTY at spawn time" model.
+        """
         if self._app is None:
             raise RuntimeError("No app reference — cannot open terminal")
 
         from .terminal_card import TerminalCard
 
-        cmd = step.get("cmd", "bash -l")
+        cmd = step.get("cmd", "")
         hub = step.get("hub")
         container = step.get("container")
         layout = {}
@@ -325,9 +330,11 @@ class BlueprintCard(BaseCard):
         mgr = self._app["session_manager"]
         card_registry = self._app["card_registry"]
 
+        # Always spawn with bash so the session stays interactive.
+        # The user-supplied cmd is injected into the PTY after the shell settles.
         card = TerminalCard(
             session_manager=mgr,
-            cmd=cmd,
+            cmd="bash -l",
             hub=hub,
             container=container,
             layout=layout,
@@ -335,7 +342,37 @@ class BlueprintCard(BaseCard):
         await card.start()
         card_registry.register(card)
 
+        # Inject the user cmd via tmux send-keys (tmux-backed) or raw PTY write
+        # (non-tmux). tmux send-keys bypasses the terminal handshake entirely —
+        # raw PTY writes race with tmux's device-attributes response and corrupt input.
+        if cmd and card.session:
+            import sys as _sys
+
+            _docker = "docker.exe" if _sys.platform == "win32" else "docker"
+            session_id = card.session_id
+            if card.session.tmux_backed and container:
+                await asyncio.sleep(0.5)  # let tmux shell settle
+                proc = await asyncio.create_subprocess_exec(
+                    _docker, "exec", container,
+                    "tmux", "send-keys", "-t", session_id, cmd, "Enter",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    await self._log(f"  Warning: tmux send-keys failed: {stderr.decode().strip()}")
+                else:
+                    await self._log(f"  Injected cmd via tmux send-keys into {session_id}: {cmd!r}")
+            elif card.session.pty:
+                # Non-tmux: write directly — no handshake race since there's no tmux layer.
+                await asyncio.sleep(0.3)
+                card.session.pty.write(cmd.encode() + b"\n")
+                await self._log(f"  Injected cmd via PTY write into {session_id}: {cmd!r}")
+
         desc = card.to_descriptor()
+        # Expose the actual user cmd in the descriptor exec field for the frontend label.
+        if cmd:
+            desc["exec"] = cmd
         await self._log(f"  Opened terminal {card.session_id}")
         return desc
 

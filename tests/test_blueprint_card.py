@@ -196,7 +196,7 @@ async def test_step_open_terminal(tmp_path, monkeypatch):
     reg.register(card)
 
     await card.start()
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(1.2)  # step sleeps 0.5s for shell settle + processing
 
     term_desc = card.variables.get("term")
     assert term_desc is not None
@@ -234,7 +234,7 @@ async def test_variable_binding_chain(tmp_path, monkeypatch):
     reg.register(card)
 
     await card.start()
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(1.2)  # step sleeps 0.5s for shell settle + processing
 
     assert card.variables["cred"] == "bob"
     term_desc = card.variables["term"]

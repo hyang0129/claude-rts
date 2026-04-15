@@ -2706,15 +2706,17 @@ CARD_TYPE_REGISTRY.register('widget', {
 // ════════════════════════════════════════════
 class BlueprintCard extends Card {
   constructor(opts = {}) {
+    const blueprintName = opts.blueprintName || opts.blueprint_name || 'Blueprint';
     super({
       ...opts,
       type: 'blueprint',
       symbol: 'B',
+      hub: `Blueprint: ${blueprintName}`,
       w: opts.w || 500,
       h: opts.h || 340,
     });
     this.runId = opts.runId || opts.run_id || '';
-    this.blueprintName = opts.blueprintName || opts.blueprint_name || 'Blueprint';
+    this.blueprintName = blueprintName;
     this.cardId = opts.cardId || opts.card_id || '';
     this._logLines = [];
     this._status = 'running'; // running | completed | failed
@@ -2722,9 +2724,6 @@ class BlueprintCard extends Card {
 
   createElement() {
     super.createElement();
-    // Update title
-    const titleEl = this.el.querySelector('.card-title');
-    if (titleEl) titleEl.textContent = `Blueprint: ${this.blueprintName}`;
     // Create log container in body
     const body = this.el.querySelector('.card-body');
     if (body) {
@@ -2754,9 +2753,9 @@ class BlueprintCard extends Card {
 
   setStatus(status) {
     this._status = status;
-    const titleEl = this.el ? this.el.querySelector('.card-title') : null;
+    const titleEl = this.el ? this.el.querySelector('.hub-name') : null;
     if (titleEl) {
-      const icon = status === 'completed' ? ' [DONE]' : status === 'failed' ? ' [FAILED]' : '';
+      const icon = status === 'completed' ? ' ✓' : status === 'failed' ? ' ✗' : '';
       titleEl.textContent = `Blueprint: ${this.blueprintName}${icon}`;
     }
     // Color the header
