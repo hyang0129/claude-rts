@@ -353,8 +353,15 @@ class BlueprintCard(BaseCard):
             if card.session.tmux_backed and container:
                 await asyncio.sleep(0.5)  # let tmux shell settle
                 proc = await asyncio.create_subprocess_exec(
-                    _docker, "exec", container,
-                    "tmux", "send-keys", "-t", session_id, cmd, "Enter",
+                    _docker,
+                    "exec",
+                    container,
+                    "tmux",
+                    "send-keys",
+                    "-t",
+                    session_id,
+                    cmd,
+                    "Enter",
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
                 )
