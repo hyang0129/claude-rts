@@ -316,7 +316,7 @@ async def test_canvas_claude_card_seed_trust_settings_profile(monkeypatch):
     assert "base64 -d" in shell_script
     # Second call: MCP .claude.json patch via python3
     mcp_cmd = calls[1]
-    assert mcp_cmd[0] == "docker.exe"
+    assert mcp_cmd[0] == _DOCKER
     assert mcp_cmd[1] == "exec"
     assert "my-container" in mcp_cmd
     assert "python3" in mcp_cmd[-1]
