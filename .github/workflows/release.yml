@@ -10,7 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
 
     steps:
       - uses: actions/checkout@v4
@@ -38,13 +37,6 @@ jobs:
         run: |
           pip install ".[test]"
           python -m pytest tests/ -v --ignore=tests/e2e
-
-      - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: twine upload dist/*
-        if: env.TWINE_PASSWORD != ''
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
