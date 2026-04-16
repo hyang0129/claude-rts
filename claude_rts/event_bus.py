@@ -28,17 +28,23 @@ class EventBus:
         if callback not in subs:
             subs.append(callback)
             logger.debug("EventBus: subscribed to '{}' ({} total)", event_type, len(subs))
+        else:
+            cb_name = getattr(callback, "__name__", repr(callback))
+            logger.debug("EventBus: duplicate subscribe ignored for '{}' ({})", event_type, cb_name)
 
     def unsubscribe(self, event_type: str, callback: Callable) -> None:
         """Remove a previously registered callback.  No-op if not found."""
         subs = self._subscribers.get(event_type)
         if subs is None:
+            cb_name = getattr(callback, "__name__", repr(callback))
+            logger.debug("EventBus: unsubscribe miss for '{}' — callback '{}' not found", event_type, cb_name)
             return
         try:
             subs.remove(callback)
             logger.debug("EventBus: unsubscribed from '{}' ({} remain)", event_type, len(subs))
         except ValueError:
-            pass
+            cb_name = getattr(callback, "__name__", repr(callback))
+            logger.debug("EventBus: unsubscribe miss for '{}' — callback '{}' not found", event_type, cb_name)
 
     async def emit(self, event_type: str, payload: dict) -> None:
         """Fan out *payload* to all subscribers of *event_type* and wildcard ``"*"``.
@@ -56,13 +62,15 @@ class EventBus:
 
         for cb in list(targets):
             cb_name = getattr(cb, "__name__", repr(cb))
-            logger.debug("EventBus: dispatching '{}' → {}", event_type, cb_name)
             try:
                 ret = cb(event_type, payload)
                 if inspect.isawaitable(ret):
+                    logger.debug("EventBus: scheduling async '{}' → {}", event_type, cb_name)
                     task = asyncio.create_task(ret)
                     self._pending_tasks.add(task)
                     task.add_done_callback(lambda t: self._task_done(t, event_type))
+                else:
+                    logger.debug("EventBus: called sync '{}' → {}", event_type, cb_name)
             except Exception:
                 logger.exception(
                     "EventBus: subscriber raised for event '{}'",

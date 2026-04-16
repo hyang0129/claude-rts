@@ -165,7 +165,7 @@ async def test_wildcard_and_specific_both_fire():
     assert len(tags) == 2
 
 
-async def test_emit_logs_event_and_subscriber_count(capfd):
+async def test_emit_logs_event_and_subscriber_count():
     """emit() logs the event type and subscriber count at DEBUG level."""
     bus = EventBus()
     log_messages: list[str] = []
@@ -181,7 +181,7 @@ async def test_emit_logs_event_and_subscriber_count(capfd):
         assert len(emit_logs) == 1
         assert "2 subscriber(s)" in emit_logs[0]
 
-        dispatch_logs = [m for m in log_messages if "dispatching 'blueprint:completed'" in m]
+        dispatch_logs = [m for m in log_messages if "called sync 'blueprint:completed'" in m]
         assert len(dispatch_logs) == 2
     finally:
         logger.remove(handler_id)
@@ -199,6 +199,72 @@ async def test_emit_logs_zero_subscribers():
         emit_logs = [m for m in log_messages if "emit 'blueprint:failed'" in m]
         assert len(emit_logs) == 1
         assert "0 subscriber(s)" in emit_logs[0]
+    finally:
+        logger.remove(handler_id)
+
+
+async def test_subscribe_duplicate_logs_ignored():
+    """Registering the same callback twice logs a duplicate-ignored message."""
+    bus = EventBus()
+    log_messages: list[str] = []
+    handler_id = logger.add(lambda msg: log_messages.append(msg), level="DEBUG")
+
+    def cb(et, p):
+        pass
+
+    try:
+        bus.subscribe("ev", cb)
+        bus.subscribe("ev", cb)  # duplicate
+
+        dup_logs = [m for m in log_messages if "duplicate subscribe ignored" in m and "'ev'" in m]
+        assert len(dup_logs) == 1
+        assert "cb" in dup_logs[0]
+    finally:
+        logger.remove(handler_id)
+
+
+async def test_unsubscribe_miss_logs_callback_name():
+    """Unsubscribing a callback that was never registered logs a miss message."""
+    bus = EventBus()
+    log_messages: list[str] = []
+    handler_id = logger.add(lambda msg: log_messages.append(msg), level="DEBUG")
+
+    def cb(et, p):
+        pass
+
+    try:
+        bus.unsubscribe("ev", cb)  # never subscribed
+
+        miss_logs = [m for m in log_messages if "unsubscribe miss" in m and "'ev'" in m]
+        assert len(miss_logs) == 1
+        assert "cb" in miss_logs[0]
+    finally:
+        logger.remove(handler_id)
+
+
+async def test_emit_distinguishes_async_vs_sync_dispatch():
+    """emit() logs 'scheduling async' for async callbacks and 'called sync' for sync ones."""
+    bus = EventBus()
+    log_messages: list[str] = []
+    handler_id = logger.add(lambda msg: log_messages.append(msg), level="DEBUG")
+
+    def sync_cb(et, p):
+        pass
+
+    async def async_cb(et, p):
+        pass
+
+    try:
+        bus.subscribe("ev", sync_cb)
+        bus.subscribe("ev", async_cb)
+
+        await bus.emit("ev", {})
+        await asyncio.sleep(0.05)
+
+        sync_logs = [m for m in log_messages if "called sync 'ev'" in m]
+        async_logs = [m for m in log_messages if "scheduling async 'ev'" in m]
+        assert len(sync_logs) == 1
+        assert len(async_logs) == 1
     finally:
         logger.remove(handler_id)
 
