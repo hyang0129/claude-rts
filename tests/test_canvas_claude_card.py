@@ -2,7 +2,6 @@
 
 import base64
 import json
-import sys
 import time
 
 import pytest
