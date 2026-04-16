@@ -7,9 +7,14 @@ import json as _json
 import pathlib as _pathlib
 import re as _re
 import subprocess as _subprocess
+import sys as _sys
 
 from loguru import logger
+
 from .terminal_card import TerminalCard
+
+# Platform-aware Docker binary — matches pattern in server.py, discovery.py, etc.
+_DOCKER = "docker.exe" if _sys.platform == "win32" else "docker"
 
 # Only alphanumeric, hyphens, and underscores are safe for shell interpolation.
 _SAFE_NAME = _re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -144,7 +149,7 @@ class CanvasClaudeCard(TerminalCard):
         #
         # The MCP server is registered via `claude mcp add` by _seed_claude_settings()
         # so no --mcp-config flag is needed here.
-        docker_bin = "docker.exe"  # Windows host
+        docker_bin = _DOCKER
         if profile:
             claude_cmd = f"env CLAUDE_CONFIG_DIR=/profiles/{profile} claude --dangerously-skip-permissions"
         else:
@@ -191,7 +196,7 @@ class CanvasClaudeCard(TerminalCard):
         """
         src = _pathlib.Path(__file__).parent.parent / "mcp_server.py"
         result = _subprocess.run(
-            ["docker.exe", "cp", str(src), f"{self._effective_container}:/home/util/mcp_server.py"],
+            [_DOCKER, "cp", str(src), f"{self._effective_container}:/home/util/mcp_server.py"],
             timeout=10,
             capture_output=True,
         )
@@ -234,7 +239,7 @@ class CanvasClaudeCard(TerminalCard):
         workspace_path = f"{workspace_dir}/settings.json"
 
         write_cmd = [
-            "docker.exe",
+            _DOCKER,
             "exec",
             self._effective_container,
             "bash",
@@ -283,7 +288,7 @@ class CanvasClaudeCard(TerminalCard):
         mcp_patch_b64 = _b64.b64encode(mcp_patch_script.encode()).decode()
 
         mcp_cmd = [
-            "docker.exe",
+            _DOCKER,
             "exec",
             self._effective_container,
             "bash",
@@ -304,7 +309,7 @@ class CanvasClaudeCard(TerminalCard):
         try:
             result = _subprocess.run(
                 [
-                    "docker.exe",
+                    _DOCKER,
                     "exec",
                     self._effective_container,
                     "tmux",
@@ -330,7 +335,7 @@ class CanvasClaudeCard(TerminalCard):
         try:
             _subprocess.run(
                 [
-                    "docker.exe",
+                    _DOCKER,
                     "exec",
                     self._effective_container,
                     "tmux",
@@ -352,7 +357,7 @@ class CanvasClaudeCard(TerminalCard):
         command attaches to it (resume).  Otherwise, it creates a new tmux
         session running the claude command.
         """
-        docker_bin = "docker.exe"
+        docker_bin = _DOCKER
         if self._has_tmux_session():
             self.cmd = f"{docker_bin} exec -it {self._effective_container} tmux attach-session -t {TMUX_SESSION_NAME}"
             logger.info("CanvasClaudeCard: attaching to existing tmux session {}", TMUX_SESSION_NAME)
