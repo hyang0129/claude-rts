@@ -186,7 +186,7 @@ def refresh_vm_card(page):
         }
     }"""
     )
-    page.wait_for_timeout(2000)
+    page.wait_for_timeout(3000)
 
 
 def cleanup_non_vm_cards(page):
@@ -204,7 +204,15 @@ def cleanup_non_vm_cards(page):
         for (const idx of toRemove) cards.splice(idx, 1);
     }"""
     )
-    page.wait_for_timeout(300)
+    page.wait_for_function(
+        """() => {
+            const all = document.querySelectorAll('[data-card-id]');
+            return Array.from(all).every(
+                c => c.querySelector('[data-vm-search]') !== null
+            );
+        }""",
+        timeout=3000,
+    )
 
 
 def ensure_vm_card_exists(page):
@@ -496,11 +504,14 @@ class TestRealTerminalAction:
 
         # Click Terminal action button
         action_btn = page.locator(f'[data-vm-action="{bash_container}"][data-action-idx="0"]')
-        assert action_btn.count() > 0, "Terminal action button should exist"
+        action_btn.wait_for(state="visible", timeout=5000)
         action_btn.click()
 
-        # Wait for new card to appear
-        page.wait_for_timeout(3000)
+        # Poll until card count increases (10s budget for WS -> backend -> spawn pipeline).
+        page.wait_for_function(
+            f"() => document.querySelectorAll('[data-card-id]').length > {initial_count}",
+            timeout=10000,
+        )
 
         # Verify new card was spawned
         new_count = page.locator("[data-card-id]").count()

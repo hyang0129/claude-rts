@@ -76,7 +76,16 @@ def clear_canvas(page):
         }
     }"""
     )
-    page.wait_for_timeout(300)
+    # Wait until the canvas DOM is truly empty (no ghost cards from queued
+    # control-ws broadcasts) instead of a fixed 300ms sleep.
+    page.wait_for_function(
+        """() => {
+            const el = document.getElementById('canvas');
+            const c = (typeof cards !== 'undefined') ? cards.length : 0;
+            return el !== null && el.children.length === 0 && c === 0;
+        }""",
+        timeout=3000,
+    )
 
 
 def put_canvas(page, canvas_name, payload):

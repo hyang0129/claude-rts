@@ -23,12 +23,17 @@ pw = pytest.importorskip("playwright")
 
 
 def open_context_menu(page, x=500, y=500):
-    """Right-click viewport at (x, y) and wait for #context-menu visible."""
+    """Right-click viewport at (x, y) and wait for #context-menu visible with items."""
     # Dismiss any leftover menu from a prior test before right-clicking,
     # otherwise the visible menu intercepts pointer events.
     page.evaluate("() => { if (typeof hideContextMenu === 'function') hideContextMenu(); }")
     page.locator("#viewport").click(button="right", position={"x": x, "y": y})
-    page.locator("#context-menu").wait_for(state="visible", timeout=3000)
+    # Wait for menu to be visible AND contain at least one item.
+    # If the right-click was intercepted by a ghost card, showContextMenu never
+    # fires and this times out with a clear error.
+    page.locator(
+        "#context-menu.visible .ctx-item[data-hub], #context-menu.visible .ctx-item[data-host-shell]"
+    ).first.wait_for(state="visible", timeout=5000)
 
 
 def count_cards_by_type(page, card_type):
@@ -108,7 +113,16 @@ def clear_canvas(page):
         }
     }"""
     )
-    page.wait_for_timeout(300)
+    # Wait until the canvas DOM is truly empty (no ghost cards from queued
+    # control-ws broadcasts) instead of a fixed 300ms sleep.
+    page.wait_for_function(
+        """() => {
+            const el = document.getElementById('canvas');
+            const c = (typeof cards !== 'undefined') ? cards.length : 0;
+            return el !== null && el.children.length === 0 && c === 0;
+        }""",
+        timeout=3000,
+    )
 
 
 def wait_for_new_card(page, initial_count, timeout_ms=3000):
