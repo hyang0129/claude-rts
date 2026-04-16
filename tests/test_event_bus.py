@@ -2,6 +2,8 @@
 
 import asyncio
 
+from loguru import logger
+
 from claude_rts.event_bus import EventBus
 from tests.conftest import ProbeCard, MockSession, MockSessionManager
 
@@ -161,6 +163,44 @@ async def test_wildcard_and_specific_both_fire():
     assert "specific" in tags
     assert "wildcard" in tags
     assert len(tags) == 2
+
+
+async def test_emit_logs_event_and_subscriber_count(capfd):
+    """emit() logs the event type and subscriber count at DEBUG level."""
+    bus = EventBus()
+    log_messages: list[str] = []
+    handler_id = logger.add(lambda msg: log_messages.append(msg), level="DEBUG")
+
+    try:
+        bus.subscribe("blueprint:completed", lambda et, p: None)
+        bus.subscribe("blueprint:completed", lambda et, p: None)
+
+        await bus.emit("blueprint:completed", {"status": "ok"})
+
+        emit_logs = [m for m in log_messages if "emit 'blueprint:completed'" in m]
+        assert len(emit_logs) == 1
+        assert "2 subscriber(s)" in emit_logs[0]
+
+        dispatch_logs = [m for m in log_messages if "dispatching 'blueprint:completed'" in m]
+        assert len(dispatch_logs) == 2
+    finally:
+        logger.remove(handler_id)
+
+
+async def test_emit_logs_zero_subscribers():
+    """emit() logs correctly when there are no subscribers."""
+    bus = EventBus()
+    log_messages: list[str] = []
+    handler_id = logger.add(lambda msg: log_messages.append(msg), level="DEBUG")
+
+    try:
+        await bus.emit("blueprint:failed", {"error": "timeout"})
+
+        emit_logs = [m for m in log_messages if "emit 'blueprint:failed'" in m]
+        assert len(emit_logs) == 1
+        assert "0 subscriber(s)" in emit_logs[0]
+    finally:
+        logger.remove(handler_id)
 
 
 # ── Integration: ServiceCard emits on bus after probe ──────────────────────

@@ -52,7 +52,11 @@ class EventBus:
         if event_type != "*":
             targets.extend(self._subscribers.get("*", []))
 
+        logger.debug("EventBus: emit '{}' → {} subscriber(s)", event_type, len(targets))
+
         for cb in list(targets):
+            cb_name = getattr(cb, "__name__", repr(cb))
+            logger.debug("EventBus: dispatching '{}' → {}", event_type, cb_name)
             try:
                 ret = cb(event_type, payload)
                 if inspect.isawaitable(ret):
