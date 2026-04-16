@@ -36,4 +36,6 @@ jobs:
           context: claude_rts
           file: claude_rts/Dockerfile.util
           push: true
-          tags: ${{ env.IMAGE_NAME }}:latest
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
