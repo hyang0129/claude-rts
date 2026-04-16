@@ -1107,6 +1107,11 @@ class Card {
     this.el = null;
     this._cancelDrag = null;
     this._cancelResize = null;
+    // Issue #151: card starring, rename, recovery, stable identity
+    this.starred = true;        // starred by default — all cards resume on reload
+    this.displayName = '';       // user-friendly label (empty = use hub/container name)
+    this.recoveryScript = '';    // shell command(s) to re-run on demand
+    this.cardUid = '';           // stable UUID across restarts, generated once at creation
   }
 
   createElement() {
@@ -1126,6 +1131,23 @@ class Card {
     titlebar.className = 'terminal-titlebar';
     titlebar.dataset.drag = this.id;
 
+    // Star toggle (issue #151)
+    const starBtn = document.createElement('button');
+    starBtn.className = 'star-btn';
+    starBtn.dataset.star = this.id;
+    starBtn.title = this.starred ? 'Starred — will resume on reload' : 'Unstarred — dormant on reload';
+    starBtn.textContent = this.starred ? '\u2605' : '\u2606';
+    starBtn.style.cssText = 'background:none;border:none;cursor:pointer;font-size:14px;padding:0 4px;color:' + (this.starred ? '#f9e2af' : '#585b70');
+    starBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.starred = !this.starred;
+      starBtn.textContent = this.starred ? '\u2605' : '\u2606';
+      starBtn.style.color = this.starred ? '#f9e2af' : '#585b70';
+      starBtn.title = this.starred ? 'Starred — will resume on reload' : 'Unstarred — dormant on reload';
+      saveLayout();
+    });
+    titlebar.appendChild(starBtn);
+
     const symbolSpan = document.createElement('span');
     symbolSpan.className = 'hub-symbol';
     symbolSpan.dataset.symbol = this.id;
@@ -1139,9 +1161,31 @@ class Card {
     badgeContainer.dataset.cgBadges = this.id;
     titlebar.appendChild(badgeContainer);
 
+    // Editable display name (issue #151)
     const nameSpan = document.createElement('span');
     nameSpan.className = 'hub-name';
-    nameSpan.textContent = this.hub;
+    nameSpan.dataset.displayName = this.id;
+    nameSpan.textContent = this.displayName || this.hub;
+    nameSpan.title = 'Double-click to rename';
+    nameSpan.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = this.displayName || this.hub || '';
+      input.style.cssText = 'background:#1e1e2e;color:#cdd6f4;border:1px solid #585b70;font-size:12px;padding:0 4px;width:120px;outline:none;border-radius:3px;';
+      const finish = () => {
+        const val = input.value.trim();
+        this.displayName = val;
+        nameSpan.textContent = val || this.hub;
+        if (input.parentNode) input.parentNode.replaceChild(nameSpan, input);
+        saveLayout();
+      };
+      input.addEventListener('blur', finish);
+      input.addEventListener('keydown', (ke) => { if (ke.key === 'Enter') { ke.preventDefault(); finish(); } if (ke.key === 'Escape') { input.value = this.displayName || this.hub || ''; finish(); } });
+      nameSpan.parentNode.replaceChild(input, nameSpan);
+      input.focus();
+      input.select();
+    });
     titlebar.appendChild(nameSpan);
 
     if (copyLabel > 0) {
@@ -1159,6 +1203,21 @@ class Card {
     const spacer = document.createElement('span');
     spacer.className = 'spacer';
     titlebar.appendChild(spacer);
+
+    // Recovery script button (issue #151) — visible only when recoveryScript is set
+    const recoveryBtn = document.createElement('button');
+    recoveryBtn.className = 'recovery-btn';
+    recoveryBtn.dataset.recovery = this.id;
+    recoveryBtn.title = 'Run recovery script';
+    recoveryBtn.textContent = '\u21bb';
+    recoveryBtn.style.cssText = 'background:none;border:none;cursor:pointer;font-size:14px;padding:0 4px;color:#a6e3a1;display:' + (this.recoveryScript ? 'inline' : 'none');
+    recoveryBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (this.recoveryScript && this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(new TextEncoder().encode(this.recoveryScript + '\n'));
+      }
+    });
+    titlebar.appendChild(recoveryBtn);
 
     const closeBtn = document.createElement('button');
     closeBtn.className = 'close-btn';
@@ -1302,6 +1361,11 @@ class Card {
     const data = { hub: this.hub, x: this.x, y: this.y, w: this.w, h: this.h, type: this.type, controlGroups: this.controlGroupNums.length > 0 ? [...this.controlGroupNums] : undefined };
     if (this.execCmd) data.exec = this.execCmd;
     if (this.sessionId) data.session_id = this.sessionId;
+    // Issue #151: persist starring, rename, recovery, stable identity
+    if (!this.starred) data.starred = false;
+    if (this.displayName) data.displayName = this.displayName;
+    if (this.recoveryScript) data.recoveryScript = this.recoveryScript;
+    if (this.cardUid) data.cardUid = this.cardUid;
     return data;
   }
 
@@ -1519,6 +1583,12 @@ class TerminalCard extends Card {
     this._reconnectDelay = 1000;
     this._reconnectTimer = null;
     this._intentionalClose = false;
+    // Issue #151
+    if (opts.starred != null) this.starred = opts.starred;
+    if (opts.displayName) this.displayName = opts.displayName;
+    if (opts.recoveryScript) this.recoveryScript = opts.recoveryScript;
+    if (opts.cardUid) this.cardUid = opts.cardUid;
+    if (!this.cardUid) this.cardUid = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).slice(2) + Date.now().toString(36));
   }
 
   createBody() {
@@ -1528,11 +1598,46 @@ class TerminalCard extends Card {
   }
 
   onInit() {
+    if (!this.starred) {
+      // Dormant card: show placeholder instead of live terminal
+      this._renderDormant();
+      return;
+    }
     this.initTerminal();
     this.connectWs();
     this.setupInput();
     this.setupResizeObserver();
     this.setupClaudeBtn();
+  }
+
+  _renderDormant() {
+    const body = this.el.querySelector(`[data-body="${this.id}"]`);
+    body.style.cssText = 'display:flex;align-items:center;justify-content:center;flex-direction:column;opacity:0.5;';
+    const label = document.createElement('div');
+    label.style.cssText = 'color:#585b70;font-size:14px;margin-bottom:12px;text-align:center;';
+    label.textContent = 'Dormant — unstarred';
+    body.appendChild(label);
+    const resumeBtn = document.createElement('button');
+    resumeBtn.textContent = 'Resume';
+    resumeBtn.style.cssText = 'background:#313244;color:#cdd6f4;border:1px solid #585b70;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:13px;';
+    resumeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.starred = true;
+      // Update star button
+      const starBtn = this.el.querySelector(`[data-star="${this.id}"]`);
+      if (starBtn) { starBtn.textContent = '\u2605'; starBtn.style.color = '#f9e2af'; starBtn.title = 'Starred — will resume on reload'; }
+      // Clear dormant body and init live terminal
+      body.innerHTML = '';
+      body.style.cssText = '';
+      this.initTerminal();
+      this.connectWs();
+      this.setupInput();
+      this.setupResizeObserver();
+      this.setupClaudeBtn();
+      saveLayout();
+    });
+    body.appendChild(resumeBtn);
+    this.updateState('dead');
   }
 
   onDestroy() {
@@ -1760,6 +1865,10 @@ class TerminalCard extends Card {
       symbol: (typeof hubSymbolMap !== 'undefined' && hubSymbolMap[data.hub]) || '?',
       exec: data.exec || null,
       sessionId: data.session_id || null,
+      starred: data.starred != null ? data.starred : true,
+      displayName: data.displayName || '',
+      recoveryScript: data.recoveryScript || '',
+      cardUid: data.cardUid || '',
     });
     if (Array.isArray(data.controlGroups)) {
       card.controlGroupNums = [...data.controlGroups];
@@ -2868,6 +2977,10 @@ async function spawnFromSerialized(s) {
       exec: s.exec,
       sessionId: s.session_id,
       controlGroups: s.controlGroups,
+      starred: s.starred != null ? s.starred : true,
+      displayName: s.displayName || '',
+      recoveryScript: s.recoveryScript || '',
+      cardUid: s.cardUid || '',
     });
   }
   if (typeName === 'widget') {
@@ -3499,6 +3612,8 @@ function connectControlWs() {
         handleControlCardCreated(msg);
       } else if (msg.type === 'card_deleted') {
         handleControlCardDeleted(msg);
+      } else if (msg.type === 'card_updated') {
+        handleControlCardUpdated(msg);
       } else if (msg.type === 'blueprint:log') {
         handleBlueprintLog(msg);
       } else if (msg.type === 'blueprint:completed') {
@@ -3599,6 +3714,31 @@ function handleControlCardDeleted(msg) {
   saveLayout();
   drawMinimap();
   updateHubCount();
+}
+
+function handleControlCardUpdated(msg) {
+  const cardId = msg.card_id;
+  if (!cardId) return;
+
+  // Find the card by session_id (TerminalCard)
+  const card = cards.find(c => c.sessionId === cardId);
+  if (!card) return;
+
+  // Update display_name if present
+  if ('display_name' in msg) {
+    card.displayName = msg.display_name;
+    const nameSpan = card.el ? card.el.querySelector(`[data-display-name="${card.id}"]`) : null;
+    if (nameSpan) nameSpan.textContent = msg.display_name || card.hub;
+  }
+
+  // Update recovery_script if present
+  if ('recovery_script' in msg) {
+    card.recoveryScript = msg.recovery_script;
+    const recoveryBtn = card.el ? card.el.querySelector(`[data-recovery="${card.id}"]`) : null;
+    if (recoveryBtn) recoveryBtn.style.display = msg.recovery_script ? 'inline' : 'none';
+  }
+
+  saveLayout();
 }
 
 // ════════════════════════════════════════════

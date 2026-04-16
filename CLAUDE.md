@@ -80,11 +80,11 @@ CLAUDE_RTS_TEST_MODE=1 python -m claude_rts   # enables puppeting API at /api/te
 | `test_server_profiles.py` | 9 | Profile manager API endpoints |
 | `test_dev_config.py` | 8 | Dev-config preset loading and setup |
 | `test_sessions.py` | 30 | ScrollbackBuffer, SessionManager, test puppeting API |
-| `test_terminal_card.py` | 11 | TerminalCard lifecycle, CardRegistry, server integration |
-| `test_claude_api.py` | 32 | Claude terminal control API (CRUD, send/read, strip_ansi, /ws/control, full lifecycle integration, ${priority_credential} interpolation) |
+| `test_terminal_card.py` | 15 | TerminalCard lifecycle, CardRegistry, server integration, display_name, recovery_script |
+| `test_claude_api.py` | 39 | Claude terminal control API (CRUD, send/read, strip_ansi, /ws/control, full lifecycle, ${priority_credential}, rename, recovery-script, card_updated broadcast) |
 | `test_event_bus.py` | 14 | EventBus core (subscribe, emit, unsubscribe, wildcard, async, errors, clear) + integration (ServiceCard bus emit, CardRegistry events) |
 | `test_vm_manager.py` | 18 | VM Manager API (discover containers, favorites CRUD, start/stop container, per-container actions, route registration) |
-| `test_mcp_server.py` | 56 | MCP server tool functions (terminal CRUD + VM discover/favorites/actions/start/stop/append/get + blueprint list/get/save/delete/spawn) and JSON-RPC dispatch |
+| `test_mcp_server.py` | 66 | MCP server tool functions (terminal CRUD/rename/recovery + VM discover/favorites/actions/start/stop/append/get + blueprint list/get/save/delete/spawn) and JSON-RPC dispatch |
 | `e2e/test_smoke.py` | 7 | Playwright Electron smoke tests — launch, spawn, drag, resize, widgets, pan/zoom, save/reload |
 
 Tests use `MockPty` to avoid needing Docker. E2E tests require Playwright and Electron (`pip install -e ".[e2e]" && python -m playwright install chromium`).
@@ -111,8 +111,10 @@ Tests use `MockPty` to avoid needing Docker. E2E tests require Playwright and El
 | POST | `/api/claude/terminal/{id}/send` | Write text to a terminal PTY |
 | GET | `/api/claude/terminal/{id}/read` | Read scrollback (optional: strip_ansi, last_n) |
 | GET | `/api/claude/terminal/{id}/status` | Session metadata (alive, age, idle, cmd) |
+| PUT | `/api/claude/terminal/{id}/rename` | Set display name on a terminal card |
+| GET/PUT | `/api/claude/terminal/{id}/recovery-script` | Read/set recovery script on a terminal card |
 | DELETE | `/api/claude/terminal/{id}` | Stop card, clean up session and card registry |
-| GET | `/api/claude/terminals` | List all terminal cards with metadata |
+| GET | `/api/claude/terminals` | List all terminal cards with metadata (includes display_name, recovery_script) |
 | WS | `/ws/session/new?cmd=...` | Create persistent PTY session |
 | WS | `/ws/session/{session_id}` | Reconnect to existing session |
 | WS | `/ws/control` | Card lifecycle events (card_created, card_deleted) broadcast |
@@ -165,6 +167,9 @@ The Canvas Claude card (`claude_rts/mcp_server.py`) exposes a JSON-RPC stdio MCP
 | `write_terminal` | `POST /api/claude/terminal/{id}/send` | Write keystrokes to a terminal |
 | `list_terminals` | `GET /api/claude/terminals` | List active terminal cards |
 | `delete_terminal` | `DELETE /api/claude/terminal/{id}` | Close a terminal card |
+| `rename_terminal` | `PUT /api/claude/terminal/{id}/rename` | Set a display name on a terminal card |
+| `set_recovery_script` | `PUT /api/claude/terminal/{id}/recovery-script` | Set recovery script on a terminal card |
+| `get_recovery_script` | `GET /api/claude/terminal/{id}/recovery-script` | Get recovery script for a terminal card |
 | `vm_discover_containers` | `GET /api/vms/discover` | List all Docker containers (running + stopped) |
 | `vm_get_favorites` | `GET /api/vms/favorites` | Read the VM Manager favorites list with blueprint-actions |
 | `vm_get_container_actions` | `GET /api/vms/favorites` (filtered) | Return one favorite's `actions` array; errors on unknown container |

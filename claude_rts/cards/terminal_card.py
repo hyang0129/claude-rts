@@ -26,6 +26,8 @@ class TerminalCard(BaseCard):
         container: str | None = None,
         card_id: str | None = None,
         layout: dict | None = None,
+        display_name: str | None = None,
+        recovery_script: str | None = None,
     ):
         # card_id is set *after* start() when we know the session_id,
         # unless the caller supplies one (reconnect path).
@@ -36,6 +38,8 @@ class TerminalCard(BaseCard):
         self.container = container
         self._session = None  # set by start()
         self.layout = layout or {}  # optional {x, y, w, h} hints for frontend
+        self.display_name = display_name or ""
+        self.recovery_script = recovery_script or ""
 
     # ── Descriptor serialization ───────────────────────────────────────
 
@@ -55,6 +59,10 @@ class TerminalCard(BaseCard):
             desc["container"] = self.container
         if self.cmd:
             desc["exec"] = self.cmd
+        if self.display_name:
+            desc["display_name"] = self.display_name
+        if self.recovery_script:
+            desc["recovery_script"] = self.recovery_script
         if self.layout:
             desc.update(self.layout)
         return desc

@@ -116,7 +116,16 @@ def tool_list_terminals(args):  # noqa: ARG001
         return "No active terminals"
     lines = []
     for t in result:
-        lines.append(f"- session_id: {t.get('session_id')} cmd: {t.get('exec', '')} alive: {t.get('alive', False)}")
+        parts = [f"session_id: {t.get('session_id')}"]
+        dn = t.get("display_name", "")
+        if dn:
+            parts.append(f"name: {dn}")
+        parts.append(f"cmd: {t.get('exec', '')}")
+        parts.append(f"alive: {t.get('alive', False)}")
+        rs = t.get("recovery_script", "")
+        if rs:
+            parts.append(f"recovery_script: {rs}")
+        lines.append("- " + " ".join(parts))
     return "\n".join(lines)
 
 
@@ -127,6 +136,60 @@ def tool_delete_terminal(args):
     safe_id = urllib.parse.quote(session_id, safe="")
     http_request("DELETE", f"/api/claude/terminal/{safe_id}")
     return "Terminal deleted"
+
+
+def tool_rename_terminal(args):
+    """Set a display name on a terminal card."""
+    session_id = args.get("session_id", "")
+    if not session_id:
+        raise ValueError("session_id is required")
+    display_name = args.get("display_name", "")
+    safe_id = urllib.parse.quote(session_id, safe="")
+    body = json.dumps({"display_name": display_name})
+    req = urllib.request.Request(
+        API_BASE.rstrip("/") + f"/api/claude/terminal/{safe_id}/rename",
+        data=body.encode("utf-8"),
+        method="PUT",
+    )
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code}: {e.read().decode()}")
+    return f"Renamed terminal {session_id} to {result.get('display_name', '')!r}"
+
+
+def tool_set_recovery_script(args):
+    """Set a recovery script on a terminal card."""
+    session_id = args.get("session_id", "")
+    if not session_id:
+        raise ValueError("session_id is required")
+    script = args.get("script", "")
+    safe_id = urllib.parse.quote(session_id, safe="")
+    body = json.dumps({"recovery_script": script})
+    req = urllib.request.Request(
+        API_BASE.rstrip("/") + f"/api/claude/terminal/{safe_id}/recovery-script",
+        data=body.encode("utf-8"),
+        method="PUT",
+    )
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()  # consume response
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code}: {e.read().decode()}")
+    return f"Recovery script set for {session_id}"
+
+
+def tool_get_recovery_script(args):
+    """Get the recovery script for a terminal card."""
+    session_id = args.get("session_id", "")
+    if not session_id:
+        raise ValueError("session_id is required")
+    safe_id = urllib.parse.quote(session_id, safe="")
+    result = http_request("GET", f"/api/claude/terminal/{safe_id}/recovery-script")
+    return result.get("recovery_script", "")
 
 
 def tool_vm_discover_containers(args):  # noqa: ARG001
@@ -317,6 +380,9 @@ TOOL_HANDLERS = {
     "write_terminal": tool_write_terminal,
     "list_terminals": tool_list_terminals,
     "delete_terminal": tool_delete_terminal,
+    "rename_terminal": tool_rename_terminal,
+    "set_recovery_script": tool_set_recovery_script,
+    "get_recovery_script": tool_get_recovery_script,
     "vm_discover_containers": tool_vm_discover_containers,
     "vm_get_favorites": tool_vm_get_favorites,
     "vm_set_container_actions": tool_vm_set_container_actions,
@@ -501,6 +567,73 @@ TOOL_SCHEMAS = [
                 "session_id": {
                     "type": "string",
                     "description": "Session ID of the terminal to delete (from open_terminal or list_terminals)",
+                },
+            },
+            "required": ["session_id"],
+        },
+    },
+    {
+        "name": "rename_terminal",
+        "description": (
+            "Set a human-friendly display name on a terminal card. The name appears "
+            "in the card's title bar and in list_terminals output. Pass an empty string "
+            "to clear the name and revert to the default (hub/container name)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session ID of the terminal to rename (from open_terminal or list_terminals)",
+                },
+                "display_name": {
+                    "type": "string",
+                    "description": "New display name for the terminal card (e.g. 'Build Server', 'Dev Shell')",
+                },
+            },
+            "required": ["session_id", "display_name"],
+        },
+    },
+    {
+        "name": "set_recovery_script",
+        "description": (
+            "Set a recovery script on a terminal card. The recovery script stores "
+            "the command(s) needed to restore the terminal to its intended state "
+            "(e.g. after a server restart or container reboot). The user can trigger "
+            "it manually via a 'Run Recovery' button in the UI. Pass an empty string "
+            "to clear the recovery script."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session ID of the terminal (from open_terminal or list_terminals)",
+                },
+                "script": {
+                    "type": "string",
+                    "description": (
+                        "Recovery script text (shell commands). Example: 'cd /workspace && make dev'. "
+                        "This is written to the PTY as keyboard input when the user clicks "
+                        "'Run Recovery' in the UI."
+                    ),
+                },
+            },
+            "required": ["session_id", "script"],
+        },
+    },
+    {
+        "name": "get_recovery_script",
+        "description": (
+            "Get the current recovery script for a terminal card. Returns the script "
+            "text, or an empty string if none is set."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session ID of the terminal (from open_terminal or list_terminals)",
                 },
             },
             "required": ["session_id"],

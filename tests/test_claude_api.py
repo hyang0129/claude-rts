@@ -519,3 +519,128 @@ async def test_full_lifecycle_create_send_read_delete(aiohttp_client, app_factor
     # Verify status returns 404
     resp = await client.get(f"/api/claude/terminal/{sid}/status")
     assert resp.status == 404
+
+
+# ── Issue #151: rename, recovery-script, list_terminals with new fields ───
+
+
+async def test_rename_terminal(aiohttp_client, app_factory):
+    """PUT /api/claude/terminal/{id}/rename sets display_name."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    data = await resp.json()
+    sid = data["session_id"]
+
+    resp = await client.put(
+        f"/api/claude/terminal/{sid}/rename",
+        json={"display_name": "Build Server"},
+    )
+    assert resp.status == 200
+    result = await resp.json()
+    assert result["display_name"] == "Build Server"
+
+    # Verify via card registry
+    card = client.app["card_registry"].get_terminal(sid)
+    assert card.display_name == "Build Server"
+
+
+async def test_rename_terminal_nonexistent(aiohttp_client, app_factory):
+    """PUT rename on nonexistent terminal returns 404."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.put(
+        "/api/claude/terminal/nonexistent/rename",
+        json={"display_name": "Test"},
+    )
+    assert resp.status == 404
+
+
+async def test_recovery_script_get_put(aiohttp_client, app_factory):
+    """GET/PUT /api/claude/terminal/{id}/recovery-script round-trips."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    data = await resp.json()
+    sid = data["session_id"]
+
+    # Initially empty
+    resp = await client.get(f"/api/claude/terminal/{sid}/recovery-script")
+    assert resp.status == 200
+    result = await resp.json()
+    assert result["recovery_script"] == ""
+
+    # Set it
+    resp = await client.put(
+        f"/api/claude/terminal/{sid}/recovery-script",
+        json={"recovery_script": "cd /work && make dev"},
+    )
+    assert resp.status == 200
+    result = await resp.json()
+    assert result["recovery_script"] == "cd /work && make dev"
+
+    # Read it back
+    resp = await client.get(f"/api/claude/terminal/{sid}/recovery-script")
+    assert resp.status == 200
+    result = await resp.json()
+    assert result["recovery_script"] == "cd /work && make dev"
+
+
+async def test_recovery_script_nonexistent(aiohttp_client, app_factory):
+    """GET/PUT recovery-script on nonexistent terminal returns 404."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.get("/api/claude/terminal/nonexistent/recovery-script")
+    assert resp.status == 404
+
+    resp = await client.put(
+        "/api/claude/terminal/nonexistent/recovery-script",
+        json={"recovery_script": "test"},
+    )
+    assert resp.status == 404
+
+
+async def test_list_terminals_includes_display_name_and_recovery(aiohttp_client, app_factory):
+    """GET /api/claude/terminals includes display_name and recovery_script."""
+    client = await aiohttp_client(app_factory())
+
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    data = await resp.json()
+    sid = data["session_id"]
+
+    # Set display_name and recovery_script
+    await client.put(
+        f"/api/claude/terminal/{sid}/rename",
+        json={"display_name": "My Terminal"},
+    )
+    await client.put(
+        f"/api/claude/terminal/{sid}/recovery-script",
+        json={"recovery_script": "echo hello"},
+    )
+
+    resp = await client.get("/api/claude/terminals")
+    assert resp.status == 200
+    terminals = await resp.json()
+    assert len(terminals) == 1
+    t = terminals[0]
+    assert t["display_name"] == "My Terminal"
+    assert t["recovery_script"] == "echo hello"
+
+
+async def test_ws_control_receives_card_updated_on_rename(aiohttp_client, app_factory):
+    """Renaming a terminal sends card_updated over /ws/control."""
+    client = await aiohttp_client(app_factory())
+    async with client.ws_connect("/ws/control") as ws:
+        resp = await client.post("/api/claude/terminal/create?cmd=bash")
+        data = await resp.json()
+        sid = data["session_id"]
+
+        # Drain card_created
+        await ws.receive_json(timeout=2)
+
+        # Rename
+        await client.put(
+            f"/api/claude/terminal/{sid}/rename",
+            json={"display_name": "Renamed"},
+        )
+
+        msg = await ws.receive_json(timeout=2)
+        assert msg["type"] == "card_updated"
+        assert msg["card_id"] == sid
+        assert msg["display_name"] == "Renamed"

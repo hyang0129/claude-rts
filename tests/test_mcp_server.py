@@ -17,6 +17,9 @@ from claude_rts.mcp_server import (
     tool_open_terminal,
     tool_read_terminal,
     tool_write_terminal,
+    tool_rename_terminal,
+    tool_set_recovery_script,
+    tool_get_recovery_script,
     tool_vm_discover_containers,
     tool_vm_get_favorites,
     tool_vm_set_container_actions,
@@ -189,6 +192,9 @@ def test_handle_request_tools_list():
         "write_terminal",
         "list_terminals",
         "delete_terminal",
+        "rename_terminal",
+        "set_recovery_script",
+        "get_recovery_script",
         "vm_discover_containers",
         "vm_get_favorites",
         "vm_set_container_actions",
@@ -389,7 +395,7 @@ def test_vm_add_favorite_missing_name():
 
 
 def test_tools_list_includes_vm_and_blueprint_tools():
-    """tools/list response includes all tools (5 terminal + 8 VM + 5 blueprint)."""
+    """tools/list response includes all tools (8 terminal + 8 VM + 5 blueprint)."""
     msg = {"jsonrpc": "2.0", "id": 10, "method": "tools/list", "params": {}}
     resp = handle_request(msg)
     tools = resp["result"]["tools"]
@@ -407,7 +413,10 @@ def test_tools_list_includes_vm_and_blueprint_tools():
     assert "blueprint_save" in names
     assert "blueprint_delete" in names
     assert "blueprint_spawn" in names
-    assert len(names) == 18
+    assert "rename_terminal" in names
+    assert "set_recovery_script" in names
+    assert "get_recovery_script" in names
+    assert len(names) == 21
 
 
 # ── vm_get_container_actions ──────────────────────────────────────────────
@@ -714,3 +723,98 @@ def test_vm_add_favorite_default_actions_empty():
     put_req = mock_open.call_args_list[1][0][0]
     put_body = json.loads(put_req.data.decode("utf-8"))
     assert put_body[0]["actions"] == []
+
+
+# ── Issue #151: rename_terminal, set/get_recovery_script MCP tools ────────
+
+
+def test_rename_terminal_calls_api():
+    """rename_terminal PUTs to /api/claude/terminal/{id}/rename."""
+    mock_resp = make_mock_response({"status": "ok", "display_name": "Build Server"})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_rename_terminal({"session_id": "rts-abc", "display_name": "Build Server"})
+    assert "Build Server" in result
+    req = mock_open.call_args[0][0]
+    assert "/api/claude/terminal/rts-abc/rename" in req.full_url
+    assert req.method == "PUT"
+
+
+def test_rename_terminal_missing_session_id():
+    """rename_terminal raises ValueError when session_id is missing."""
+    with pytest.raises(ValueError):
+        tool_rename_terminal({"display_name": "Test"})
+
+
+def test_set_recovery_script_calls_api():
+    """set_recovery_script PUTs to /api/claude/terminal/{id}/recovery-script."""
+    mock_resp = make_mock_response({"status": "ok", "recovery_script": "make dev"})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_set_recovery_script({"session_id": "rts-abc", "script": "make dev"})
+    assert "rts-abc" in result
+    req = mock_open.call_args[0][0]
+    assert "/api/claude/terminal/rts-abc/recovery-script" in req.full_url
+    assert req.method == "PUT"
+
+
+def test_set_recovery_script_missing_session_id():
+    """set_recovery_script raises ValueError when session_id is missing."""
+    with pytest.raises(ValueError):
+        tool_set_recovery_script({"script": "test"})
+
+
+def test_get_recovery_script_calls_api():
+    """get_recovery_script GETs /api/claude/terminal/{id}/recovery-script."""
+    mock_resp = make_mock_response({"recovery_script": "cd /work && make"})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_get_recovery_script({"session_id": "rts-abc"})
+    assert result == "cd /work && make"
+    req = mock_open.call_args[0][0]
+    assert "/api/claude/terminal/rts-abc/recovery-script" in req.full_url
+
+
+def test_get_recovery_script_missing_session_id():
+    """get_recovery_script raises ValueError when session_id is missing."""
+    with pytest.raises(ValueError):
+        tool_get_recovery_script({})
+
+
+def test_list_terminals_includes_display_name():
+    """list_terminals shows display_name when present."""
+    mock_resp = make_mock_response(
+        [
+            {
+                "session_id": "rts-1",
+                "exec": "bash",
+                "alive": True,
+                "display_name": "Build Server",
+                "recovery_script": "make dev",
+            },
+            {"session_id": "rts-2", "exec": "sh", "alive": True, "display_name": "", "recovery_script": ""},
+        ]
+    )
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        result = tool_list_terminals({})
+    assert "name: Build Server" in result
+    assert "recovery_script: make dev" in result
+    # rts-2 has no display_name so "name:" should not appear for it
+    lines = result.strip().split("\n")
+    assert "name:" not in lines[1]
+
+
+def test_handle_request_tools_call_rename():
+    """tools/call dispatches rename_terminal correctly."""
+    mock_resp = make_mock_response({"status": "ok", "display_name": "Test"})
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        msg = {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "tools/call",
+            "params": {
+                "name": "rename_terminal",
+                "arguments": {"session_id": "rts-x", "display_name": "Test"},
+            },
+        }
+        resp = handle_request(msg)
+    assert resp["id"] == 99
+    assert resp["result"]["isError"] is False
+    assert "Test" in resp["result"]["content"][0]["text"]

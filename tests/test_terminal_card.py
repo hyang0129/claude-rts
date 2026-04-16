@@ -299,3 +299,69 @@ async def test_list_sessions_excludes_probe_sessions(monkeypatch):
     assert probe.session_id not in listed_ids
 
     mgr.stop_all()
+
+
+# ── Issue #151: display_name, recovery_script, stable identity ────────────
+
+
+async def test_terminal_card_display_name(monkeypatch):
+    """TerminalCard accepts and returns display_name in descriptor."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    card = TerminalCard(session_manager=mgr, cmd="bash", display_name="Build Server")
+    await card.start()
+
+    assert card.display_name == "Build Server"
+    desc = card.to_descriptor()
+    assert desc["display_name"] == "Build Server"
+
+    await card.stop()
+    mgr.stop_all()
+
+
+async def test_terminal_card_recovery_script(monkeypatch):
+    """TerminalCard accepts and returns recovery_script in descriptor."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    card = TerminalCard(session_manager=mgr, cmd="bash", recovery_script="cd /work && make dev")
+    await card.start()
+
+    assert card.recovery_script == "cd /work && make dev"
+    desc = card.to_descriptor()
+    assert desc["recovery_script"] == "cd /work && make dev"
+
+    await card.stop()
+    mgr.stop_all()
+
+
+async def test_terminal_card_descriptor_omits_empty_display_name(monkeypatch):
+    """to_descriptor() omits display_name and recovery_script when empty."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    card = TerminalCard(session_manager=mgr, cmd="bash")
+    await card.start()
+
+    desc = card.to_descriptor()
+    assert "display_name" not in desc
+    assert "recovery_script" not in desc
+
+    await card.stop()
+    mgr.stop_all()
+
+
+async def test_terminal_card_mutable_display_name(monkeypatch):
+    """display_name and recovery_script can be set after creation."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    card = TerminalCard(session_manager=mgr, cmd="bash")
+    await card.start()
+
+    card.display_name = "Dev Shell"
+    card.recovery_script = "npm start"
+
+    desc = card.to_descriptor()
+    assert desc["display_name"] == "Dev Shell"
+    assert desc["recovery_script"] == "npm start"
+
+    await card.stop()
+    mgr.stop_all()

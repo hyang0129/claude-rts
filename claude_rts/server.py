@@ -945,6 +945,69 @@ async def claude_terminal_delete(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+async def claude_terminal_rename(request: web.Request) -> web.Response:
+    """PUT /api/claude/terminal/{id}/rename — set a display name."""
+    card_id = request.match_info["id"]
+    card_registry: CardRegistry = request.app["card_registry"]
+    card = card_registry.get_terminal(card_id)
+    if not card:
+        raise web.HTTPNotFound(text="Terminal not found")
+
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="Invalid JSON")
+
+    display_name = body.get("display_name", "")
+    if not isinstance(display_name, str):
+        raise web.HTTPBadRequest(text="'display_name' must be a string")
+
+    card.display_name = display_name
+    logger.info("claude_terminal_rename: {} -> {!r}", card_id, display_name)
+
+    # Broadcast card_updated via control WS
+    await _broadcast_card_updated(request.app, card_id, {"display_name": display_name})
+
+    return web.json_response({"status": "ok", "display_name": display_name})
+
+
+async def claude_terminal_recovery_get(request: web.Request) -> web.Response:
+    """GET /api/claude/terminal/{id}/recovery-script — read recovery script."""
+    card_id = request.match_info["id"]
+    card_registry: CardRegistry = request.app["card_registry"]
+    card = card_registry.get_terminal(card_id)
+    if not card:
+        raise web.HTTPNotFound(text="Terminal not found")
+
+    return web.json_response({"recovery_script": card.recovery_script})
+
+
+async def claude_terminal_recovery_put(request: web.Request) -> web.Response:
+    """PUT /api/claude/terminal/{id}/recovery-script — set recovery script."""
+    card_id = request.match_info["id"]
+    card_registry: CardRegistry = request.app["card_registry"]
+    card = card_registry.get_terminal(card_id)
+    if not card:
+        raise web.HTTPNotFound(text="Terminal not found")
+
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="Invalid JSON")
+
+    script = body.get("recovery_script", "")
+    if not isinstance(script, str):
+        raise web.HTTPBadRequest(text="'recovery_script' must be a string")
+
+    card.recovery_script = script
+    logger.info("claude_terminal_recovery_put: {} -> {!r}", card_id, script[:80])
+
+    # Broadcast card_updated via control WS
+    await _broadcast_card_updated(request.app, card_id, {"recovery_script": script})
+
+    return web.json_response({"status": "ok", "recovery_script": script})
+
+
 async def claude_terminals_list(request: web.Request) -> web.Response:
     """GET /api/claude/terminals — list all terminal cards."""
     card_registry: CardRegistry = request.app["card_registry"]
@@ -956,6 +1019,9 @@ async def claude_terminals_list(request: web.Request) -> web.Response:
         desc = card.to_descriptor()
         session = card.session
         desc["alive"] = card.alive
+        # Always include display_name and recovery_script for MCP consumers
+        desc["display_name"] = card.display_name
+        desc["recovery_script"] = card.recovery_script
         if session:
             desc["age_seconds"] = int(now - session.created_at)
             desc["idle_seconds"] = int(now - session.last_client_time)
@@ -1273,6 +1339,19 @@ async def _broadcast_card_event(app: web.Application, event_type: str, payload: 
                 logger.debug("Failed to send control event to a client")
 
 
+async def _broadcast_card_updated(app: web.Application, card_id: str, fields: dict) -> None:
+    """Push a card_updated event to all connected /ws/control clients."""
+    message = {"type": "card_updated", "card_id": card_id, **fields}
+    data = json.dumps(message)
+    clients: list = app.get("control_ws_clients", [])
+    for ws in list(clients):
+        if not ws.closed:
+            try:
+                await ws.send_str(data)
+            except Exception:
+                logger.debug("Failed to send card_updated event to a client")
+
+
 async def _broadcast_blueprint_event(app: web.Application, event_type: str, payload: dict) -> None:
     """Push blueprint events (log, completed, failed, open_widget) to /ws/control clients."""
     message = {"type": event_type, **payload}
@@ -1325,6 +1404,9 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_post("/api/claude/terminal/{id}/send", claude_terminal_send)
     app.router.add_get("/api/claude/terminal/{id}/read", claude_terminal_read)
     app.router.add_get("/api/claude/terminal/{id}/status", claude_terminal_status)
+    app.router.add_put("/api/claude/terminal/{id}/rename", claude_terminal_rename)
+    app.router.add_get("/api/claude/terminal/{id}/recovery-script", claude_terminal_recovery_get)
+    app.router.add_put("/api/claude/terminal/{id}/recovery-script", claude_terminal_recovery_put)
     app.router.add_delete("/api/claude/terminal/{id}", claude_terminal_delete)
     app.router.add_get("/api/claude/terminals", claude_terminals_list)
 

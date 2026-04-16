@@ -376,6 +376,10 @@ class BlueprintCard(BaseCard):
                 card.session.pty.write(cmd.encode() + b"\n")
                 await self._log(f"  Injected cmd via PTY write into {session_id}: {cmd!r}")
 
+        # Set recovery_script to the user's cmd so it can be re-run after restart
+        if cmd:
+            card.recovery_script = cmd
+
         desc = card.to_descriptor()
         # Expose the actual user cmd in the descriptor exec field for the frontend label.
         if cmd:
