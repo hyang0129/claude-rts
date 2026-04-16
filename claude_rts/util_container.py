@@ -81,10 +81,13 @@ async def build_image(app_config: AppConfig) -> bool:
     rc, _, stderr = await _run(f"{_DOCKER} pull {GHCR_IMAGE}", timeout=120)
     if rc == 0:
         # Tag as the local image name so subsequent checks find it
-        await _run(f"{_DOCKER} tag {GHCR_IMAGE} {cfg['image']}")
-        logger.info("Pulled and tagged prebuilt utility image as {}", cfg["image"])
-        return True
-    logger.warning("GHCR pull failed ({}), falling back to local build", stderr)
+        tag_rc, _, tag_err = await _run(f"{_DOCKER} tag {GHCR_IMAGE} {cfg['image']}")
+        if tag_rc == 0:
+            logger.info("Pulled and tagged prebuilt utility image as {}", cfg["image"])
+            return True
+        logger.warning("GHCR pull succeeded but tag failed ({}), falling back to local build", tag_err)
+    else:
+        logger.warning("GHCR pull failed ({}), falling back to local build", stderr)
 
     # Fall back to local build
     logger.info("Building utility container image {}...", cfg["image"])
