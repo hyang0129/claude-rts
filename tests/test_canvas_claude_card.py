@@ -2,6 +2,7 @@
 
 import base64
 import json
+import sys
 import time
 
 import pytest
@@ -11,6 +12,7 @@ from claude_rts.cards.canvas_claude_card import (
     CONTAINER_PYTHON3,
     CanvasClaudeCard,
     TMUX_SESSION_NAME,
+    _DOCKER,
     _build_mcp_config,
 )
 from claude_rts.sessions import SessionManager
@@ -306,7 +308,7 @@ async def test_canvas_claude_card_seed_trust_settings_profile(monkeypatch):
     assert len(calls) == 2
     # First call: trust settings write
     cmd = calls[0]
-    assert cmd[0] == "docker.exe"
+    assert cmd[0] == _DOCKER
     assert cmd[1] == "exec"
     assert "my-container" in cmd
     shell_script = cmd[-1]
