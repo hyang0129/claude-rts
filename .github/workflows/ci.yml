@@ -38,6 +38,11 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[test]" pytest-playwright playwright pytest-timeout
       - run: python -m playwright install chromium --with-deps
+      - name: Pre-pull utility container image
+        run: |
+          docker pull ghcr.io/hyang0129/supreme-claudemander-util:latest \
+            && docker tag ghcr.io/hyang0129/supreme-claudemander-util:latest supreme-claudemander-util:latest \
+            || echo "GHCR pull failed — server will fall back to local build"
       - name: Run Playwright smoke tests (headless)
         run: python -m pytest tests/e2e/ -v --timeout=120
         env:
