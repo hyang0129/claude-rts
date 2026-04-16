@@ -80,11 +80,11 @@ CLAUDE_RTS_TEST_MODE=1 python -m claude_rts   # enables puppeting API at /api/te
 | `test_server_profiles.py` | 9 | Profile manager API endpoints |
 | `test_dev_config.py` | 8 | Dev-config preset loading and setup |
 | `test_sessions.py` | 30 | ScrollbackBuffer, SessionManager, test puppeting API |
-| `test_terminal_card.py` | 15 | TerminalCard lifecycle, CardRegistry, server integration, display_name, recovery_script |
-| `test_claude_api.py` | 39 | Claude terminal control API (CRUD, send/read, strip_ansi, /ws/control, full lifecycle, ${priority_credential}, rename, recovery-script, card_updated broadcast) |
+| `test_terminal_card.py` | 18 | TerminalCard lifecycle, CardRegistry, server integration, display_name, recovery_script |
+| `test_claude_api.py` | 38 | Claude terminal control API (CRUD, send/read, strip_ansi, /ws/control, full lifecycle, ${priority_credential}, rename, recovery-script, card_updated broadcast) |
 | `test_event_bus.py` | 14 | EventBus core (subscribe, emit, unsubscribe, wildcard, async, errors, clear) + integration (ServiceCard bus emit, CardRegistry events) |
 | `test_vm_manager.py` | 18 | VM Manager API (discover containers, favorites CRUD, start/stop container, per-container actions, route registration) |
-| `test_mcp_server.py` | 66 | MCP server tool functions (terminal CRUD/rename/recovery + VM discover/favorites/actions/start/stop/append/get + blueprint list/get/save/delete/spawn) and JSON-RPC dispatch |
+| `test_mcp_server.py` | 64 | MCP server tool functions (terminal CRUD/rename/recovery + VM discover/favorites/actions/start/stop/append/get + blueprint list/get/save/delete/spawn) and JSON-RPC dispatch |
 | `e2e/test_smoke.py` | 7 | Playwright Electron smoke tests — launch, spawn, drag, resize, widgets, pan/zoom, save/reload |
 
 Tests use `MockPty` to avoid needing Docker. E2E tests require Playwright and Electron (`pip install -e ".[e2e]" && python -m playwright install chromium`).

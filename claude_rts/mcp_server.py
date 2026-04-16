@@ -145,18 +145,11 @@ def tool_rename_terminal(args):
         raise ValueError("session_id is required")
     display_name = args.get("display_name", "")
     safe_id = urllib.parse.quote(session_id, safe="")
-    body = json.dumps({"display_name": display_name})
-    req = urllib.request.Request(
-        API_BASE.rstrip("/") + f"/api/claude/terminal/{safe_id}/rename",
-        data=body.encode("utf-8"),
-        method="PUT",
+    result = http_request(
+        "PUT",
+        f"/api/claude/terminal/{safe_id}/rename",
+        body=json.dumps({"display_name": display_name}),
     )
-    req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"HTTP {e.code}: {e.read().decode()}")
     return f"Renamed terminal {session_id} to {result.get('display_name', '')!r}"
 
 
@@ -167,18 +160,11 @@ def tool_set_recovery_script(args):
         raise ValueError("session_id is required")
     script = args.get("script", "")
     safe_id = urllib.parse.quote(session_id, safe="")
-    body = json.dumps({"recovery_script": script})
-    req = urllib.request.Request(
-        API_BASE.rstrip("/") + f"/api/claude/terminal/{safe_id}/recovery-script",
-        data=body.encode("utf-8"),
-        method="PUT",
+    http_request(
+        "PUT",
+        f"/api/claude/terminal/{safe_id}/recovery-script",
+        body=json.dumps({"recovery_script": script}),
     )
-    req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            resp.read()  # consume response
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"HTTP {e.code}: {e.read().decode()}")
     return f"Recovery script set for {session_id}"
 
 

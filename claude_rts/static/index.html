@@ -3694,6 +3694,10 @@ async function handleControlCardCreated(msg) {
       x, y,
       w: desc.w || CARD_W,
       h: desc.h || CARD_H,
+      starred: desc.starred != null ? desc.starred : true,
+      displayName: desc.display_name || '',
+      recoveryScript: desc.recovery_script || '',
+      cardUid: desc.cardUid || '',
     });
     saveLayout();
   }
