@@ -1,6 +1,7 @@
 """CLI entry point: start server and open browser/electron."""
 
 import argparse
+import os
 import pathlib
 import subprocess
 import sys
@@ -13,8 +14,12 @@ from loguru import logger
 from . import config
 from .server import create_app
 
-# Resolve electron/ directory relative to this package
-_ELECTRON_DIR = pathlib.Path(__file__).resolve().parent.parent / "electron"
+# Resolve electron/ directory: env var override → repo-relative fallback
+_env_electron_dir = os.environ.get("SUPREME_CLAUDEMANDER_ELECTRON_DIR")
+if _env_electron_dir:
+    _ELECTRON_DIR = pathlib.Path(_env_electron_dir).resolve()
+else:
+    _ELECTRON_DIR = pathlib.Path(__file__).resolve().parent.parent / "electron"
 
 
 def _get_version() -> str:
@@ -30,7 +35,8 @@ def _check_electron_installed():
     if not _ELECTRON_DIR.exists():
         print(
             "Electron shell is not available in pip-installed packages.\n"
-            "To use --electron, clone the repository and run 'npm install' in the electron/ directory.\n"
+            "Option 1: set SUPREME_CLAUDEMANDER_ELECTRON_DIR to the 'electron/' directory in your local clone.\n"
+            "Option 2: clone the repository and run 'npm install' in the electron/ directory.\n"
             "See: https://github.com/hyang0129/supreme-claudemander",
             file=sys.stderr,
         )
