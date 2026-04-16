@@ -42,22 +42,41 @@ An RTS-style terminal canvas for managing devcontainer hubs. Terminal shells liv
 - Python 3.10+
 - Running devcontainers (with `devcontainer.local_folder` label)
 
-### Install and run
+### Build and install from source
 
 ```bash
 git clone https://github.com/hyang0129/supreme-claudemander.git
 cd supreme-claudemander
-pip install -e .
-python -m claude_rts
+pip install build
+python -m build
+python -m venv ~/.supreme-claudemander/venv
+~/.supreme-claudemander/venv/Scripts/pip install dist/supreme_claudemander-*.whl
+```
+
+Then run:
+
+```bash
+~/.supreme-claudemander/venv/Scripts/supreme-claudemander
 ```
 
 The server starts on `http://localhost:3000` and opens your browser automatically. Press `Ctrl+C` to stop — your containers keep running.
 
+#### Electron shell (optional)
+
+The `--electron` flag requires Node.js and the repo's `electron/` dependencies:
+
+```bash
+cd electron && npm install && cd ..
+SUPREME_CLAUDEMANDER_ELECTRON_DIR=/path/to/repo/electron \
+  ~/.supreme-claudemander/venv/Scripts/supreme-claudemander --electron
+```
+
 ### Options
 
 ```
-python -m claude_rts --port 4000       # custom port
-python -m claude_rts --no-browser      # don't auto-open browser
+supreme-claudemander --port 4000       # custom port
+supreme-claudemander --no-browser      # don't auto-open browser
+supreme-claudemander --electron        # launch in Electron shell
 ```
 
 ## Controls
