@@ -19,8 +19,11 @@ from loguru import logger  # noqa: E402
 from .config import AppConfig, read_config  # noqa: E402
 
 DOCKERFILE = pathlib.Path(__file__).parent / "Dockerfile.util"
+MCP_SERVER_PY = pathlib.Path(__file__).parent / "mcp_server.py"
+CONTAINER_MCP_PATH = "/home/util/mcp_server.py"
 DEFAULT_CONTAINER_NAME = "supreme-claudemander-util"
 DEFAULT_IMAGE_NAME = "supreme-claudemander-util:latest"
+GHCR_IMAGE = "ghcr.io/hyang0129/supreme-claudemander-util:latest"
 
 
 def _get_config(app_config: AppConfig) -> dict:
@@ -59,14 +62,31 @@ async def is_util_running(app_config: AppConfig) -> bool:
 
 
 async def build_image(app_config: AppConfig) -> bool:
-    """Build the utility container image if not already built."""
+    """Build the utility container image if not already built.
+
+    Tries, in order:
+    1. Use existing local image (instant).
+    2. Pull prebuilt image from ghcr.io and tag it locally.
+    3. Fall back to a local ``docker build`` (slow, but works offline).
+    """
     cfg = _get_config(app_config)
-    # Check if image exists
+    # Check if image exists locally
     rc, stdout, _ = await _run(f"{_DOCKER} images -q {cfg['image']}")
     if rc == 0 and stdout.strip():
         logger.debug("Utility image {} already exists", cfg["image"])
         return True
 
+    # Try pulling the prebuilt image from GHCR
+    logger.info("Pulling prebuilt utility image from {}...", GHCR_IMAGE)
+    rc, _, stderr = await _run(f"{_DOCKER} pull {GHCR_IMAGE}", timeout=120)
+    if rc == 0:
+        # Tag as the local image name so subsequent checks find it
+        await _run(f"{_DOCKER} tag {GHCR_IMAGE} {cfg['image']}")
+        logger.info("Pulled and tagged prebuilt utility image as {}", cfg["image"])
+        return True
+    logger.warning("GHCR pull failed ({}), falling back to local build", stderr)
+
+    # Fall back to local build
     logger.info("Building utility container image {}...", cfg["image"])
     rc, stdout, stderr = await _run(
         f'{_DOCKER} build -t {cfg["image"]} -f "{DOCKERFILE}" "{DOCKERFILE.parent}"',
@@ -91,8 +111,16 @@ async def start_container(app_config: AppConfig) -> bool:
     if not await build_image(app_config):
         return False
 
-    # Build mount args
+    # Build mount args — always bind-mount mcp_server.py so the container
+    # has the latest tool definitions without an image rebuild.
     mount_args = ""
+    if MCP_SERVER_PY.exists():
+        mcp_src = MCP_SERVER_PY.as_posix()
+        mount_args += f' -v "{mcp_src}:{CONTAINER_MCP_PATH}"'
+        logger.info("Mounting mcp_server.py {} -> {}", mcp_src, CONTAINER_MCP_PATH)
+    else:
+        logger.warning("mcp_server.py not found at {}, container will lack MCP tools", MCP_SERVER_PY)
+
     for host_path, container_path in cfg["mounts"].items():
         # Expand ~ in host path and normalize to forward slashes for Docker
         expanded_path = pathlib.Path(host_path.replace("~", str(pathlib.Path.home())))
@@ -235,7 +263,10 @@ async def discover_profiles(app_config: AppConfig) -> list[str]:
 
 
 async def _mounts_match(app_config: AppConfig) -> bool:
-    """Return True if the running container's bind mounts match the configured mounts."""
+    """Return True if the running container's bind mounts match the configured mounts.
+
+    Checks both user-configured mounts and the hardcoded mcp_server.py mount.
+    """
     cfg = _get_config(app_config)
     rc, stdout, _ = await _run(f'{_DOCKER} inspect {cfg["name"]} --format "{{{{json .Mounts}}}}"')
     if rc != 0:
@@ -243,6 +274,18 @@ async def _mounts_match(app_config: AppConfig) -> bool:
     actual = {
         m["Destination"]: pathlib.Path(m["Source"]) for m in json.loads(stdout or "[]") if m.get("Type") == "bind"
     }
+
+    # Check the hardcoded mcp_server.py mount
+    if MCP_SERVER_PY.exists():
+        if actual.get(CONTAINER_MCP_PATH) != MCP_SERVER_PY:
+            logger.debug(
+                "_mounts_match: {} expected {} got {}",
+                CONTAINER_MCP_PATH,
+                MCP_SERVER_PY,
+                actual.get(CONTAINER_MCP_PATH),
+            )
+            return False
+
     for host_path, container_path in cfg["mounts"].items():
         expanded = pathlib.Path(host_path.replace("~", str(pathlib.Path.home())))
         if not expanded.exists():

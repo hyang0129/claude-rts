@@ -27,7 +27,7 @@ RUN useradd -m -s /bin/bash util
 USER util
 WORKDIR /home/util
 
-# Copy MCP server for Canvas Claude Code integration
-COPY --chown=util:util mcp_server.py /home/util/mcp_server.py
+# mcp_server.py is bind-mounted at runtime by start_container()
+# so changes don't require an image rebuild.
 
 CMD ["sleep", "infinity"]
