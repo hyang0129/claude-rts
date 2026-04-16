@@ -11,6 +11,7 @@ from claude_rts.cards.canvas_claude_card import (
     CONTAINER_PYTHON3,
     CanvasClaudeCard,
     TMUX_SESSION_NAME,
+    _DOCKER,
     _build_mcp_config,
 )
 from claude_rts.sessions import SessionManager
@@ -306,7 +307,7 @@ async def test_canvas_claude_card_seed_trust_settings_profile(monkeypatch):
     assert len(calls) == 2
     # First call: trust settings write
     cmd = calls[0]
-    assert cmd[0] == "docker.exe"
+    assert cmd[0] == _DOCKER
     assert cmd[1] == "exec"
     assert "my-container" in cmd
     shell_script = cmd[-1]
@@ -315,7 +316,7 @@ async def test_canvas_claude_card_seed_trust_settings_profile(monkeypatch):
     assert "base64 -d" in shell_script
     # Second call: MCP .claude.json patch via python3
     mcp_cmd = calls[1]
-    assert mcp_cmd[0] == "docker.exe"
+    assert mcp_cmd[0] == _DOCKER
     assert mcp_cmd[1] == "exec"
     assert "my-container" in mcp_cmd
     assert "python3" in mcp_cmd[-1]

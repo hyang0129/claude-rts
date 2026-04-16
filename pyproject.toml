@@ -2,7 +2,24 @@
 name = "supreme-claudemander"
 version = "0.1.0"
 description = "RTS-style terminal canvas for devcontainer hubs"
+readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.10"
+authors = [
+    {name = "Hong Yang", email = "hooong.yang@gmail.com"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: User Interfaces",
+]
 dependencies = [
     "aiohttp>=3.9",
     "pywinpty>=2.0; sys_platform == 'win32'",
@@ -24,11 +41,25 @@ e2e = [
     "playwright>=1.40",
 ]
 
+[project.urls]
+Homepage = "https://github.com/hyang0129/supreme-claudemander"
+Repository = "https://github.com/hyang0129/supreme-claudemander"
+Issues = "https://github.com/hyang0129/supreme-claudemander/issues"
+
 [project.scripts]
 supreme-claudemander = "claude_rts.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["claude_rts*"]
+
+[tool.setuptools.package-data]
+claude_rts = [
+    "static/*.html",
+    "static/**/*",
+    "dev_presets/**/*.json",
+    "Dockerfile.util",
+    "mcp_server.py",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

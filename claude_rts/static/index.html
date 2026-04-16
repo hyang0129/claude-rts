@@ -3718,7 +3718,7 @@ async function handleBlueprintOpenWidget(msg) {
       const hubData = await resp.json();
       hubs = hubData.map(h => ({
         ...h,
-        exec: `docker.exe exec -it -u vscode -w /workspaces/${h.hub} ${h.container} bash -l`,
+        exec: `${(navigator.platform.startsWith('Win') || navigator.userAgent.includes('Windows')) ? 'docker.exe' : 'docker'} exec -it -u vscode -w /workspaces/${h.hub} ${h.container} bash -l`,
       }));
     } catch {
       hubs = [];

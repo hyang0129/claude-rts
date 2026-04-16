@@ -5,6 +5,7 @@ import pathlib
 import subprocess
 import sys
 import webbrowser
+from importlib.metadata import version as _pkg_version
 
 from aiohttp import web
 from loguru import logger
@@ -16,8 +17,24 @@ from .server import create_app
 _ELECTRON_DIR = pathlib.Path(__file__).resolve().parent.parent / "electron"
 
 
+def _get_version() -> str:
+    """Return the installed package version, falling back to 'unknown'."""
+    try:
+        return _pkg_version("supreme-claudemander")
+    except Exception:
+        return "unknown"
+
+
 def _check_electron_installed():
-    """Exit with instructions if electron/node_modules is missing."""
+    """Exit with instructions if electron/ directory or node_modules is missing."""
+    if not _ELECTRON_DIR.exists():
+        print(
+            "Electron shell is not available in pip-installed packages.\n"
+            "To use --electron, clone the repository and run 'npm install' in the electron/ directory.\n"
+            "See: https://github.com/hyang0129/supreme-claudemander",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     node_modules = _ELECTRON_DIR / "node_modules"
     if node_modules.exists():
         return
@@ -30,6 +47,7 @@ def _check_electron_installed():
 
 def main():
     parser = argparse.ArgumentParser(description="supreme-claudemander terminal canvas")
+    parser.add_argument("--version", action="version", version=f"supreme-claudemander {_get_version()}")
     parser.add_argument("--port", type=int, default=3000, help="Server port (default: 3000)")
     parser.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
     parser.add_argument("--electron", action="store_true", help="Launch in Electron shell instead of browser")
