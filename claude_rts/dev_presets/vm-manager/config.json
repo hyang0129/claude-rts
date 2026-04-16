@@ -22,23 +22,17 @@
       {
         "name": "supreme-claudemander-util",
         "type": "docker",
-        "actions": [
-          {"label": "Terminal", "type": "terminal"}
-        ]
+        "actions": []
       },
       {
         "name": "e2e-qa-stopped",
         "type": "docker",
-        "actions": [
-          {"label": "Terminal", "type": "terminal"}
-        ]
+        "actions": []
       },
       {
         "name": "does-not-exist",
         "type": "docker",
-        "actions": [
-          {"label": "Terminal", "type": "terminal"}
-        ]
+        "actions": []
       }
     ]
   }

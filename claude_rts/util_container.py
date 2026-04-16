@@ -7,6 +7,7 @@ It stays alive via `sleep infinity` and commands are executed via `docker exec`.
 """
 
 import asyncio
+import json
 import pathlib
 import sys
 import time
@@ -233,12 +234,36 @@ async def discover_profiles(app_config: AppConfig) -> list[str]:
         return []
 
 
-async def ensure_util_container(app_config: AppConfig) -> bool:
-    """Ensure the utility container is running. Start it if not already running.
+async def _mounts_match(app_config: AppConfig) -> bool:
+    """Return True if the running container's bind mounts match the configured mounts."""
+    cfg = _get_config(app_config)
+    rc, stdout, _ = await _run(f'{_DOCKER} inspect {cfg["name"]} --format "{{{{json .Mounts}}}}"')
+    if rc != 0:
+        return False
+    actual = {
+        m["Destination"]: pathlib.Path(m["Source"]) for m in json.loads(stdout or "[]") if m.get("Type") == "bind"
+    }
+    for host_path, container_path in cfg["mounts"].items():
+        expanded = pathlib.Path(host_path.replace("~", str(pathlib.Path.home())))
+        if not expanded.exists():
+            continue
+        if actual.get(container_path) != expanded:
+            logger.debug(
+                "_mounts_match: {} expected {} got {}",
+                container_path,
+                expanded,
+                actual.get(container_path),
+            )
+            return False
+    return True
 
-    If the container is already running, this is a no-op — active sessions,
-    processes, and container state are preserved. tmux session cleanup is
-    handled by CanvasClaudeCard._ensure_tmux_session() on demand.
+
+async def ensure_util_container(app_config: AppConfig) -> bool:
+    """Ensure the utility container is running with the correct mounts.
+
+    If the container is already running with matching mounts, this is a no-op.
+    If it is running with stale/wrong mounts, it is recreated.
+    tmux session cleanup is handled by CanvasClaudeCard._ensure_tmux_session() on demand.
 
     Called during server startup if auto_start is enabled.
     """
@@ -248,7 +273,10 @@ async def ensure_util_container(app_config: AppConfig) -> bool:
         return False
 
     if await is_util_running(app_config):
-        logger.info("Utility container '{}' already running", cfg["name"])
-        return True
+        if await _mounts_match(app_config):
+            logger.info("Utility container '{}' already running", cfg["name"])
+            return True
+        logger.warning("Utility container '{}' running with stale mounts, recreating", cfg["name"])
+        await _run(f"{_DOCKER} rm -f {cfg['name']}")
 
     return await start_container(app_config)

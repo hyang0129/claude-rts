@@ -229,7 +229,7 @@ def tool_vm_add_favorite(args):
     name = args.get("name", "")
     if not name:
         raise ValueError("name is required")
-    actions = args.get("actions", [{"label": "Terminal", "type": "terminal"}])
+    actions = args.get("actions", [])
     # GET current favorites, append, PUT back
     favorites = http_request("GET", "/api/vms/favorites")
     # Check if already exists
@@ -239,6 +239,76 @@ def tool_vm_add_favorite(args):
     favorites.append({"name": name, "type": "docker", "actions": actions})
     http_request("PUT", "/api/vms/favorites", body=json.dumps(favorites))
     return f"Added {name} to favorites with {len(actions)} action(s)"
+
+
+# ── Blueprint MCP tools ──────────────────────────────────────────────────
+
+
+def tool_blueprint_list(args):  # noqa: ARG001
+    """List all saved blueprint names."""
+    result = http_request("GET", "/api/blueprints")
+    if not isinstance(result, list) or not result:
+        return "No blueprints saved"
+    return "\n".join(f"- {name}" for name in result)
+
+
+def tool_blueprint_get(args):
+    """Get a single blueprint definition by name."""
+    name = args.get("name", "")
+    if not name:
+        raise ValueError("name is required")
+    safe_name = urllib.parse.quote(name, safe="")
+    result = http_request("GET", f"/api/blueprints/{safe_name}")
+    return json.dumps(result, indent=2)
+
+
+def tool_blueprint_save(args):
+    """Save (upsert) a blueprint definition."""
+    name = args.get("name", "")
+    if not name:
+        raise ValueError("name is required")
+    blueprint = args.get("blueprint")
+    if not isinstance(blueprint, dict):
+        raise ValueError("blueprint (object) is required")
+    # Ensure the blueprint has a name field matching
+    blueprint["name"] = name
+    safe_name = urllib.parse.quote(name, safe="")
+    # Try PUT (update) first; if 404, use POST (create)
+    try:
+        result = http_request("PUT", f"/api/blueprints/{safe_name}", body=json.dumps(blueprint))
+        return f"Blueprint '{name}' saved (updated): {json.dumps(result)}"
+    except RuntimeError as e:
+        if "404" in str(e):
+            result = http_request("POST", "/api/blueprints", body=json.dumps(blueprint))
+            return f"Blueprint '{name}' saved (created): {json.dumps(result)}"
+        raise
+
+
+def tool_blueprint_delete(args):
+    """Delete a saved blueprint by name."""
+    name = args.get("name", "")
+    if not name:
+        raise ValueError("name is required")
+    safe_name = urllib.parse.quote(name, safe="")
+    http_request("DELETE", f"/api/blueprints/{safe_name}")
+    return f"Blueprint '{name}' deleted"
+
+
+def tool_blueprint_spawn(args):
+    """Spawn a BlueprintCard from a saved blueprint."""
+    name = args.get("name", "")
+    if not name:
+        raise ValueError("name is required")
+    body = {"name": name}
+    context = args.get("context")
+    if isinstance(context, dict):
+        body["context"] = context
+    for key in ("x", "y", "w", "h"):
+        if key in args and args[key] is not None:
+            body[key] = args[key]
+    result = http_request("POST", "/api/blueprints/spawn", body=json.dumps(body))
+    card_id = result.get("id", "unknown")
+    return f"Blueprint '{name}' spawned. card_id: {card_id}"
 
 
 TOOL_HANDLERS = {
@@ -255,6 +325,11 @@ TOOL_HANDLERS = {
     "vm_start_container": tool_vm_start_container,
     "vm_stop_container": tool_vm_stop_container,
     "vm_add_favorite": tool_vm_add_favorite,
+    "blueprint_list": tool_blueprint_list,
+    "blueprint_get": tool_blueprint_get,
+    "blueprint_save": tool_blueprint_save,
+    "blueprint_delete": tool_blueprint_delete,
+    "blueprint_spawn": tool_blueprint_spawn,
 }
 
 TOOL_SCHEMAS = [
@@ -449,10 +524,11 @@ TOOL_SCHEMAS = [
         "description": (
             "Get the VM Manager favorites list — containers the user has bookmarked "
             "for quick access. Each favorite has: name (string), type ('docker'), "
-            "actions (array of action objects). Actions define buttons in the UI. "
-            "Action schema: {label: string, type: 'terminal', shell_prefix?: string, "
-            "import_keys?: string[]}. Use this to see what containers and actions are "
-            "already configured before making changes."
+            "actions (array of blueprint-action objects). Actions define buttons in the UI "
+            "that spawn blueprints scoped to the container. "
+            "Action schema: {label: string, blueprint: string, context?: object}. "
+            "Use this to see what containers and actions are already configured before "
+            "making changes."
         ),
         "inputSchema": {
             "type": "object",
@@ -465,10 +541,9 @@ TOOL_SCHEMAS = [
             "REPLACE the entire actions array for a favorite container. WARNING: this "
             "overwrites all existing actions — if you only want to add one action without "
             "losing the others, use vm_append_container_action instead. "
-            "Action schema: {label: string, type: 'terminal', shell_prefix?: string "
-            "(command prefix run in container), import_keys?: string[] (config keys to "
-            "interpolate, e.g. ['priority_credential'] causes ${priority_credential} in "
-            "shell_prefix to be replaced with the active profile name)}."
+            "Action schema: {label: string, blueprint: string (name of a saved blueprint), "
+            "context?: object (extra variables merged with auto-injected container name)}. "
+            "The container name is always injected automatically when the action is executed."
         ),
         "inputSchema": {
             "type": "object",
@@ -484,17 +559,16 @@ TOOL_SCHEMAS = [
                     "type": "array",
                     "description": (
                         "Complete replacement actions array. All existing actions are removed "
-                        "and replaced with this list. Format: [{label, type, shell_prefix?, import_keys?}]"
+                        "and replaced with this list. Format: [{label, blueprint, context?}]"
                     ),
                     "items": {
                         "type": "object",
                         "properties": {
                             "label": {"type": "string"},
-                            "type": {"type": "string", "enum": ["terminal"]},
-                            "shell_prefix": {"type": "string"},
-                            "import_keys": {"type": "array", "items": {"type": "string"}},
+                            "blueprint": {"type": "string"},
+                            "context": {"type": "object"},
                         },
-                        "required": ["label", "type"],
+                        "required": ["label", "blueprint"],
                     },
                 },
             },
@@ -505,9 +579,10 @@ TOOL_SCHEMAS = [
         "name": "vm_get_container_actions",
         "description": (
             "Get the actions array for a single favorite container. Returns a JSON array "
-            "of action objects. Errors if the container is not in favorites. Use this to "
-            "inspect current actions before appending or replacing. Accepts either "
-            "'container' or 'name' as the parameter key (both work identically)."
+            "of blueprint-action objects ({label, blueprint, context?}). Errors if the "
+            "container is not in favorites. Use this to inspect current actions before "
+            "appending or replacing. Accepts either 'container' or 'name' as the parameter "
+            "key (both work identically)."
         ),
         "inputSchema": {
             "type": "object",
@@ -532,8 +607,8 @@ TOOL_SCHEMAS = [
             "vm_set_container_actions when you only need to add an action — it is safer "
             "because it never drops existing entries. Accepts either 'container' or 'name' "
             "as the parameter key. "
-            "Action schema: {label: string, type: 'terminal', shell_prefix?: string, "
-            "import_keys?: string[]}."
+            "Action schema: {label: string, blueprint: string (name of a saved blueprint), "
+            "context?: object (extra variables merged with auto-injected container name)}."
         ),
         "inputSchema": {
             "type": "object",
@@ -548,18 +623,17 @@ TOOL_SCHEMAS = [
                 "action": {
                     "type": "object",
                     "description": (
-                        "Single action object to append. Example: "
-                        "{label: 'Claude', type: 'terminal', "
-                        "shell_prefix: 'claude --dangerously-skip-permissions', "
-                        "import_keys: ['priority_credential']}"
+                        "Single blueprint-action object to append. Example: "
+                        "{label: 'Dev Shell', blueprint: 'dev-shell'} or "
+                        "{label: 'Claude', blueprint: 'claude-session', "
+                        "context: {branch: 'main'}}"
                     ),
                     "properties": {
                         "label": {"type": "string"},
-                        "type": {"type": "string", "enum": ["terminal"]},
-                        "shell_prefix": {"type": "string"},
-                        "import_keys": {"type": "array", "items": {"type": "string"}},
+                        "blueprint": {"type": "string"},
+                        "context": {"type": "object"},
                     },
-                    "required": ["label", "type"],
+                    "required": ["label", "blueprint"],
                 },
             },
             "required": ["container", "action"],
@@ -620,10 +694,9 @@ TOOL_SCHEMAS = [
         "description": (
             "Add a Docker container to the VM Manager favorites list so it appears in "
             "the sidebar for quick access. If the container is already a favorite, returns "
-            "a message and does nothing. Optionally provide custom actions (buttons); "
-            "default is a single 'Terminal' action that opens a shell. "
-            "Action schema: {label: string, type: 'terminal', shell_prefix?: string, "
-            "import_keys?: string[]}."
+            "a message and does nothing. Optionally provide custom blueprint-actions; "
+            "default is an empty actions array (no actions configured). Use "
+            "vm_append_container_action or vm_set_container_actions to add actions after."
         ),
         "inputSchema": {
             "type": "object",
@@ -638,23 +711,143 @@ TOOL_SCHEMAS = [
                 "actions": {
                     "type": "array",
                     "description": (
-                        "Custom actions for this favorite (optional). Default: "
-                        "[{label: 'Terminal', type: 'terminal'}]. Example with Claude action: "
-                        "[{label: 'Terminal', type: 'terminal'}, "
-                        "{label: 'Claude', type: 'terminal', "
-                        "shell_prefix: 'claude --dangerously-skip-permissions', "
-                        "import_keys: ['priority_credential']}]"
+                        "Custom blueprint-actions for this favorite (optional). Default: [] "
+                        "(empty — no actions). Example: "
+                        "[{label: 'Dev Shell', blueprint: 'dev-shell'}, "
+                        "{label: 'Claude', blueprint: 'claude-session'}]"
                     ),
                     "items": {
                         "type": "object",
                         "properties": {
                             "label": {"type": "string"},
-                            "type": {"type": "string", "enum": ["terminal"]},
-                            "shell_prefix": {"type": "string"},
-                            "import_keys": {"type": "array", "items": {"type": "string"}},
+                            "blueprint": {"type": "string"},
+                            "context": {"type": "object"},
                         },
-                        "required": ["label", "type"],
+                        "required": ["label", "blueprint"],
                     },
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "blueprint_list",
+        "description": (
+            "List all saved blueprint names. Returns one name per line. Use this to "
+            "discover available blueprints before referencing them in container actions "
+            "or spawning them."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "blueprint_get",
+        "description": (
+            "Get a single blueprint definition by name. Returns the full JSON blueprint "
+            "including name, parameters, and steps. Use this to inspect a blueprint's "
+            "structure before modifying or spawning it."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the blueprint to retrieve (from blueprint_list).",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "blueprint_save",
+        "description": (
+            "Save (upsert) a blueprint definition. If a blueprint with this name already "
+            "exists, it is overwritten. Use this to create new blueprints or update existing "
+            "ones. The blueprint object must include 'name', 'steps' (array), and optionally "
+            "'parameters' (array of {name, type, provenance, default?})."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Blueprint name (alphanumeric, hyphens, underscores). "
+                        "Used as the filename and as the reference in container actions."
+                    ),
+                },
+                "blueprint": {
+                    "type": "object",
+                    "description": (
+                        "Full blueprint definition. Must include 'name' and 'steps'. "
+                        "Example: {name: 'dev-shell', parameters: [{name: 'container', "
+                        "type: 'string', provenance: 'canvas'}], steps: [{action: "
+                        "'open_terminal', container: '$container', cmd: 'bash'}]}"
+                    ),
+                },
+            },
+            "required": ["name", "blueprint"],
+        },
+    },
+    {
+        "name": "blueprint_delete",
+        "description": (
+            "Delete a saved blueprint by name. The blueprint is permanently removed. "
+            "Any container actions referencing this blueprint will fail at execution time "
+            "until re-pointed to a different blueprint."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the blueprint to delete.",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "blueprint_spawn",
+        "description": (
+            "Spawn a BlueprintCard on the canvas from a saved blueprint. The blueprint "
+            "executes its steps (open terminals, start containers, etc.) and appears as "
+            "a card on the canvas. Pass context to resolve canvas-provenance parameters "
+            "(e.g. context: {container: 'my-dev'} to scope the blueprint to a container). "
+            "Optionally set x, y, w, h to control card placement."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the saved blueprint to spawn.",
+                },
+                "context": {
+                    "type": "object",
+                    "description": (
+                        "Context variables to resolve canvas-provenance parameters. "
+                        "Example: {container: 'my-dev'} resolves a $container parameter "
+                        "in the blueprint."
+                    ),
+                },
+                "x": {
+                    "type": "number",
+                    "description": "X position of the card on the canvas (pixels). Canvas is 3840px wide.",
+                },
+                "y": {
+                    "type": "number",
+                    "description": "Y position of the card on the canvas (pixels). Canvas is 2160px tall.",
+                },
+                "w": {
+                    "type": "number",
+                    "description": "Width of the card in pixels.",
+                },
+                "h": {
+                    "type": "number",
+                    "description": "Height of the card in pixels.",
                 },
             },
             "required": ["name"],

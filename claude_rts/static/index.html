@@ -2445,7 +2445,7 @@ const WIDGET_REGISTRY = {
             const addBtn = e.target.closest('[data-vm-add]');
             if (!addBtn) return;
             const name = addBtn.getAttribute('data-vm-add');
-            const newFavs = [...favorites, { name, type: 'docker', actions: [{ label: 'Terminal', type: 'terminal' }] }];
+            const newFavs = [...favorites, { name, type: 'docker', actions: [] }];
             await fetch('/api/vms/favorites', {
               method: 'PUT',
               headers: {'Content-Type': 'application/json'},
@@ -2531,52 +2531,61 @@ const WIDGET_REGISTRY = {
           });
         });
 
-        // ── Action buttons ──
+        // ── Action buttons (blueprint-based) ──
         body.querySelectorAll('[data-vm-action]').forEach(btn => {
-          btn.addEventListener('click', () => {
+          btn.addEventListener('click', async () => {
             const name = btn.getAttribute('data-vm-action');
             const idx = parseInt(btn.getAttribute('data-action-idx'), 10);
             const fav = favorites.find(f => f.name === name);
             if (!fav) return;
             const act = (fav.actions || [])[idx];
-            if (!act) return;
+            if (!act || !act.blueprint) return;
 
             const discovered = containerMap[name];
             if (!discovered || discovered.state !== 'online') return;
 
-            const _docker = (navigator.platform.startsWith('Win') || navigator.userAgent.includes('Windows')) ? 'docker.exe' : 'docker';
-            let cmd;
-
-            if (act.shell_prefix) {
-              // Resolve import_keys
-              let prefix = act.shell_prefix;
-              if (act.import_keys && Array.isArray(act.import_keys)) {
-                for (const key of act.import_keys) {
-                  if (key === 'priority_credential' && priorityProfile) {
-                    prefix = prefix.replace('${priority_credential}', priorityProfile);
-                  }
-                }
-              }
-              cmd = `${_docker} exec -it ${name} sh -c '${prefix.replace(/'/g, "'\\''")}'`;
-            } else {
-              // Default: attach terminal to container (sh for compatibility — works on Alpine, busybox, etc.)
-              cmd = `${_docker} exec -it ${name} sh`;
-            }
+            // Build context: auto-inject container name, merge action-level context
+            const context = { container: name, ...(act.context || {}) };
 
             // Place near center of viewport
             const vw = viewport.clientWidth;
             const vh = viewport.clientHeight;
             const cx = (-pan.x + vw / 2) / zoom;
             const cy = (-pan.y + vh / 2) / zoom;
-            CARD_TYPE_REGISTRY.spawn('terminal', {
-              hub: name,
-              container: name,
-              exec: cmd,
-              x: cx - 480 + Math.random() * 60,
-              y: cy - 320 + Math.random() * 60,
-              w: 960,
-              h: 640,
-            });
+
+            btn.textContent = '⏳';
+            btn.disabled = true;
+            try {
+              const r = await fetch('/api/blueprints/spawn', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                  name: act.blueprint,
+                  context,
+                  x: Math.round(cx - 480 + Math.random() * 60),
+                  y: Math.round(cy - 320 + Math.random() * 60),
+                  w: 960,
+                  h: 640,
+                }),
+              });
+              if (!r.ok) {
+                const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+                console.error('Blueprint spawn failed:', err);
+                btn.textContent = '✗';
+                btn.title = err.error || err.errors?.join(', ') || 'Spawn failed';
+                btn.style.color = '#f38ba8';
+                btn.disabled = false;
+                return;
+              }
+              btn.textContent = act.label;
+              btn.disabled = false;
+            } catch (err) {
+              console.error('Blueprint spawn error:', err);
+              btn.textContent = '✗';
+              btn.title = err.message || 'Spawn failed';
+              btn.style.color = '#f38ba8';
+              btn.disabled = false;
+            }
           });
         });
 
@@ -2594,7 +2603,7 @@ const WIDGET_REGISTRY = {
             box.style.cssText = 'background:#1e1e2e;border:1px solid #45475a;border-radius:8px;padding:16px;min-width:400px;max-width:600px;color:#cdd6f4;font-size:12px';
             box.innerHTML = `
               <div style="font-weight:bold;margin-bottom:8px">Configure actions for ${esc(name)}</div>
-              <div style="margin-bottom:8px;color:#6c7086;font-size:11px">Edit the JSON array of actions. Each action: { "label": "...", "type": "terminal", "shell_prefix": "...", "import_keys": [...] }</div>
+              <div style="margin-bottom:8px;color:#6c7086;font-size:11px">Edit the JSON array of actions. Each action: { "label": "...", "blueprint": "blueprint-name", "context": { ... } }</div>
               <textarea data-actions-json style="width:100%;height:150px;background:#11111b;border:1px solid #45475a;color:#cdd6f4;border-radius:4px;padding:8px;font-family:monospace;font-size:11px;resize:vertical">${esc(JSON.stringify(fav.actions || [], null, 2))}</textarea>
               <div style="display:flex;gap:8px;margin-top:8px;justify-content:flex-end">
                 <button data-cancel style="background:none;border:1px solid #45475a;color:#cdd6f4;border-radius:4px;padding:4px 12px;cursor:pointer">Cancel</button>
