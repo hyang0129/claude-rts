@@ -26,6 +26,7 @@
   },
 
   "runArgs": [
+    "--privileged",
     "--shm-size", "8g",
     "--memory", "16g",
     "--memory-swap", "16g",

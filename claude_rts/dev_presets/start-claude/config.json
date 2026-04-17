@@ -1,8 +1,8 @@
 {
   "startup_script": "util-terminal",
   "default_canvas": "start-claude-qa",
-  "probe_profiles": ["test-profile"],
-  "priority_profile": "test-profile",
+  "probe_profiles": ["hongy", "hongyrit"],
+  "priority_profile": "hongy",
   "sessions": {
     "orphan_timeout": 60,
     "scrollback_size": 65536,
