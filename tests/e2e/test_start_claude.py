@@ -108,8 +108,17 @@ class TestStartClaudeButton:
         if btn is None:
             pytest.skip("No terminal card with .claude-btn found")
 
-        # Wait for WebSocket session to be established
-        page.wait_for_timeout(3000)
+        # Wait for the WebSocket session to be established by polling the
+        # frontend card's sessionId rather than sleeping a fixed 3 s.
+        card_id = card.get_attribute("data-card-id")
+        page.wait_for_function(
+            """(cardId) => {
+                const c = cards.find(c => String(c.id) === String(cardId));
+                return c && typeof c.sessionId === 'string' && c.sessionId.length > 0;
+            }""",
+            arg=card_id,
+            timeout=15000,
+        )
 
         session_id = _get_card_session_id(page, card)
         if not session_id:
@@ -117,8 +126,22 @@ class TestStartClaudeButton:
 
         btn.click()
 
-        # Give the PTY time to receive and echo the command
-        page.wait_for_timeout(1000)
+        # Poll the server-side scrollback for the expected fragment rather
+        # than sleeping a fixed 1 s and hoping the PTY echoed in time.  The
+        # puppeting API returns {"output": "<raw text>", ...}.
+        expected_fragment = "CLAUDE_CONFIG_DIR=/profiles/test-profile"
+        page.wait_for_function(
+            """async ([port, sid, fragment]) => {
+                const resp = await fetch(
+                    `http://localhost:${port}/api/test/session/${sid}/read`
+                );
+                if (!resp.ok) return false;
+                const data = await resp.json();
+                return typeof data.output === 'string' && data.output.includes(fragment);
+            }""",
+            arg=[backend_port, session_id, expected_fragment],
+            timeout=10000,
+        )
 
         # Read server-side scrollback — this survives Claude's startup output
         # scrolling the viewport, since the ring buffer holds 64KB of raw PTY data.
@@ -126,7 +149,6 @@ class TestStartClaudeButton:
         result = _read_session_scrollback(page, backend_port, session_id)
         scrollback = result.get("output", "") if isinstance(result, dict) else ""
 
-        expected_fragment = "CLAUDE_CONFIG_DIR=/profiles/test-profile"
         assert expected_fragment in scrollback, (
             f"Expected '{expected_fragment}' in server scrollback.\nGot: {scrollback[:500]}"
         )
@@ -150,22 +172,46 @@ class TestStartClaudeButton:
         if btn is None:
             pytest.skip("No terminal card with .claude-btn found")
 
-        # Clear the priority profile
-        page.evaluate(
-            """async (port) => {
-                await fetch(`http://localhost:${port}/api/profiles/priority`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ priority_profile: null }),
-                });
-            }""",
-            backend_port,
-        )
-
-        page.wait_for_timeout(500)
+        # Clear the priority profile and wait for the PUT to land rather
+        # than sleeping 500 ms afterwards.
+        with page.expect_response(
+            lambda r: "/api/profiles/priority" in r.url and r.request.method == "PUT",
+            timeout=10000,
+        ):
+            page.evaluate(
+                """async (port) => {
+                    await fetch(`http://localhost:${port}/api/profiles/priority`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ priority_profile: null }),
+                    });
+                }""",
+                backend_port,
+            )
 
         btn.click()
-        page.wait_for_timeout(1000)
+
+        # Poll the xterm buffer for the warning rather than sleeping 1 s.
+        # The Start Claude click-handler writes this string synchronously
+        # when priority_profile is unset, so the buffer flips on the next
+        # xterm render frame.
+        card_id = card.get_attribute("data-card-id")
+        page.wait_for_function(
+            """(cardId) => {
+                const c = cards.find(c => String(c.id) === String(cardId));
+                if (!c || !c.term) return false;
+                const buf = c.term.buffer.active;
+                for (let i = 0; i < buf.length; i++) {
+                    const line = buf.getLine(i);
+                    if (line && line.translateToString(true).includes('No priority profile set')) {
+                        return true;
+                    }
+                }
+                return false;
+            }""",
+            arg=card_id,
+            timeout=10000,
+        )
 
         # Warning is written to xterm.js locally (not to server scrollback)
         content = _get_xterm_content(page, card)

@@ -28,9 +28,14 @@ class TestAppLaunches:
         canvas = page.locator("#canvas")
         assert canvas.is_visible()
 
-        # The canvas should have child elements (cards from stress-test preset)
-        # Give cards time to render from startup script
-        page.wait_for_timeout(2000)
+        # The stress-test preset ships 6 preset cards.  Wait for them to be
+        # rendered rather than sleeping a fixed 2 s.  Use >= 1 (not == 6) so
+        # the assertion does not become brittle if the preset is ever edited
+        # or if the test is reused under another preset.
+        page.wait_for_function(
+            "() => typeof cards !== 'undefined' && cards.length >= 1",
+            timeout=10000,
+        )
 
     def test_canvas_element_exists(self, page):
         """Canvas container is present in the DOM."""
@@ -42,6 +47,9 @@ class TestTerminalCardSpawns:
 
     def test_terminal_card_spawns(self, page):
         """Spawn a terminal card from context menu, verify xterm container appears."""
+        # Capture baseline card count before spawning.
+        initial_count = page.locator("[data-card-id]").count()
+
         # Right-click on the viewport (not #canvas — viewport receives the event)
         viewport = page.locator("#viewport")
         viewport.click(button="right", position={"x": 500, "y": 500})
@@ -59,10 +67,13 @@ class TestTerminalCardSpawns:
             hub_item = ctx_menu.locator("[data-hub]").first
             hub_item.click()
 
-        # Verify a new card appeared with data-card-id
-        page.wait_for_timeout(2000)
+        # Wait for a new card to appear rather than sleeping a fixed 2 s.
+        page.wait_for_function(
+            f"() => document.querySelectorAll('[data-card-id]').length > {initial_count}",
+            timeout=10000,
+        )
         cards = page.locator("[data-card-id]")
-        assert cards.count() > 0
+        assert cards.count() > initial_count
 
 
 class TestCardDrag:
@@ -111,7 +122,26 @@ class TestCardDrag:
         page.mouse.move(box["x"] + box["width"] / 2 + 100, box["y"] + box["height"] / 2 + 50, steps=5)
         page.mouse.up()
 
-        page.wait_for_timeout(500)
+        # Wait for the card's inline left style to change rather than
+        # sleeping a fixed 500 ms.  If the drag handler never fires (e.g.
+        # the titlebar wasn't matched), the condition wait times out fast
+        # and the test surfaces that as a real failure.
+        try:
+            page.wait_for_function(
+                f"""(cardId) => {{
+                    const el = document.querySelector(`[data-card-id="${{cardId}}"]`);
+                    if (!el) return false;
+                    const m = (el.getAttribute('style') || '').match(
+                        /left:\\s*(-?\\d+(?:\\.\\d+)?)px/
+                    );
+                    return m !== null && parseFloat(m[1]) !== {initial_left};
+                }}""",
+                arg=card_id,
+                timeout=3000,
+            )
+        except Exception:
+            # Allow the assertion below to produce a clearer failure message.
+            pass
 
         # Verify position changed
         new_style = card.get_attribute("style") or ""
@@ -184,7 +214,25 @@ class TestCardResize:
         if result == "no-handle":
             pytest.skip("No resize handle found in DOM")
 
-        page.wait_for_timeout(300)
+        # Wait for the card's inline width style to change rather than
+        # sleeping a fixed 300 ms.  The resize handler dispatches a style
+        # mutation inside the pointerup handler, so this observable flips
+        # synchronously once the browser flushes the event queue.
+        try:
+            page.wait_for_function(
+                f"""(cardId) => {{
+                    const el = document.querySelector(`[data-card-id="${{cardId}}"]`);
+                    if (!el) return false;
+                    const m = (el.getAttribute('style') || '').match(
+                        /width:\\s*(-?\\d+(?:\\.\\d+)?)px/
+                    );
+                    return m !== null && parseFloat(m[1]) !== {initial_w};
+                }}""",
+                arg=card_id,
+                timeout=3000,
+            )
+        except Exception:
+            pass
 
         new_style = card.get_attribute("style") or ""
         new_w_match = re.search(r"width:\s*(-?\d+(?:\.\d+)?)px", new_style)
@@ -206,13 +254,50 @@ class TestCardResize:
         if box is None:
             pytest.skip("Resize handle not visible")
 
+        # Capture width/height before the drag so we can wait for the
+        # resize handler to have run (either clamping to minimum or not).
+        pre_style = card.get_attribute("style") or ""
+        pre_w_match = re.search(r"width:\s*(-?\d+(?:\.\d+)?)px", pre_style)
+        pre_h_match = re.search(r"height:\s*(-?\d+(?:\.\d+)?)px", pre_style)
+        pre_w = float(pre_w_match.group(1)) if pre_w_match else None
+        pre_h = float(pre_h_match.group(1)) if pre_h_match else None
+
+        card_id = card.get_attribute("data-card-id")
+
         # Try to drag the handle far to the upper-left (shrink significantly)
         page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
         page.mouse.down()
         page.mouse.move(box["x"] - 500, box["y"] - 500, steps=5)
         page.mouse.up()
 
-        page.wait_for_timeout(500)
+        # Wait for either:
+        # 1. The card's width/height inline style to change (resize fired and
+        #    was either clamped or accepted), OR
+        # 2. Two animation frames to flush (in case Playwright mouse drag was
+        #    not picked up at all — the min-size floor assertion still holds
+        #    against the original dimensions, so we can safely fall through).
+        try:
+            page.wait_for_function(
+                f"""(cardId) => {{
+                    const el = document.querySelector(`[data-card-id="${{cardId}}"]`);
+                    if (!el) return false;
+                    const s = el.getAttribute('style') || '';
+                    const w = s.match(/width:\\s*(-?\\d+(?:\\.\\d+)?)px/);
+                    const h = s.match(/height:\\s*(-?\\d+(?:\\.\\d+)?)px/);
+                    if (!w || !h) return false;
+                    const changed = (w && {pre_w if pre_w is not None else "null"} !== null &&
+                                     parseFloat(w[1]) !== {pre_w if pre_w is not None else "null"}) ||
+                                    (h && {pre_h if pre_h is not None else "null"} !== null &&
+                                     parseFloat(h[1]) !== {pre_h if pre_h is not None else "null"});
+                    return changed;
+                }}""",
+                arg=card_id,
+                timeout=1500,
+            )
+        except Exception:
+            # Drag may not have been picked up; the min-size assertion
+            # below still guards against regressions on the original size.
+            pass
 
         new_style = card.get_attribute("style") or ""
         w_match = re.search(r"width:\s*(-?\d+(?:\.\d+)?)px", new_style)
@@ -246,7 +331,14 @@ class TestWidgetSpawns:
             pytest.skip("No widgets in context menu")
 
         widget_item.click()
-        page.wait_for_timeout(1500)
+
+        # Wait for the new widget card to appear rather than sleeping
+        # 1.5 s.  Widget spawn is driven by a synchronous DOM append in
+        # the click handler, so this usually resolves within a frame.
+        page.wait_for_function(
+            f"() => document.querySelectorAll('[data-card-id]').length > {initial_count}",
+            timeout=10000,
+        )
 
         # Verify new card appeared
         new_count = page.locator("[data-card-id]").count()
@@ -269,10 +361,31 @@ class TestCanvasPanZoom:
         cx = canvas_box["x"] + canvas_box["width"] / 2
         cy = canvas_box["y"] + canvas_box["height"] / 2
 
+        # Capture pre-zoom transform so we can wait for a change rather
+        # than sleeping a fixed 500 ms.
+        pre_style = canvas.get_attribute("style") or ""
+
         # Zoom with mouse wheel
         page.mouse.move(cx, cy)
         page.mouse.wheel(0, -300)  # zoom in
-        page.wait_for_timeout(500)
+
+        # Wait for the canvas transform to update (or gain a transform if
+        # it had none).  The wheel handler applies the transform
+        # synchronously inside the event, so this resolves within a
+        # frame on a responsive machine.
+        try:
+            page.wait_for_function(
+                f"""() => {{
+                    const el = document.getElementById('canvas');
+                    if (!el) return false;
+                    const s = el.getAttribute('style') || '';
+                    return s !== {pre_style!r} && (s.includes('transform') || s.includes('scale'));
+                }}""",
+                timeout=3000,
+            )
+        except Exception:
+            # Fall through to the assertion — it has its own clearer error.
+            pass
 
         new_style = canvas.get_attribute("style") or ""
         # Transform should contain scale() that is different from initial
@@ -289,20 +402,36 @@ class TestCanvasSaveReload:
         if cards_before == 0:
             pytest.skip("No cards to verify persistence")
 
-        # Trigger a save by calling the API directly
-        page.evaluate(
-            """async () => {
-            // saveLayout is a global function in index.html
-            if (typeof saveLayout === 'function') saveLayout();
-        }"""
-        )
-        page.wait_for_timeout(1000)
+        # Trigger a save by calling the API directly and wait for the
+        # canvas PUT to complete — avoids sleeping 1 s regardless of
+        # whether saveLayout actually fired.
+        import re as _re
+
+        with page.expect_response(
+            lambda r: _re.search(r"/api/canvases/", r.url) is not None and r.request.method == "PUT",
+            timeout=10000,
+        ):
+            page.evaluate(
+                """async () => {
+                // saveLayout is a global function in index.html
+                if (typeof saveLayout === 'function') saveLayout();
+            }"""
+            )
 
         # Reload the page
         page.goto(f"http://localhost:{backend_port}")
         page.wait_for_load_state("networkidle")
         page.wait_for_selector("#canvas", timeout=10000)
-        page.wait_for_timeout(3000)  # wait for cards to render
+        # Wait for the boot IIFE to finish and cards to re-render from the
+        # saved canvas rather than sleeping a fixed 3 s.
+        page.wait_for_function(
+            "() => window.__claudeRtsBootComplete === true",
+            timeout=15000,
+        )
+        page.wait_for_function(
+            f"() => typeof cards !== 'undefined' && cards.length >= {cards_before}",
+            timeout=15000,
+        )
 
         # Verify cards are restored
         cards_after = page.locator("[data-card-id]").count()
