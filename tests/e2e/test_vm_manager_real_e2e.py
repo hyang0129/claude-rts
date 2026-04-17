@@ -177,13 +177,21 @@ def get_favorites(page, port):
 
 
 def ensure_vm_card_exists(page):
-    """Ensure at least one VM Manager card exists; spawn one if needed."""
+    """Ensure at least one VM Manager card exists; spawn one if needed.
+
+    Condition-based: after spawning, waits for the observable
+    ``[data-vm-search]`` input to appear in the DOM rather than a fixed
+    sleep.  Removes a flaky 2-second ``wait_for_timeout`` from the critical
+    path of every test in this module (see issue #167).
+    """
     vm_cards = page.locator("[data-card-id]").filter(has=page.locator("[data-vm-search]"))
     if vm_cards.count() > 0:
         return
     # Spawn via JS directly
     page.evaluate("() => CARD_TYPE_REGISTRY.spawn('widget', {widgetType: 'vm-manager', x: 100, y: 100})")
-    page.wait_for_timeout(2000)
+    # Wait for the VM Manager card's search input — the first observable
+    # DOM element written by its async render() — instead of sleeping.
+    page.wait_for_selector("[data-vm-search]", timeout=5000)
 
 
 def docker_inspect_state(name: str) -> str:
