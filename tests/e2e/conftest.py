@@ -177,11 +177,6 @@ def clear_canvas(page):
             }
             cards.length = 0;
         }
-        if (typeof hubSymbolMap !== 'undefined') {
-            hubSymbolMap.clear
-                ? hubSymbolMap.clear()
-                : Object.keys(hubSymbolMap).forEach(k => delete hubSymbolMap[k]);
-        }
         if (typeof controlGroups !== 'undefined') {
             controlGroups.clear
                 ? controlGroups.clear()

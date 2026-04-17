@@ -428,10 +428,6 @@ class TestCanvasSaveReload:
             "() => window.__claudeRtsBootComplete === true",
             timeout=15000,
         )
-        page.wait_for_function(
-            f"() => typeof cards !== 'undefined' && cards.length >= {cards_before}",
-            timeout=15000,
-        )
 
         # Verify cards are restored
         cards_after = page.locator("[data-card-id]").count()
