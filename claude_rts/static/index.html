@@ -3805,6 +3805,7 @@ async function handleBlueprintOpenWidget(msg) {
 // Boot
 // ════════════════════════════════════════════
 (async function() {
+  try {
   // Load settings first (determines default_canvas)
   await loadSettings();
   currentCanvasName = settings.default_canvas || 'probe-qa';
@@ -3925,6 +3926,12 @@ async function handleBlueprintOpenWidget(msg) {
 
   // Center viewport on the cards
   setTimeout(fitAll, 200);
+  } finally {
+  // Boot complete — observable signal for E2E tests that need a ready
+  // condition instead of a fixed timeout. Always set regardless of how
+  // the IIFE exits (early return, exception, or normal completion).
+  window.__claudeRtsBootComplete = true;
+  }
 })();
 </script>
 </body>

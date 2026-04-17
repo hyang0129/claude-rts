@@ -24,6 +24,9 @@ import pytest
 # Skip module entirely if playwright is not installed
 pw = pytest.importorskip("playwright")
 
+# Shared helpers live in conftest (single source of truth — see issue #165).
+from tests.e2e.conftest import cleanup_non_vm_cards, refresh_vm_card  # noqa: E402
+
 
 # ── Markers & skip logic ─────────────────────────────────────────────────────
 
@@ -170,48 +173,6 @@ def get_favorites(page, port):
         return r.json();
     }""",
         port,
-    )
-
-
-def refresh_vm_card(page):
-    """Force re-render of all VM Manager widget cards on the canvas."""
-    page.evaluate(
-        """() => {
-        if (typeof cards !== 'undefined') {
-            for (const card of cards) {
-                if (card.widgetType === 'vm-manager' && typeof card.render === 'function') {
-                    card.render();
-                }
-            }
-        }
-    }"""
-    )
-    page.wait_for_timeout(3000)
-
-
-def cleanup_non_vm_cards(page):
-    """Remove all cards except VM Manager widgets to prevent overlap issues."""
-    page.evaluate(
-        """() => {
-        if (typeof cards === 'undefined') return;
-        const toRemove = [];
-        for (let i = cards.length - 1; i >= 0; i--) {
-            if (cards[i].widgetType !== 'vm-manager') {
-                if (typeof cards[i].destroy === 'function') cards[i].destroy();
-                toRemove.push(i);
-            }
-        }
-        for (const idx of toRemove) cards.splice(idx, 1);
-    }"""
-    )
-    page.wait_for_function(
-        """() => {
-            const all = document.querySelectorAll('[data-card-id]');
-            return Array.from(all).every(
-                c => c.querySelector('[data-vm-search]') !== null
-            );
-        }""",
-        timeout=3000,
     )
 
 

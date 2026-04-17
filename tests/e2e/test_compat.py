@@ -27,6 +27,9 @@ import pytest
 # Skip module entirely if playwright is not installed
 pw = pytest.importorskip("playwright")
 
+# Shared helpers live in conftest (single source of truth — see issue #165).
+from tests.e2e.conftest import clear_canvas  # noqa: E402
+
 FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
 
 
@@ -41,51 +44,6 @@ def get_card_count(page):
 def count_cards_by_type(page, card_type):
     """Count cards where card.type === card_type via JS."""
     return page.evaluate("(t) => cards.filter(c => c.type === t).length", card_type)
-
-
-def clear_canvas(page):
-    """Destroy all cards, clear the canvas DOM element, and reset shared state."""
-    page.evaluate(
-        """() => {
-        if (typeof controlWs !== 'undefined' && controlWs) {
-            try { controlWs.onmessage = null; } catch(e) {}
-        }
-        if (typeof cards !== 'undefined') {
-            for (const card of cards) {
-                if (typeof card.destroy === 'function') card.destroy();
-            }
-            cards.length = 0;
-        }
-        const el = document.getElementById('canvas');
-        if (el) el.innerHTML = '';
-        if (typeof hideContextMenu === 'function') hideContextMenu();
-        if (typeof pan === 'object' && pan !== null) { pan.x = 0; pan.y = 0; }
-        if (typeof zoom !== 'undefined') { zoom = 1; }
-        if (typeof applyTransform === 'function') applyTransform();
-        if (typeof focusedCardId !== 'undefined') { focusedCardId = null; }
-        if (typeof controlWs !== 'undefined' && controlWs) {
-            try {
-                controlWs.onmessage = (ev) => {
-                    try {
-                        const msg = JSON.parse(ev.data);
-                        if (msg.type === 'card_created') handleControlCardCreated(msg);
-                        else if (msg.type === 'card_deleted') handleControlCardDeleted(msg);
-                    } catch(e) {}
-                };
-            } catch(e) {}
-        }
-    }"""
-    )
-    # Wait until the canvas DOM is truly empty (no ghost cards from queued
-    # control-ws broadcasts) instead of a fixed 300ms sleep.
-    page.wait_for_function(
-        """() => {
-            const el = document.getElementById('canvas');
-            const c = (typeof cards !== 'undefined') ? cards.length : 0;
-            return el !== null && el.children.length === 0 && c === 0;
-        }""",
-        timeout=3000,
-    )
 
 
 def put_canvas(page, canvas_name, payload):
