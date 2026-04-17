@@ -25,5 +25,13 @@
     "3000": { "label": "supreme-claudemander", "onAutoForward": "openBrowser" }
   },
 
-  "runArgs": []
+  "runArgs": [
+    "--shm-size", "8g",
+    "--memory", "16g",
+    "--memory-swap", "16g",
+    "--memory-reservation", "8g",
+    "--cpuset-cpus=0-7",
+    "--cpus", "8",
+    "--cpu-shares", "64"
+  ]
 }

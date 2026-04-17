@@ -36,7 +36,7 @@ def _get_config(app_config: AppConfig) -> dict:
         "auto_start": util.get("auto_start", True),
         "auto_stop": util.get("auto_stop", False),
         "mounts": util.get("mounts", {}),
-        "volumes": util.get("volumes", {}),
+        "volumes": util.get("volumes", {"claude-profiles": "/profiles"}),
     }
 
 
