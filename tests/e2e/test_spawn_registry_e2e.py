@@ -381,10 +381,16 @@ class TestProbeProfileNetworkContract:
             probe_item = page.locator("#context-menu [data-probe-profile]").first
             if probe_item.count() == 0:
                 pytest.skip("No probe-profile row in context menu")
-            probe_item.click()
 
-            # Give the async handler time to fire the fetch
-            page.wait_for_timeout(2000)
+            # Wait for the POST to /api/probe/claude-usage to fire as a direct
+            # consequence of the click — condition-based, no fixed sleep.  The
+            # recorded_requests listener above still captures for the final
+            # assertion.
+            with page.expect_request(
+                lambda req: "probe/claude-usage" in req.url,
+                timeout=5000,
+            ):
+                probe_item.click()
         finally:
             page.remove_listener("request", record_request)
 
@@ -442,8 +448,13 @@ class TestSpawnFromSerializedMixedCanvas:
         clear_canvas(page)
         page.evaluate("() => switchCanvas('mixed-restore')")
 
-        # Wait for spawn to complete (sequential async spawns)
-        page.wait_for_timeout(2000)
+        # Wait for spawn to complete — exactly 3 cards should restore (the
+        # unknown-hub entry is silently skipped).  Condition-based: polls
+        # cards.length instead of sleeping for a fixed duration.
+        page.wait_for_function(
+            "() => typeof cards !== 'undefined' && cards.length === 3",
+            timeout=5000,
+        )
 
         total_cards = get_card_count(page)
         assert total_cards == 3, f"Expected exactly 3 cards (unknown hub skipped); got {total_cards}"
@@ -491,7 +502,12 @@ class TestSpawnFromSerializedMixedCanvas:
 
         clear_canvas(page)
         page.evaluate("() => switchCanvas('mixed-restore-clean')")
-        page.wait_for_timeout(2000)
+        # Wait for the 2-card clean canvas to finish restoring.  Condition-based
+        # on cards.length so we don't sleep past the slowest observed spawn.
+        page.wait_for_function(
+            "() => typeof cards !== 'undefined' && cards.length === 2",
+            timeout=5000,
+        )
 
         page.remove_listener("pageerror", _on_page_error)
         assert len(page_errors) == 0, f"Unexpected page error(s) during restore: {page_errors}"
@@ -527,8 +543,19 @@ class TestCanvasClaudeStalenessCheck:
         clear_canvas(page)
         page.evaluate("() => switchCanvas('cc-stale-test')")
 
-        # prepareOpts does two fetches; allow up to 5 s
-        page.wait_for_timeout(3000)
+        # prepareOpts does two sequential fetches before the card lands.  Wait
+        # for the canvas_claude card to exist AND for its sessionId to no
+        # longer equal the bogus id.  Condition-based replacement for the
+        # previous 3 s fixed sleep — fails fast with a clear timeout error if
+        # the staleness check regressed.
+        page.wait_for_function(
+            f"""() => {{
+                if (typeof cards === 'undefined' || cards.length === 0) return false;
+                const cc = cards.find(c => c.type === 'canvas_claude');
+                return cc !== undefined && cc.sessionId !== {bogus_session_id!r};
+            }}""",
+            timeout=5000,
+        )
 
         total_cards = get_card_count(page)
         assert total_cards >= 1, "Expected at least one canvas_claude card after switchCanvas"
