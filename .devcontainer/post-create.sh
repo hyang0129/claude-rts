@@ -11,5 +11,15 @@ if [ -f "$GITUSER_TMP" ]; then
   rm -f "$GITUSER_TMP"
 fi
 
+# Fix Docker socket permissions (socket from Windows host is root:root, not root:docker)
+if [ -e /var/run/docker.sock ]; then
+  sudo chmod 666 /var/run/docker.sock
+fi
+
+# Fix claude-profiles volume permissions (created by Docker as root:root)
+if [ -d /profiles ]; then
+  sudo chmod 777 /profiles
+fi
+
 pip install -e ".[test,e2e]"
 python -m playwright install chromium

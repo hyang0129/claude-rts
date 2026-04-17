@@ -11,7 +11,8 @@
   "remoteUser": "vscode",
   "mounts": [
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind,consistency=cached",
-    "source=${localEnv:USERPROFILE}\\.claude,target=/home/vscode/.claude,type=bind,consistency=cached"
+    "source=${localEnv:USERPROFILE}\\.claude,target=/home/vscode/.claude,type=bind,consistency=cached",
+    "source=claude-profiles,target=/profiles,type=volume"
   ],
 
   "containerEnv": {
@@ -19,7 +20,13 @@
     "GH_TOKEN": "${localEnv:GH_TOKEN}"
   },
 
+  "forwardPorts": [3000],
+  "portsAttributes": {
+    "3000": { "label": "supreme-claudemander", "onAutoForward": "openBrowser" }
+  },
+
   "runArgs": [
+    "--privileged",
     "--shm-size", "8g",
     "--memory", "16g",
     "--memory-swap", "16g",

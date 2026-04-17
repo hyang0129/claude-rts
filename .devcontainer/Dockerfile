@@ -5,11 +5,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get -y install --no-install-recommends \
     git \
     curl \
-    docker.io \
+    ca-certificates \
+    gnupg \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /usr/share/keyrings/githubcli-archive-keyring.gpg > /dev/null \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
     && apt-get update \
-    && apt-get -y install --no-install-recommends gh
+    && apt-get -y install --no-install-recommends docker-ce-cli gh sudo nodejs npm
 
 # Playwright chromium system dependencies (installed as root; browser binary installed in post-create.sh)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -36,10 +41,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libxkbcommon0 \
     libxrandr2
 
-# Create vscode user and add to docker group (socket access without sudo)
-RUN groupadd --gid 1000 vscode \
+RUN npm install -g @anthropic-ai/claude-code
+
+# Create vscode user; grant passwordless chmod for fixing the Docker socket group at runtime
+RUN groupadd --gid 999 docker \
+    && groupadd --gid 1000 vscode \
     && useradd --uid 1000 --gid vscode --shell /bin/bash --create-home vscode \
-    && usermod -aG docker vscode
+    && usermod -aG docker vscode \
+    && echo "vscode ALL=(ALL) NOPASSWD: /bin/chmod" > /etc/sudoers.d/vscode-docker-socket \
+    && chmod 0440 /etc/sudoers.d/vscode-docker-socket
 
 USER vscode
 WORKDIR /workspace
