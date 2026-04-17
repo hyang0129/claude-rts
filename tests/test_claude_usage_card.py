@@ -1,6 +1,5 @@
 """Tests for ClaudeUsageCard: _parse_screen, _hours_until_reset, parse_output, probe_command."""
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -179,8 +178,7 @@ _TRUST_SCREEN = b"Trust this folder?\r\nYes, I trust this folder\r\n"
 _BYPASS_SCREEN = b"Permissions dialog\r\nYes, I accept  Bypass Permissions\r\n"
 _WELCOME_SCREEN = b"Welcome back, alice!\r\n"
 _USAGE_SCREEN = (
-    b"  Session usage\r\n  50% used\r\n  Resets in 2h 30m\r\n"
-    b"  Weekly usage\r\n  30% used\r\n  Resets in 6 days\r\n"
+    b"  Session usage\r\n  50% used\r\n  Resets in 2h 30m\r\n  Weekly usage\r\n  30% used\r\n  Resets in 6 days\r\n"
 )
 _DEAD_SCREEN = b""  # session will be marked dead
 
@@ -225,7 +223,7 @@ async def test_bypass_dialog_sets_bypass_accepted_independently():
     would be skipped.  With the split flags both dialogs trigger their own
     accept sequence.
     """
-    pty = _MockPty()
+    _MockPty()
     write_log: list[str] = []
 
     # We'll control session death via a counter on writes
