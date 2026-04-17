@@ -25,7 +25,7 @@ import pytest
 pw = pytest.importorskip("playwright")
 
 # Shared helpers live in conftest (single source of truth — see issue #165).
-from tests.e2e.conftest import cleanup_non_vm_cards, refresh_vm_card  # noqa: E402,F401
+from tests.e2e.conftest import cleanup_non_vm_cards, refresh_vm_card  # noqa: E402
 
 
 # ── Markers & skip logic ─────────────────────────────────────────────────────

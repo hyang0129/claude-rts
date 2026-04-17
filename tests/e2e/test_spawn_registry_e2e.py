@@ -19,7 +19,7 @@ import pytest
 pw = pytest.importorskip("playwright")
 
 # Shared helpers live in conftest (single source of truth — see issue #165).
-from tests.e2e.conftest import clear_canvas, open_context_menu  # noqa: E402,F401
+from tests.e2e.conftest import clear_canvas, open_context_menu  # noqa: E402
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

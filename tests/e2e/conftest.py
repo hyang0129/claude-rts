@@ -177,6 +177,16 @@ def clear_canvas(page):
             }
             cards.length = 0;
         }
+        if (typeof hubSymbolMap !== 'undefined') {
+            hubSymbolMap.clear
+                ? hubSymbolMap.clear()
+                : Object.keys(hubSymbolMap).forEach(k => delete hubSymbolMap[k]);
+        }
+        if (typeof controlGroups !== 'undefined') {
+            controlGroups.clear
+                ? controlGroups.clear()
+                : Object.keys(controlGroups).forEach(k => delete controlGroups[k]);
+        }
         const el = document.getElementById('canvas');
         if (el) el.innerHTML = '';
         // Reset context menu and pan/zoom so residual DOM state cannot
@@ -221,6 +231,11 @@ def clear_canvas(page):
                         const msg = JSON.parse(ev.data);
                         if (msg.type === 'card_created') handleControlCardCreated(msg);
                         else if (msg.type === 'card_deleted') handleControlCardDeleted(msg);
+                        else if (msg.type === 'card_updated') handleControlCardUpdated(msg);
+                        else if (msg.type === 'blueprint:log') handleBlueprintLog(msg);
+                        else if (msg.type === 'blueprint:completed') handleBlueprintCompleted(msg);
+                        else if (msg.type === 'blueprint:failed') handleBlueprintFailed(msg);
+                        else if (msg.type === 'blueprint:open_widget') handleBlueprintOpenWidget(msg);
                     } catch(e) {}
                 };
             } catch(e) {}
@@ -279,8 +294,9 @@ def refresh_vm_card(page):
             const searchInputs = document.querySelectorAll('[data-vm-search]');
             if (searchInputs.length === 0) return false;
             if (favs.length === 0) {
-                // Empty favorites renders the placeholder — accept as ready.
-                return true;
+                // Empty favorites: confirm no remove buttons exist (clean render) and search input present
+                const removeBtns = document.querySelectorAll('[data-vm-remove]');
+                return removeBtns.length === 0 && searchInputs.length > 0;
             }
             for (const fav of favs) {
                 const btn = document.querySelector(
