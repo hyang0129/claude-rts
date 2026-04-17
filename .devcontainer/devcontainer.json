@@ -1,0 +1,29 @@
+{
+  "name": "supreme-claudemander",
+  "build": { "dockerfile": "Dockerfile" },
+  "customizations": {
+    "vscode": {
+      "extensions": ["anthropic.claude-code"]
+    }
+  },
+  "initializeCommand": ".devcontainer\\initialize.cmd",
+  "postCreateCommand": ".devcontainer/post-create.sh",
+  "remoteUser": "vscode",
+  "mounts": [
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind,consistency=cached",
+    "source=${localEnv:USERPROFILE}\\.claude,target=/home/vscode/.claude,type=bind,consistency=cached",
+    "source=claude-profiles,target=/profiles,type=volume"
+  ],
+
+  "containerEnv": {
+    "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",
+    "GH_TOKEN": "${localEnv:GH_TOKEN}"
+  },
+
+  "forwardPorts": [3000],
+  "portsAttributes": {
+    "3000": { "label": "supreme-claudemander", "onAutoForward": "openBrowser" }
+  },
+
+  "runArgs": []
+}

@@ -12,9 +12,6 @@
     "name": "supreme-claudemander-util",
     "image": "supreme-claudemander-util:latest",
     "auto_start": true,
-    "auto_stop": false,
-    "mounts": {
-      "~/.claude-profiles": "/profiles"
-    }
+    "auto_stop": false
   }
 }
