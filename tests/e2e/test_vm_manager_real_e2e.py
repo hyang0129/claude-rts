@@ -305,15 +305,20 @@ class TestRealStartContainer:
         # Click Start
         start_btn.click()
 
-        # Wait for the container to start and the card to re-render
-        # The frontend does setTimeout(() => card.render(), 2000) after success
-        page.wait_for_timeout(4000)
+        # Wait on an observable DOM predicate — the Start button must disappear
+        # once the frontend re-renders after the successful start response.  This
+        # replaces a flat 4-second sleep with a condition-based wait (issue #172).
+        page.wait_for_function(
+            f"() => document.querySelectorAll('[data-vm-start=\"{startable_container}\"]').length === 0",
+            timeout=10000,
+        )
 
-        # Verify container is actually running via docker inspect
+        # Verify container is actually running via docker inspect (real-Docker
+        # state assertion independent of the UI re-render above).
         state = docker_inspect_state(startable_container)
         assert state == "running", f"Container should be running after start, got: {state}"
 
-        # Verify Start button is gone after re-render
+        # Verify Start button is gone after re-render (already waited above)
         start_btn_after = page.locator(f'[data-vm-start="{startable_container}"]')
         assert start_btn_after.count() == 0, "Start button should disappear after container starts"
 
@@ -409,8 +414,12 @@ class TestRealSearch:
         # Use the e2e-vm-running prefix to find our container
         search_input.fill("e2e-vm-running")
 
-        # Wait for search results
-        page.wait_for_timeout(1000)
+        # Wait for the search results container to become visible and the Add
+        # button for our target container to render (condition-based in place of
+        # a 1-second sleep — issue #172).
+        page.locator("[data-vm-search-results]").first.wait_for(state="visible", timeout=5000)
+        page.locator(f'[data-vm-add="{running_container}"]').first.wait_for(state="visible", timeout=5000)
+
         results = page.locator("[data-vm-search-results]").first
         assert results.is_visible(), "Search results should be visible"
 
@@ -420,7 +429,18 @@ class TestRealSearch:
 
         # Click add
         add_btn.click()
-        page.wait_for_timeout(2000)
+
+        # Poll the favorites API until the container appears, replacing a flat
+        # 2-second sleep (issue #172).  The Add flow: frontend PUTs favorites,
+        # then re-renders — we wait on the server-side source of truth.
+        page.wait_for_function(
+            f"""async () => {{
+                const r = await fetch('http://localhost:{backend_port}/api/vms/favorites');
+                const favs = await r.json();
+                return favs.some(f => f.name === {running_container!r});
+            }}""",
+            timeout=10000,
+        )
 
         # Verify favorites now include the container
         favs = get_favorites(page, backend_port)
