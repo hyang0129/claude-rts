@@ -64,6 +64,70 @@ def get_card_count(page):
     return page.evaluate("() => cards.length")
 
 
+def clear_canvas(page):
+    """Destroy all cards, clear the canvas DOM element, and reset shared state."""
+    page.evaluate(
+        """() => {
+        // Silence queued control-ws messages.  Cards destroyed below may not
+        // yet have a sessionId if the server was slow to respond; in that case
+        // _markSessionDestroyed(null) is a no-op and a delayed card_created
+        // broadcast would slip through the guard.  Keeping the handler null
+        // until after wait_for_function prevents ghost cards from appearing
+        // while we wait for the canvas to drain.
+        if (typeof controlWs !== 'undefined' && controlWs) {
+            try { controlWs.onmessage = null; } catch(e) {}
+        }
+        if (typeof cards !== 'undefined') {
+            for (const card of cards) {
+                if (typeof card.destroy === 'function') card.destroy();
+            }
+            cards.length = 0;
+        }
+        const el = document.getElementById('canvas');
+        if (el) el.innerHTML = '';
+        // Reset context menu and pan/zoom so residual DOM state cannot
+        // block the right-click handler on subsequent tests.
+        if (typeof hideContextMenu === 'function') hideContextMenu();
+        if (typeof pan === 'object' && pan !== null) { pan.x = 0; pan.y = 0; }
+        if (typeof zoom !== 'undefined') { zoom = 1; }
+        if (typeof applyTransform === 'function') applyTransform();
+        if (typeof focusedCardId !== 'undefined') { focusedCardId = null; }
+        // controlWs.onmessage intentionally left null here — re-attached
+        // in a separate evaluate() call after wait_for_function confirms the
+        // canvas is empty.
+    }"""
+    )
+    # Wait until the canvas DOM is truly empty.  The control-ws handler is
+    # still null, so no card_created broadcasts can create new cards here.
+    page.wait_for_function(
+        """() => {
+            const el = document.getElementById('canvas');
+            const c = (typeof cards !== 'undefined') ? cards.length : 0;
+            return el !== null && el.children.length === 0 && c === 0;
+        }""",
+        timeout=3000,
+    )
+    # Re-attach the control-ws message handler now that the canvas is
+    # confirmed empty.  Any broadcast that arrives from this point on goes
+    # through the normal handleControlCardCreated guard logic.
+    page.evaluate(
+        """() => {
+        if (typeof controlWs !== 'undefined' && controlWs) {
+            try {
+                controlWs.onmessage = (ev) => {
+                    try {
+                        const msg = JSON.parse(ev.data);
+                        if (msg.type === 'card_created') handleControlCardCreated(msg);
+                        else if (msg.type === 'card_deleted') handleControlCardDeleted(msg);
+                    } catch(e) {}
+                };
+            } catch(e) {}
+        }
+    }"""
+    )
+
+
+
 def wait_for_new_card(page, initial_count, timeout_ms=3000):
     """Poll until cards.length > initial_count; return True if a new card appeared."""
     page.wait_for_function(
