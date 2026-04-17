@@ -1174,6 +1174,7 @@ class Card {
       input.value = this.displayName || this.hub || '';
       input.style.cssText = 'background:#1e1e2e;color:#cdd6f4;border:1px solid #585b70;font-size:12px;padding:0 4px;width:120px;outline:none;border-radius:3px;';
       const finish = () => {
+        input.removeEventListener('blur', finish);
         const val = input.value.trim();
         this.displayName = val;
         nameSpan.textContent = val || this.hub;
