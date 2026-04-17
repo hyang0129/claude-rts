@@ -48,7 +48,7 @@ RUN groupadd --gid 999 docker \
     && groupadd --gid 1000 vscode \
     && useradd --uid 1000 --gid vscode --shell /bin/bash --create-home vscode \
     && usermod -aG docker vscode \
-    && echo "vscode ALL=(ALL) NOPASSWD: /bin/chmod" > /etc/sudoers.d/vscode-docker-socket \
+    && echo "vscode ALL=(ALL) NOPASSWD: /bin/chmod 666 /var/run/docker.sock, /bin/chmod 777 /profiles" > /etc/sudoers.d/vscode-docker-socket \
     && chmod 0440 /etc/sudoers.d/vscode-docker-socket
 
 USER vscode
