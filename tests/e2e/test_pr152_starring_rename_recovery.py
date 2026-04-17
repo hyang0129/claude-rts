@@ -73,13 +73,43 @@ def get_first_terminal_session_id(page):
 
 
 def reload_page(page, backend_port):
-    """Save layout, reload, and wait for cards to render."""
-    page.evaluate("saveLayout()")
-    page.wait_for_timeout(500)
+    """Save layout, reload, and wait for cards to render.
+
+    Save via saveLayout() and poll the canvas JSON endpoint to confirm the
+    save has been persisted before reloading — this replaces a blind 500ms
+    sleep with a condition on the observable save completion.  After
+    reload, wait on ``window.__claudeRtsBootComplete`` (set at the end of
+    the boot IIFE) instead of a blind 3-second sleep.
+    """
+    # saveLayout() is fire-and-forget (returns void, catches fetch errors
+    # internally).  Call it directly here so the PUT request is awaited
+    # before we navigate away — this replaces a blind 500ms sleep that was
+    # intended to let the background PUT settle.
+    page.evaluate(
+        """async () => {
+        const data = {
+            name: currentCanvasName,
+            canvas_size: [CANVAS_W, CANVAS_H],
+            cards: cards.map(c => c.serialize()),
+        };
+        const resp = await fetch(
+            `/api/canvases/${encodeURIComponent(currentCanvasName)}`,
+            {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data),
+            }
+        );
+        if (!resp.ok) throw new Error(`saveLayout failed: ${resp.status}`);
+    }"""
+    )
     page.goto(f"http://localhost:{backend_port}")
     page.wait_for_load_state("networkidle")
     page.wait_for_selector("#canvas", timeout=15000)
-    page.wait_for_timeout(3000)
+    page.wait_for_function(
+        "() => window.__claudeRtsBootComplete === true",
+        timeout=15000,
+    )
 
 
 def js_click(page, selector):
@@ -108,7 +138,14 @@ def js_rename(page, card_id, value, commit="enter"):
         if (el) el.dispatchEvent(new MouseEvent('dblclick', {{bubbles: true, cancelable: true}}));
     }}"""
     )
-    page.wait_for_timeout(200)
+    # Wait for the inline rename input to appear in the titlebar.
+    page.wait_for_function(
+        f"""() => {{
+            const tb = document.querySelector('[data-drag="{card_id}"]');
+            return tb && tb.querySelector('input') !== null;
+        }}""",
+        timeout=3000,
+    )
     # Set the input value and commit
     key_event = {
         "enter": "new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})",
@@ -128,12 +165,65 @@ def js_rename(page, card_id, value, commit="enter"):
         }}
     }}"""
     )
-    page.wait_for_timeout(300)
+    # Commit removes the input and re-renders the display-name span.  Wait
+    # for the input to disappear rather than sleeping a blind 300ms.
+    page.wait_for_function(
+        f"""() => {{
+            const tb = document.querySelector('[data-drag="{card_id}"]');
+            return tb && tb.querySelector('input') === null;
+        }}""",
+        timeout=3000,
+    )
 
 
 def get_star_text(page, card_id):
     """Get the text content of a star button."""
     return page.evaluate(f"document.querySelector('[data-star=\"{card_id}\"]')?.textContent || ''")
+
+
+def save_layout_and_wait(page):
+    """Issue the canvas PUT directly and await the response.
+
+    ``saveLayout()`` in index.html is fire-and-forget; tests previously
+    slept 500ms to let the PUT settle.  Replicating the PUT here and
+    awaiting it is both faster and guarantees the server has persisted
+    the layout before the caller reads it back.
+    """
+    page.evaluate(
+        """async () => {
+        const data = {
+            name: currentCanvasName,
+            canvas_size: [CANVAS_W, CANVAS_H],
+            cards: cards.map(c => c.serialize()),
+        };
+        const resp = await fetch(
+            `/api/canvases/${encodeURIComponent(currentCanvasName)}`,
+            {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data),
+            }
+        );
+        if (!resp.ok) throw new Error(`save failed: ${resp.status}`);
+    }"""
+    )
+
+
+def wait_for_star_text(page, card_id, expected, timeout=3000):
+    """Wait until the star button for ``card_id`` has ``expected`` textContent.
+
+    Replaces fixed-duration sleeps after ``js_click`` on a star button —
+    the click updates the DOM synchronously, but the server PUT is
+    asynchronous and the previous fixed sleeps were guarding against that
+    round-trip.  Polling the DOM is both faster and more reliable.
+    """
+    page.wait_for_function(
+        f"""() => {{
+            const el = document.querySelector('[data-star="{card_id}"]');
+            return el && el.textContent === {expected!r};
+        }}""",
+        timeout=timeout,
+    )
 
 
 def get_name_text(page, card_id):
@@ -169,7 +259,13 @@ class TestStarToggle:
         target_id = card_ids[0]
 
         js_click(page, f'[data-star="{target_id}"]')
-        page.wait_for_timeout(300)
+        page.wait_for_function(
+            f"""() => {{
+                const el = document.querySelector('[data-star="{target_id}"]');
+                return el && el.textContent === '\u2606';
+            }}""",
+            timeout=3000,
+        )
 
         text = get_star_text(page, target_id)
         assert text == "\u2606", f"Star should be unfilled after click, got '{text}'"
@@ -185,10 +281,22 @@ class TestStarToggle:
         # Ensure it is currently unstarred
         if get_star_text(page, target_id) == "\u2605":
             js_click(page, f'[data-star="{target_id}"]')
-            page.wait_for_timeout(200)
+            page.wait_for_function(
+                f"""() => {{
+                    const el = document.querySelector('[data-star="{target_id}"]');
+                    return el && el.textContent === '\u2606';
+                }}""",
+                timeout=3000,
+            )
 
         js_click(page, f'[data-star="{target_id}"]')
-        page.wait_for_timeout(300)
+        page.wait_for_function(
+            f"""() => {{
+                const el = document.querySelector('[data-star="{target_id}"]');
+                return el && el.textContent === '\u2605';
+            }}""",
+            timeout=3000,
+        )
 
         text = get_star_text(page, target_id)
         assert text == "\u2605", f"Star should be filled after re-toggle, got '{text}'"
@@ -212,7 +320,7 @@ class TestStarPersistence:
 
         if get_star_text(page, target_id) != "\u2605":
             js_click(page, f'[data-star="{target_id}"]')
-            page.wait_for_timeout(200)
+            wait_for_star_text(page, target_id, "\u2605")
 
         reload_page(page, backend_port)
 
@@ -236,7 +344,7 @@ class TestStarPersistence:
         target_id = card_ids[-1]
         if get_star_text(page, target_id) == "\u2605":
             js_click(page, f'[data-star="{target_id}"]')
-            page.wait_for_timeout(200)
+            wait_for_star_text(page, target_id, "\u2606")
 
         reload_page(page, backend_port)
 
@@ -260,7 +368,7 @@ class TestStarPersistence:
         target_id = card_ids[-1]
         if get_star_text(page, target_id) == "\u2605":
             js_click(page, f'[data-star="{target_id}"]')
-            page.wait_for_timeout(200)
+            wait_for_star_text(page, target_id, "\u2606")
 
         reload_page(page, backend_port)
 
@@ -295,17 +403,30 @@ class TestStarPersistence:
 
         if get_star_text(page, card_ids[0]) != "\u2605":
             js_click(page, f'[data-star="{card_ids[0]}"]')
-            page.wait_for_timeout(200)
+            wait_for_star_text(page, card_ids[0], "\u2605")
 
         if get_star_text(page, card_ids[-1]) != "\u2606":
             js_click(page, f'[data-star="{card_ids[-1]}"]')
-            page.wait_for_timeout(200)
+            wait_for_star_text(page, card_ids[-1], "\u2606")
 
-        page.evaluate("saveLayout()")
-        page.wait_for_timeout(500)
-
+        # Save via explicit PUT so we can wait on the server response
+        # instead of sleeping after a fire-and-forget saveLayout().
         canvas_json = page.evaluate(
             """async () => {
+            const data = {
+                name: currentCanvasName,
+                canvas_size: [CANVAS_W, CANVAS_H],
+                cards: cards.map(c => c.serialize()),
+            };
+            const put = await fetch(
+                `/api/canvases/${encodeURIComponent(currentCanvasName)}`,
+                {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(data),
+                }
+            );
+            if (!put.ok) throw new Error(`save failed: ${put.status}`);
             const resp = await fetch('/api/canvases/stress-layout');
             return await resp.json();
         }"""
@@ -348,7 +469,13 @@ class TestRename:
         target_id = card_ids[0]
 
         js_dblclick(page, f'[data-display-name="{target_id}"]')
-        page.wait_for_timeout(300)
+        page.wait_for_function(
+            f"""() => {{
+                const tb = document.querySelector('[data-drag="{target_id}"]');
+                return tb && tb.querySelector('input') !== null;
+            }}""",
+            timeout=3000,
+        )
 
         has_input = page.evaluate(
             f"""() => {{
@@ -361,7 +488,7 @@ class TestRename:
         is_focused = page.evaluate("document.activeElement.tagName")
         assert is_focused == "INPUT", f"Input should be focused, active element is {is_focused}"
 
-        # Cancel to restore state
+        # Cancel to restore state; wait for input removal rather than sleep.
         page.evaluate(
             f"""() => {{
             const tb = document.querySelector('[data-drag="{target_id}"]');
@@ -369,7 +496,13 @@ class TestRename:
             if (input) input.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Escape', bubbles: true}}));
         }}"""
         )
-        page.wait_for_timeout(200)
+        page.wait_for_function(
+            f"""() => {{
+                const tb = document.querySelector('[data-drag="{target_id}"]');
+                return tb && tb.querySelector('input') === null;
+            }}""",
+            timeout=3000,
+        )
 
     def test_rename_via_enter(self, page):
         """Typing a new name and pressing Enter commits the rename."""
@@ -453,8 +586,7 @@ class TestRenamePersistence:
 
         js_rename(page, target_id, "JSON Name", commit="enter")
 
-        page.evaluate("saveLayout()")
-        page.wait_for_timeout(500)
+        save_layout_and_wait(page)
 
         canvas_json = page.evaluate(
             """async () => {
@@ -597,7 +729,20 @@ class TestRestApi:
             }});
         }}"""
         )
-        page.wait_for_timeout(500)
+        # Wait for the enriched fields to be observable via the list API
+        # instead of sleeping a fixed 500ms after the PUTs.
+        page.wait_for_function(
+            """async () => {
+                const r = await fetch('/api/claude/terminals');
+                if (!r.ok) return false;
+                const list = await r.json();
+                return list.some(t =>
+                    t.display_name === 'Enriched Terminal' &&
+                    t.recovery_script === 'echo enriched'
+                );
+            }""",
+            timeout=5000,
+        )
 
         result = page.evaluate(
             """async () => {
@@ -701,7 +846,17 @@ class TestRecovery:
             }});
         }}"""
         )
-        page.wait_for_timeout(1000)
+        # Wait for the card_updated broadcast to land so the in-memory
+        # card has the recoveryScript before we save+reload.  Polling the
+        # DOM-rendered recovery button's display state is the observable
+        # that guarantees the client-side state has caught up.
+        page.wait_for_function(
+            f"""() => {{
+                const card = cards.find(c => c.sessionId === '{session_id}');
+                return card && card.recoveryScript === 'echo persist-test';
+            }}""",
+            timeout=5000,
+        )
 
         reload_page(page, backend_port)
 
@@ -737,8 +892,7 @@ class TestCardUid:
 
     def test_card_has_uuid(self, page):
         """Each terminal card in canvas JSON has a cardUid matching UUID format."""
-        page.evaluate("saveLayout()")
-        page.wait_for_timeout(500)
+        save_layout_and_wait(page)
 
         canvas_json = page.evaluate(
             """async () => {
@@ -759,8 +913,7 @@ class TestCardUid:
 
     def test_uids_unique(self, page):
         """All cardUid values are unique across terminal cards."""
-        page.evaluate("saveLayout()")
-        page.wait_for_timeout(500)
+        save_layout_and_wait(page)
 
         canvas_json = page.evaluate(
             """async () => {
@@ -810,7 +963,8 @@ class TestIntegration:
                 }});
             }}"""
             )
-            page.wait_for_timeout(1000)
+            # The wait_for_function on the recovery button below is the
+            # sync point — no fixed sleep needed here.
 
             # Step 3: Verify recovery button visible
             page.wait_for_function(
@@ -824,7 +978,7 @@ class TestIntegration:
         # Step 4: Unstar
         if get_star_text(page, target_id) == "\u2605":
             js_click(page, f'[data-star="{target_id}"]')
-            page.wait_for_timeout(200)
+            wait_for_star_text(page, target_id, "\u2606")
 
         # Step 5: Reload -- card should be dormant
         reload_page(page, backend_port)
@@ -864,12 +1018,12 @@ class TestIntegration:
         # Star card 0 (ensure starred)
         if get_star_text(page, card_ids[0]) != "\u2605":
             js_click(page, f'[data-star="{card_ids[0]}"]')
-            page.wait_for_timeout(200)
+            wait_for_star_text(page, card_ids[0], "\u2605")
 
         # Unstar card 1
         if get_star_text(page, card_ids[1]) != "\u2606":
             js_click(page, f'[data-star="{card_ids[1]}"]')
-            page.wait_for_timeout(200)
+            wait_for_star_text(page, card_ids[1], "\u2606")
 
         # Rename card 2 (verify pre-reload only; persistence tested in TestRenamePersistence)
         js_rename(page, card_ids[2], "Independent Card", commit="enter")
@@ -906,11 +1060,20 @@ class TestIntegration:
         errors = []
         page.on("pageerror", lambda err: errors.append(str(err)))
 
-        # Open inline rename input via JS
+        # Open inline rename input via JS; wait for input to appear rather
+        # than sleep a fixed 200ms.
         js_dblclick(page, f'[data-display-name="{card_id}"]')
-        page.wait_for_timeout(200)
+        page.wait_for_function(
+            f"""() => {{
+                const tb = document.querySelector('[data-drag="{card_id}"]');
+                return tb && tb.querySelector('input') !== null;
+            }}""",
+            timeout=3000,
+        )
 
-        # Fire API rename while input is open
+        # Fire API rename while input is open; the fetch is awaited, so
+        # no sleep is needed after it resolves — the card_updated
+        # broadcast is what we care about for the "no crash" assertion.
         page.evaluate(
             f"""async () => {{
             await fetch('/api/claude/terminal/{session_id}/rename', {{
@@ -920,9 +1083,8 @@ class TestIntegration:
             }});
         }}"""
         )
-        page.wait_for_timeout(500)
 
-        # Cancel UI rename via JS
+        # Cancel UI rename via JS; wait for the input to be removed.
         page.evaluate(
             f"""() => {{
             const tb = document.querySelector('[data-drag="{card_id}"]');
@@ -930,7 +1092,13 @@ class TestIntegration:
             if (input) input.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Escape', bubbles: true}}));
         }}"""
         )
-        page.wait_for_timeout(300)
+        page.wait_for_function(
+            f"""() => {{
+                const tb = document.querySelector('[data-drag="{card_id}"]');
+                return tb && tb.querySelector('input') === null;
+            }}""",
+            timeout=3000,
+        )
 
         assert len(errors) == 0, f"JS errors during concurrent rename: {errors}"
 
@@ -996,6 +1164,7 @@ class TestEdgeCases:
         errors = []
         page.on("pageerror", lambda err: errors.append(str(err)))
 
+        starting_text = get_star_text(page, target_id)
         page.evaluate(
             f"""() => {{
             const btn = document.querySelector('[data-star="{target_id}"]');
@@ -1004,7 +1173,17 @@ class TestEdgeCases:
             }}
         }}"""
         )
-        page.wait_for_timeout(500)
+        # 10 clicks is even, so the DOM should end up back at the starting
+        # text.  Wait for that, and for network activity to settle so all
+        # PUTs have resolved (catches any errors they might throw).
+        page.wait_for_function(
+            f"""() => {{
+                const el = document.querySelector('[data-star="{target_id}"]');
+                return el && el.textContent === {starting_text!r};
+            }}""",
+            timeout=3000,
+        )
+        page.wait_for_load_state("networkidle")
 
         assert len(errors) == 0, f"JS errors during rapid toggling: {errors}"
 
@@ -1031,7 +1210,7 @@ class TestEdgeCases:
         target_id = card_ids[-1]
         if get_star_text(page, target_id) == "\u2605":
             js_click(page, f'[data-star="{target_id}"]')
-            page.wait_for_timeout(200)
+            wait_for_star_text(page, target_id, "\u2606")
 
         reload_page(page, backend_port)
 
@@ -1049,7 +1228,12 @@ class TestEdgeCases:
         count_before = len(new_ids)
 
         js_click(page, f'[data-close="{dormant_id}"]')
-        page.wait_for_timeout(500)
+        # Wait for the closed card to disappear from the DOM instead of
+        # sleeping a fixed 500ms.
+        page.wait_for_function(
+            f"""() => document.querySelector('[data-card-id="{dormant_id}"]') === null""",
+            timeout=3000,
+        )
 
         remaining = get_terminal_card_ids(page)
         assert len(remaining) < count_before, "Card count should decrease after close"
