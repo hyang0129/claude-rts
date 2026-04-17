@@ -79,8 +79,12 @@ def clear_canvas(page):
     """Destroy all cards, clear the canvas DOM element, and reset shared state."""
     page.evaluate(
         """() => {
-        // Silence any queued control-ws messages so a card_created broadcast
-        // that arrives after destroy cannot re-spawn a ghost card.
+        // Silence queued control-ws messages.  Cards destroyed below may not
+        // yet have a sessionId if the server was slow to respond; in that case
+        // _markSessionDestroyed(null) is a no-op and a delayed card_created
+        // broadcast would slip through the guard.  Keeping the handler null
+        // until after wait_for_function prevents ghost cards from appearing
+        // while we wait for the canvas to drain.
         if (typeof controlWs !== 'undefined' && controlWs) {
             try { controlWs.onmessage = null; } catch(e) {}
         }
@@ -99,7 +103,26 @@ def clear_canvas(page):
         if (typeof zoom !== 'undefined') { zoom = 1; }
         if (typeof applyTransform === 'function') applyTransform();
         if (typeof focusedCardId !== 'undefined') { focusedCardId = null; }
-        // Re-attach the control-ws message handler now that the canvas is clean.
+        // controlWs.onmessage intentionally left null here — re-attached
+        // in a separate evaluate() call after wait_for_function confirms the
+        // canvas is empty.
+    }"""
+    )
+    # Wait until the canvas DOM is truly empty.  The control-ws handler is
+    # still null, so no card_created broadcasts can create new cards here.
+    page.wait_for_function(
+        """() => {
+            const el = document.getElementById('canvas');
+            const c = (typeof cards !== 'undefined') ? cards.length : 0;
+            return el !== null && el.children.length === 0 && c === 0;
+        }""",
+        timeout=3000,
+    )
+    # Re-attach the control-ws message handler now that the canvas is
+    # confirmed empty.  Any broadcast that arrives from this point on goes
+    # through the normal handleControlCardCreated guard logic.
+    page.evaluate(
+        """() => {
         if (typeof controlWs !== 'undefined' && controlWs) {
             try {
                 controlWs.onmessage = (ev) => {
@@ -112,16 +135,6 @@ def clear_canvas(page):
             } catch(e) {}
         }
     }"""
-    )
-    # Wait until the canvas DOM is truly empty (no ghost cards from queued
-    # control-ws broadcasts) instead of a fixed 300ms sleep.
-    page.wait_for_function(
-        """() => {
-            const el = document.getElementById('canvas');
-            const c = (typeof cards !== 'undefined') ? cards.length : 0;
-            return el !== null && el.children.length === 0 && c === 0;
-        }""",
-        timeout=3000,
     )
 
 
@@ -278,7 +291,6 @@ class TestSpawnHostTerminal:
     def test_host_shell_row_spawns_terminal(self, page):
         """Click first [data-host-shell] row; TerminalCard with synthetic hub appears."""
         clear_canvas(page)
-        initial_count = get_card_count(page)
 
         open_context_menu(page, 500, 500)
 
@@ -287,10 +299,21 @@ class TestSpawnHostTerminal:
         hub_id = host_item.get_attribute("data-host-shell")
         host_item.click()
 
-        wait_for_new_card(page, initial_count, timeout_ms=3000)
-
-        card = get_last_card(page)
-        assert card is not None, "Expected a card after clicking host-shell row"
+        # Wait specifically for a terminal card with the expected hub — avoids
+        # a race where a delayed card_created broadcast for the startup
+        # util-container card arrives concurrently and becomes the "last" card.
+        page.wait_for_function(
+            f"() => cards.some(c => c.type === 'terminal' && c.hub === '{hub_id}')",
+            timeout=3000,
+        )
+        card = page.evaluate(
+            """(hub_id) => {
+                const c = cards.find(c => c.type === 'terminal' && c.hub === hub_id);
+                return c ? { cardType: c.type, hub: c.hub, container: c.container || null } : null;
+            }""",
+            hub_id,
+        )
+        assert card is not None, f"Expected a terminal card with hub == '{hub_id}'"
         assert card["cardType"] == "terminal", f"Expected 'terminal', got {card['cardType']}"
         assert card["hub"] == hub_id, f"Expected hub == '{hub_id}', got {card['hub']!r}"
 
