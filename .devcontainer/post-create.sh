@@ -12,4 +12,4 @@ if [ -f "$GITUSER_TMP" ]; then
 fi
 
 pip install -e ".[test,e2e]"
-python -m playwright install chromium --with-deps
+python -m playwright install chromium

@@ -12,5 +12,20 @@
   "mounts": [
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind,consistency=cached",
     "source=${localEnv:USERPROFILE}\\.claude,target=/home/vscode/.claude,type=bind,consistency=cached"
+  ],
+
+  "containerEnv": {
+    "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",
+    "GH_TOKEN": "${localEnv:GH_TOKEN}"
+  },
+
+  "runArgs": [
+    "--shm-size", "8g",
+    "--memory", "16g",
+    "--memory-swap", "16g",
+    "--memory-reservation", "8g",
+    "--cpuset-cpus=0-7",
+    "--cpus", "8",
+    "--cpu-shares", "64"
   ]
 }

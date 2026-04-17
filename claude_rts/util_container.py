@@ -36,6 +36,7 @@ def _get_config(app_config: AppConfig) -> dict:
         "auto_start": util.get("auto_start", True),
         "auto_stop": util.get("auto_stop", False),
         "mounts": util.get("mounts", {}),
+        "volumes": util.get("volumes", {"claude-profiles": "/profiles"}),
     }
 
 
@@ -134,6 +135,10 @@ async def start_container(app_config: AppConfig) -> bool:
             logger.info("Mounting {} -> {}", mount_src, container_path)
         else:
             logger.warning("Mount source does not exist, skipping: {}", expanded_path)
+
+    for vol_name, container_path in cfg["volumes"].items():
+        mount_args += f" --mount type=volume,source={vol_name},target={container_path}"
+        logger.info("Mounting volume {} -> {}", vol_name, container_path)
 
     # Remove old stopped container if exists
     await _run(f"{_DOCKER} rm -f {cfg['name']}")
@@ -274,18 +279,18 @@ async def _mounts_match(app_config: AppConfig) -> bool:
     rc, stdout, _ = await _run(f'{_DOCKER} inspect {cfg["name"]} --format "{{{{json .Mounts}}}}"')
     if rc != 0:
         return False
-    actual = {
-        m["Destination"]: pathlib.Path(m["Source"]) for m in json.loads(stdout or "[]") if m.get("Type") == "bind"
-    }
+    mounts = json.loads(stdout or "[]")
+    actual_bind = {m["Destination"]: pathlib.Path(m["Source"]) for m in mounts if m.get("Type") == "bind"}
+    actual_vol = {m["Destination"]: m["Name"] for m in mounts if m.get("Type") == "volume"}
 
     # Check the hardcoded mcp_server.py mount
     if MCP_SERVER_PY.exists():
-        if actual.get(CONTAINER_MCP_PATH) != MCP_SERVER_PY:
+        if actual_bind.get(CONTAINER_MCP_PATH) != MCP_SERVER_PY:
             logger.debug(
                 "_mounts_match: {} expected {} got {}",
                 CONTAINER_MCP_PATH,
                 MCP_SERVER_PY,
-                actual.get(CONTAINER_MCP_PATH),
+                actual_bind.get(CONTAINER_MCP_PATH),
             )
             return False
 
@@ -293,14 +298,25 @@ async def _mounts_match(app_config: AppConfig) -> bool:
         expanded = pathlib.Path(host_path.replace("~", str(pathlib.Path.home())))
         if not expanded.exists():
             continue
-        if actual.get(container_path) != expanded:
+        if actual_bind.get(container_path) != expanded:
             logger.debug(
                 "_mounts_match: {} expected {} got {}",
                 container_path,
                 expanded,
-                actual.get(container_path),
+                actual_bind.get(container_path),
             )
             return False
+
+    for vol_name, container_path in cfg["volumes"].items():
+        if actual_vol.get(container_path) != vol_name:
+            logger.debug(
+                "_mounts_match: volume {} expected {} got {}",
+                container_path,
+                vol_name,
+                actual_vol.get(container_path),
+            )
+            return False
+
     return True
 
 
