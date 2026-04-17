@@ -185,7 +185,8 @@ class ClaudeUsageCard(ServiceCard):
                 logger.debug("  | {}", ln)
 
         deadline = asyncio.get_running_loop().time() + self._probe_timeout
-        accepted = False
+        trust_accepted = False
+        bypass_accepted = False
         usage_sent = False
         last_log_at = asyncio.get_running_loop().time()
         result = None
@@ -226,22 +227,22 @@ class ClaudeUsageCard(ServiceCard):
                     continue
 
                 # Trust-folder dialog
-                if "Yes, I trust this folder" in t and not accepted:
+                if "Yes, I trust this folder" in t and not trust_accepted:
                     logger.info("ClaudeUsageCard {}: trust-folder dialog — accepting", self.identity)
                     _log_screen("trust-dialog")
                     session.pty.write("\r")
-                    accepted = True
+                    trust_accepted = True
                     await asyncio.sleep(2)
                     continue
 
                 # Bypass-permissions dialog
-                if ("Yes, I accept" in t or "Bypass Permissions" in t) and not accepted:
+                if ("Yes, I accept" in t or "Bypass Permissions" in t) and not bypass_accepted:
                     logger.info("ClaudeUsageCard {}: bypass-permissions dialog — accepting", self.identity)
                     _log_screen("bypass-dialog")
                     session.pty.write("\x1b[B")  # down arrow to "Yes, I accept"
                     await asyncio.sleep(0.3)
                     session.pty.write("\r")
-                    accepted = True
+                    bypass_accepted = True
                     await asyncio.sleep(3)
                     continue
 
