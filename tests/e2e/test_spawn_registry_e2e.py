@@ -97,13 +97,24 @@ def clear_canvas(page):
         // canvas is empty.
     }"""
     )
-    # Wait until the canvas DOM is truly empty.  The control-ws handler is
-    # still null, so no card_created broadcasts can create new cards here.
+    # Wait until the canvas DOM is truly empty.  Re-clear on every poll to
+    # evict ghost cards that snuck in while a card_created handler was already
+    # mid-execution when we nulled controlWs.onmessage above.
     page.wait_for_function(
         """() => {
+            if (typeof controlWs !== 'undefined' && controlWs) {
+                try { controlWs.onmessage = null; } catch(e) {}
+            }
+            if (typeof cards !== 'undefined' && cards.length > 0) {
+                for (const card of cards) {
+                    if (typeof card.destroy === 'function') card.destroy();
+                }
+                cards.length = 0;
+            }
             const el = document.getElementById('canvas');
-            const c = (typeof cards !== 'undefined') ? cards.length : 0;
-            return el !== null && el.children.length === 0 && c === 0;
+            if (el && el.children.length > 0) el.innerHTML = '';
+            return el !== null && el.children.length === 0 &&
+                   ((typeof cards !== 'undefined') ? cards.length : 0) === 0;
         }""",
         timeout=3000,
     )
