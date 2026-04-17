@@ -46,7 +46,7 @@ def wait_for_session(backend_port, *, timeout=10.0, exclude=()):
         new = [s for s in sessions if s["session_id"] not in exclude]
         if new:
             return new[0]
-        time.sleep(0.3)
+        time.sleep(0.1)
     return None
 
 
@@ -202,6 +202,8 @@ class TestBlueprintTerminalInjection:
                 if result:
                     captured.append(result)
                     break
+                # 50ms polling interval for an ephemeral card that may vanish between
+                # polls; retained as a ≤100ms stabilization per epic #153 intent.
                 page.wait_for_timeout(50)
 
             t.join(timeout=3)

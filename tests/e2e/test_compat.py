@@ -91,7 +91,8 @@ class TestUnknownTypeSkip:
         put_canvas(page, "compat-unknown-type", fixture)
 
         page.evaluate("() => switchCanvas('compat-unknown-type')")
-        page.wait_for_timeout(2000)
+        # unknown_type_canvas.json has 2 entries; the 'foo' entry is skipped → 1 card.
+        page.wait_for_function("() => cards.length === 1", timeout=5000)
 
         page.remove_listener("pageerror", _on_page_error)
         assert len(page_errors) == 0, f"Unexpected page error(s): {page_errors}"
@@ -104,7 +105,7 @@ class TestUnknownTypeSkip:
         put_canvas(page, "compat-unknown-type-count", fixture)
 
         page.evaluate("() => switchCanvas('compat-unknown-type-count')")
-        page.wait_for_timeout(2000)
+        page.wait_for_function("() => cards.length === 1", timeout=5000)
 
         total = get_card_count(page)
         assert total == 1, f"Expected 1 card (unknown type skipped), got {total}"
@@ -117,7 +118,7 @@ class TestUnknownTypeSkip:
         put_canvas(page, "compat-unknown-type-foo", fixture)
 
         page.evaluate("() => switchCanvas('compat-unknown-type-foo')")
-        page.wait_for_timeout(2000)
+        page.wait_for_function("() => cards.length === 1", timeout=5000)
 
         foo_count = count_cards_by_type(page, "foo")
         assert foo_count == 0, f"Expected 0 cards with type 'foo', got {foo_count}"
@@ -130,7 +131,7 @@ class TestUnknownTypeSkip:
         put_canvas(page, "compat-unknown-type-widget", fixture)
 
         page.evaluate("() => switchCanvas('compat-unknown-type-widget')")
-        page.wait_for_timeout(2000)
+        page.wait_for_function("() => cards.length === 1", timeout=5000)
 
         widget_count = count_cards_by_type(page, "widget")
         assert widget_count == 1, f"Expected 1 widget card, got {widget_count}"
@@ -166,10 +167,10 @@ class TestPreTypeLegacyCompat:
         put_canvas(page, "compat-legacy-count", fixture)
 
         page.evaluate("() => switchCanvas('compat-legacy-count')")
-        page.wait_for_timeout(2000)
+        expected = len(fixture["cards"])
+        page.wait_for_function(f"() => cards.length === {expected}", timeout=5000)
 
         total = get_card_count(page)
-        expected = len(fixture["cards"])
         assert total == expected, f"Expected {expected} cards from legacy fixture, got {total}"
 
     def test_legacy_all_cards_are_terminals(self, page):
@@ -190,7 +191,8 @@ class TestPreTypeLegacyCompat:
         put_canvas(page, "compat-legacy-type", fixture)
 
         page.evaluate("() => switchCanvas('compat-legacy-type')")
-        page.wait_for_timeout(2000)
+        expected = len(fixture["cards"])
+        page.wait_for_function(f"() => cards.length === {expected}", timeout=5000)
 
         card_types = page.evaluate("() => cards.map(c => c.type)")
         for i, ct in enumerate(card_types):
@@ -222,7 +224,8 @@ class TestPreTypeLegacyCompat:
         put_canvas(page, "compat-legacy-errors", fixture)
 
         page.evaluate("() => switchCanvas('compat-legacy-errors')")
-        page.wait_for_timeout(2000)
+        expected = len(fixture["cards"])
+        page.wait_for_function(f"() => cards.length === {expected}", timeout=5000)
 
         page.remove_listener("pageerror", _on_page_error)
         assert len(page_errors) == 0, f"Unexpected page error(s) during legacy restore: {page_errors}"
