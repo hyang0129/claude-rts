@@ -67,6 +67,8 @@ pip install "supreme-claudemander[windows]"
 python -m claude_rts
 ```
 
+> **Note**: The `[windows]` extra preserves the optional dependency for future community contribution. PTY-backed features (terminal cards, util-container PTY commands) do not currently work on Windows — `pty_compat.py` uses `ptyprocess` which is POSIX-only. See issue #157 if you'd like to contribute a Windows PTY branch.
+
 ### Build from source
 
 ```bash
