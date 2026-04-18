@@ -98,7 +98,7 @@ WebFetch http://localhost:3002/api/test/session/rts-abc123/read
 
 **Typical flow for a PTY feature:**
 
-1. `POST /api/test/session/create?cmd=docker.exe+exec+-it+rts-test-a+bash` → get `session_id`
+1. `POST /api/test/session/create?cmd=docker+exec+-it+rts-test-a+bash` → get `session_id`
 2. `POST /api/test/session/{id}/send` body: `echo MARKER_OUTPUT\n`
 3. Sleep 500ms (PTY round-trip)
 4. `GET /api/test/session/{id}/read` → assert `"MARKER_OUTPUT"` in `output`
@@ -182,7 +182,7 @@ Returns card descriptors from the configured startup script. Assert that the rig
 
 ```
 credential-manager widget (frontend)
-  → opens WS to /ws/session/new?cmd=docker.exe exec -it <util> claude-usage ...
+  → opens WS to /ws/session/new?cmd=docker exec -it <util> claude-usage ...
   → xterm.js IS the terminal, responds to capability queries
   → claude-usage runs, outputs JSON
   → frontend parses JSON, POSTs to /api/credentials/{name}/probe-result

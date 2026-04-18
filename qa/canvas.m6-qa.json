@@ -10,7 +10,7 @@
       "w": 1720,
       "h": 960,
       "type": "terminal",
-      "exec": "docker.exe exec -it rts-test-a bash"
+      "exec": "docker exec -it rts-test-a bash"
     },
     {
       "hub": "rts-test-b",
@@ -20,7 +20,7 @@
       "w": 1720,
       "h": 960,
       "type": "terminal",
-      "exec": "docker.exe exec -it rts-test-b bash"
+      "exec": "docker exec -it rts-test-b bash"
     }
   ]
 }

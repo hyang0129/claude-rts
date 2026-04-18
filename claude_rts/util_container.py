@@ -188,7 +188,7 @@ async def exec_in_util_pty(app_config: AppConfig, cmd: str, timeout: float = 60)
     """Execute a command in the utility container using a real PTY.
 
     Required for commands that need a TTY (e.g., claude-usage-plz which uses pexpect).
-    Uses pywinpty to provide a ConPTY, same as terminal WebSocket connections.
+    Uses the POSIX PTY wrapper in `pty_compat.PtyProcess` (ptyprocess-backed), same as terminal WebSocket connections.
     """
     from .pty_compat import PtyProcess
 

@@ -134,7 +134,7 @@ def test_electron_flag_skips_browser():
 def test_config_dir_flag_passes_resolved_path():
     """Verify --config-dir passes a resolved Path to config.load."""
     with (
-        patch("sys.argv", ["supreme-claudemander", "--config-dir", "/tmp/test-config"]),
+        patch("sys.argv", ["supreme-claudemander", "--config-dir", "/tmp/test-config", "--no-browser"]),
         patch("claude_rts.__main__.web") as _mock_web,
         patch("claude_rts.__main__.create_app") as mock_create,
         patch("claude_rts.__main__.config") as mock_config,

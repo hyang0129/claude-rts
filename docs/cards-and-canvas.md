@@ -37,7 +37,7 @@ The active canvas on startup is controlled by `default_canvas` in `config.json` 
       "w": 1720,
       "h": 960,
       "type": "terminal",
-      "exec": "docker.exe exec -it my-project_devcontainer_1 bash",
+      "exec": "docker exec -it my-project_devcontainer_1 bash",
       "session_id": "abc123"
     }
   ]
@@ -51,7 +51,7 @@ The active canvas on startup is controlled by `default_canvas` in `config.json` 
 | `x`, `y` | Position on the 4K canvas (pixels) |
 | `w`, `h` | Card dimensions (pixels) |
 | `type` | `"terminal"` or `"widget"` |
-| `exec` | Full command passed to the PTY (e.g. `docker.exe exec -it ...`) |
+| `exec` | Full command passed to the PTY (e.g. `docker exec -it ...`) |
 | `session_id` | Optional — reconnects to an existing PTY session on reload |
 
 ## How the Startup Script Populates Cards
@@ -65,7 +65,7 @@ config.json { startup_script: "qa-m6" }
 startup.py: run_startup("qa-m6")
     │
     ▼
-[{"type":"terminal","name":"rts-test-a","container":"rts-test-a","exec":"docker.exe exec -it rts-test-a bash"}, ...]
+[{"type":"terminal","name":"rts-test-a","container":"rts-test-a","exec":"docker exec -it rts-test-a bash"}, ...]
     │
     ▼
 frontend: hubs = descriptors.map(...)  →  CARD_TYPE_REGISTRY.spawn('terminal', {hub, ...}) per hub  →  TerminalCards on canvas
@@ -80,7 +80,7 @@ If the startup script returns cards **and** a saved canvas layout exists for `de
   "type": "terminal",
   "name": "rts-test-a",
   "container": "rts-test-a",
-  "exec": "docker.exe exec -it rts-test-a bash"
+  "exec": "docker exec -it rts-test-a bash"
 }
 ```
 
@@ -95,7 +95,7 @@ If the startup script returns cards **and** a saved canvas layout exists for `de
 
 | Script name | Behaviour |
 |-------------|-----------|
-| `discover-devcontainers` | Runs `docker.exe ps` and returns one terminal per container that has devcontainer labels. Default for production use. |
+| `discover-devcontainers` | Runs `docker ps` and returns one terminal per container that has devcontainer labels. Default for production use. |
 | `qa-m6` | Returns two fixed terminals: `rts-test-a` (tmux installed) and `rts-test-b` (no tmux). Used for M6 persistence QA. Requires `qa/setup-containers.sh` to have been run first. |
 | `from-layout` | Returns an **empty** list. The frontend then relies entirely on the saved canvas to restore cards. |
 | `null` / omitted | Identical to `from-layout` — returns an empty list. |

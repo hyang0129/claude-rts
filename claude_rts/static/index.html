@@ -835,7 +835,7 @@ function showContextMenu(sx, sy) {
   const hostShells = isWin ? [
     { id: 'powershell', label: 'PowerShell', cmd: 'powershell.exe', container: 'localhost' },
     { id: 'cmd', label: 'Command Prompt', cmd: 'cmd.exe', container: 'localhost' },
-    { id: 'util', label: 'Utility Container', cmd: 'docker.exe exec -it supreme-claudemander-util bash', container: 'supreme-claudemander-util' },
+    { id: 'util', label: 'Utility Container', cmd: 'docker exec -it supreme-claudemander-util bash', container: 'supreme-claudemander-util' },
   ] : [
     { id: 'zsh', label: 'zsh', cmd: '/bin/zsh -l', container: 'localhost' },
     { id: 'bash', label: 'bash', cmd: '/bin/bash -l', container: 'localhost' },
@@ -1675,7 +1675,7 @@ class TerminalCard extends Card {
       wsUrl = `${wsProto}//${location.host}/ws/session/${this.sessionId}`;
     } else {
       // Create new persistent session
-      const _docker = (navigator.platform.startsWith('Win') || navigator.userAgent.includes('Windows')) ? 'docker.exe' : 'docker';
+      const _docker = 'docker';
       const cmd = this.execCmd || `${_docker} exec -it -u vscode -w /workspaces/${this.hub} ${this.container} bash -l`;
       wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}`;
     }
@@ -3864,7 +3864,7 @@ async function handleBlueprintOpenWidget(msg) {
       const hubData = await resp.json();
       hubs = hubData.map(h => ({
         ...h,
-        exec: `${(navigator.platform.startsWith('Win') || navigator.userAgent.includes('Windows')) ? 'docker.exe' : 'docker'} exec -it -u vscode -w /workspaces/${h.hub} ${h.container} bash -l`,
+        exec: `docker exec -it -u vscode -w /workspaces/${h.hub} ${h.container} bash -l`,
       }));
     } catch {
       hubs = [];
