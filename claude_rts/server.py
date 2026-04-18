@@ -4,6 +4,7 @@ import asyncio
 import json
 import pathlib
 import platform
+import re
 import sys
 import time
 
@@ -24,6 +25,13 @@ from .ansi_strip import strip_ansi  # noqa: E402
 from . import blueprint as blueprint_mod  # noqa: E402
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
+
+# Profile / slot names are interpolated into shell commands inside the util
+# container (``sh -c '... /profiles/<name> ...'``). Every caller that accepts
+# such a name must validate against this regex before substitution. Mirrors
+# ``claude_rts/cards/claude_usage_card.py::_SAFE_IDENTIFIER`` and the frontend
+# check in ``static/index.html``.
+_SAFE_PROFILE_NAME = re.compile(r"^[a-zA-Z0-9._-]+$")
 
 
 async def index_handler(request: web.Request) -> web.FileResponse:
@@ -629,10 +637,12 @@ async def profiles_list_handler(request: web.Request) -> web.Response:
     profiles = []
     for profile in probe_profiles:
         card = registry.get("claude-usage", profile)
-        # is_main is informational only — the main slot is a dedicated copy
-        # destination, not one of the tracked profiles. Always false here;
-        # UI renders the "Set as in-use" button from this endpoint.
-        entry = {"profile": profile, "is_main": False, "main_profile_name": main_profile_name}
+        # main_profile_name is carried on every entry so frontend renders can
+        # surface the slot name without a second round-trip to /api/profiles/main.
+        # (A per-entry "is_main" boolean was considered but would always be false
+        # — the main slot is a copy destination, not a tracked profile — so it
+        # was dropped as dead payload. See issue #163 review.)
+        entry = {"profile": profile, "main_profile_name": main_profile_name}
         if card and card.last_result:
             r = card.last_result
             entry.update(
@@ -675,6 +685,13 @@ async def main_profile_get_handler(request: web.Request) -> web.Response:
     config = read_config(app_config)
     name = config.get("main_profile_name") or "main"
 
+    # Defence-in-depth: the name is interpolated into a shell command below,
+    # so reject anything that is not a plain identifier. If a user hand-edits
+    # config.json with a malicious value we refuse rather than inject.
+    if not _SAFE_PROFILE_NAME.match(name):
+        logger.error("main_profile_get: invalid main_profile_name in config: {!r}", name)
+        raise web.HTTPInternalServerError(text=f"Invalid main_profile_name in config: {name!r}")
+
     # Best-effort: check if credentials file exists in the util container.
     exists = False
     try:
@@ -684,8 +701,10 @@ async def main_profile_get_handler(request: web.Request) -> web.Response:
             timeout=5,
         )
         exists = rc == 0
-    except Exception:
-        # Container not running or transient — report exists=False
+    except Exception as exc:
+        # Container not running or transient — report exists=False but log
+        # so operators tailing logs can diagnose unexpected errors.
+        logger.debug("main_profile_get: exists-check failed ({}); reporting exists=False", exc)
         exists = False
 
     return web.json_response({"main_profile_name": name, "exists": exists})
@@ -712,6 +731,11 @@ async def main_profile_set_handler(request: web.Request) -> web.Response:
     if not source or not isinstance(source, str):
         raise web.HTTPBadRequest(text="'source_profile' field required in body")
 
+    # Validate shape before any further work — names are interpolated into a
+    # shell command in the util container.
+    if not _SAFE_PROFILE_NAME.match(source):
+        raise web.HTTPBadRequest(text=f"Invalid source_profile name: {source!r}")
+
     # Validate against known profiles to avoid copying from arbitrary paths.
     config = read_config(app_config)
     discovered = request.app.get("discovered_profiles", [])
@@ -721,6 +745,9 @@ async def main_profile_set_handler(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text=f"Profile '{source}' not found in discovered or configured profiles")
 
     main_name = config.get("main_profile_name") or "main"
+    if not _SAFE_PROFILE_NAME.match(main_name):
+        logger.error("main_profile_set: invalid main_profile_name in config: {!r}", main_name)
+        raise web.HTTPInternalServerError(text=f"Invalid main_profile_name in config: {main_name!r}")
     if source == main_name:
         raise web.HTTPBadRequest(text=f"Cannot promote the main slot '{main_name}' into itself")
 

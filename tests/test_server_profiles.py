@@ -100,8 +100,10 @@ async def test_profiles_list_no_probe_result(client, tmp_path):
 
 
 async def test_profiles_list_includes_main_profile_name(client, tmp_path):
-    """Each profile entry includes main_profile_name and is_main=False (the main slot
-    is a distinct copy target, never one of the tracked profiles)."""
+    """Each profile entry includes main_profile_name (the active slot). An
+    ``is_main`` boolean is intentionally NOT returned — the main slot is a copy
+    destination, never one of the tracked profiles, so the field would always
+    be false and was dropped as dead payload (#163 review)."""
     app_config = client.app["app_config"]
     cfg = config.read_config(app_config)
     cfg["probe_profiles"] = ["alice", "bob"]
@@ -111,8 +113,9 @@ async def test_profiles_list_includes_main_profile_name(client, tmp_path):
         resp = await client.get("/api/profiles")
 
     data = await resp.json()
-    assert all(p["is_main"] is False for p in data)
     assert all(p["main_profile_name"] == "main" for p in data)
+    # Negative assertion: the dead ``is_main`` field must not reappear.
+    assert all("is_main" not in p for p in data)
 
 
 # ── GET /api/profiles/main ───────────────────────────────────────────────────
@@ -204,6 +207,28 @@ async def test_main_profile_set_cannot_promote_into_itself(client):
     resp = await client.put(
         "/api/profiles/main",
         json={"source_profile": "main"},
+    )
+    assert resp.status == 400
+
+
+async def test_main_profile_get_rejects_unsafe_config_name(client):
+    """If config.json has a main_profile_name with shell metacharacters, the
+    handler must refuse to interpolate it (500) rather than shell-inject."""
+    app_config = client.app["app_config"]
+    cfg = config.read_config(app_config)
+    cfg["main_profile_name"] = "foo; rm -rf /"
+    config.write_config(app_config, cfg)
+
+    resp = await client.get("/api/profiles/main")
+    assert resp.status == 500
+
+
+async def test_main_profile_set_rejects_unsafe_source_name(client):
+    """PUT with a shell-metacharacter source_profile is rejected (400) before
+    any shell command is built."""
+    resp = await client.put(
+        "/api/profiles/main",
+        json={"source_profile": "foo; rm -rf /"},
     )
     assert resp.status == 400
 

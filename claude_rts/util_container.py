@@ -257,6 +257,16 @@ async def discover_profiles(app_config: AppConfig) -> list[str]:
     cfg = _get_config(app_config)
     app_cfg = read_config(app_config)
     main_name = app_cfg.get("main_profile_name") or "main"
+    if main_name in _METADATA_DIRS:
+        # Hand-configured footgun: the user chose a slot name that clashes
+        # with a Claude-managed metadata directory (e.g. "sessions"). Warn
+        # loudly so the misconfiguration is obvious; discover_profiles still
+        # excludes it so the slot doesn't surface in the Profile Manager.
+        logger.warning(
+            "discover_profiles: main_profile_name={!r} clashes with a reserved metadata dir — "
+            "Claude state may be corrupted. Rename the slot in config.json.",
+            main_name,
+        )
     excluded = _METADATA_DIRS | {main_name}
     try:
         cmd = f"{_DOCKER} exec {cfg['name']} find /profiles -mindepth 1 -maxdepth 1 -type d"
