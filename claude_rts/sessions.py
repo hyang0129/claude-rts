@@ -13,13 +13,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
-import sys
-
 from aiohttp import web
 from loguru import logger
 from .pty_compat import PtyProcess
 
-_DOCKER = "docker.exe" if sys.platform == "win32" else "docker"
+_DOCKER = "docker"
 
 
 class ScrollbackBuffer:
