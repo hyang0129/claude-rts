@@ -60,14 +60,12 @@ The server starts on `http://localhost:3000` and opens your browser automaticall
 
 ### Windows (community supported)
 
-Windows support is maintained on a best-effort basis by community contributors. Install the `[windows]` extra which pulls in pywinpty for ConPTY support:
-
 ```bash
 pip install "supreme-claudemander[windows]"
 python -m claude_rts
 ```
 
-> **Note**: The `[windows]` extra preserves the optional dependency for future community contribution. PTY-backed features (terminal cards, util-container PTY commands) do not currently work on Windows — `pty_compat.py` uses `ptyprocess` which is POSIX-only. See issue #157 if you'd like to contribute a Windows PTY branch.
+> **Note**: The `[windows]` extra installs `pywinpty` as a placeholder for future community contribution. PTY-backed features (terminal cards, util-container PTY commands) do not currently work on Windows — `pty_compat.py` uses `ptyprocess` which is POSIX-only. The server will start, but spawning terminal cards will fail. For a fully working experience on a Windows machine, use the [devcontainer](#devcontainer-recommended) path. See [issue #157](https://github.com/hyang0129/supreme-claudemander/issues/157) to contribute a Windows PTY branch.
 
 ### Build from source
 
