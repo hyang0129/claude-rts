@@ -10,10 +10,10 @@ is not available.
 Run:
     pip install pytest-playwright playwright
     python -m playwright install chromium
-    python -m pytest tests/e2e/test_vm_manager_real_e2e.py -v
+    python -m pytest tests/e2e/real/test_vm_manager_real_e2e.py -v
 
 Headed mode (shows the browser window):
-    HEADED=1 python -m pytest tests/e2e/test_vm_manager_real_e2e.py -v
+    HEADED=1 python -m pytest tests/e2e/real/test_vm_manager_real_e2e.py -v
 """
 
 import subprocess

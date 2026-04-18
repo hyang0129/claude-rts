@@ -67,6 +67,7 @@ claude_rts = [
 asyncio_mode = "auto"
 markers = [
     "requires_pty: marks tests as requiring a real PTY (deselect with -m 'not requires_pty')",
+    "real_docker: marks tests as requiring real Docker containers (not run in CI)",
 ]
 
 [tool.ruff]
