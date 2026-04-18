@@ -1,7 +1,11 @@
-"""Cross-platform PTY abstraction.
+"""POSIX PTY abstraction (devcontainer/Linux/CI contract).
 
-On Windows: delegates to winpty.PtyProcess (ConPTY).
-On macOS/Linux: delegates to ptyprocess.PtyProcess (POSIX PTY).
+Delegates to ptyprocess.PtyProcess (POSIX PTY only). The Windows/winpty
+branch has been removed; Windows users who need it should install the
+optional extra: pip install -e ".[windows]".
+
+If ptyprocess is not installed, a clear ImportError is raised at import time
+rather than surfacing a confusing AttributeError later.
 
 Normalised interface:
   PtyProcess.spawn(cmd, dimensions=(rows, cols))  — cmd is str or list
@@ -13,66 +17,39 @@ Normalised interface:
 """
 
 import shlex
-import sys
 
-if sys.platform == "win32":
-    from winpty import PtyProcess as _WinPty
-
-    class PtyProcess:
-        def __init__(self, proc):
-            self._proc = proc
-
-        @classmethod
-        def spawn(cls, cmd, dimensions=(24, 80)):
-            if isinstance(cmd, list):
-                cmd = " ".join(shlex.quote(a) for a in cmd)
-            return cls(_WinPty.spawn(cmd, dimensions=dimensions))
-
-        def read(self, size=4096):
-            data = self._proc.read()
-            if isinstance(data, str):
-                return data.encode("utf-8", errors="replace")
-            return data
-
-        def write(self, data):
-            if isinstance(data, bytes):
-                data = data.decode("utf-8", errors="replace")
-            self._proc.write(data)
-
-        def setwinsize(self, rows, cols):
-            self._proc.setwinsize(rows, cols)
-
-        def isalive(self):
-            return self._proc.isalive()
-
-        def terminate(self, force=False):
-            self._proc.terminate(force=force)
-
-else:
+try:
     from ptyprocess import PtyProcess as _PtyProcess
+except ImportError as exc:
+    raise ImportError(
+        "ptyprocess is required for PTY support on POSIX systems. "
+        "Install it with: pip install ptyprocess\n"
+        "On Windows, use: pip install -e '.[windows]' for the winpty backend."
+    ) from exc
 
-    class PtyProcess:
-        def __init__(self, proc):
-            self._proc = proc
 
-        @classmethod
-        def spawn(cls, cmd, dimensions=(24, 80)):
-            argv = shlex.split(cmd) if isinstance(cmd, str) else cmd
-            return cls(_PtyProcess.spawn(argv, dimensions=dimensions))
+class PtyProcess:
+    def __init__(self, proc):
+        self._proc = proc
 
-        def read(self, size=4096):
-            return self._proc.read(size)
+    @classmethod
+    def spawn(cls, cmd, dimensions=(24, 80)):
+        argv = shlex.split(cmd) if isinstance(cmd, str) else cmd
+        return cls(_PtyProcess.spawn(argv, dimensions=dimensions))
 
-        def write(self, data):
-            if isinstance(data, str):
-                data = data.encode("utf-8", errors="replace")
-            self._proc.write(data)
+    def read(self, size=4096):
+        return self._proc.read(size)
 
-        def setwinsize(self, rows, cols):
-            self._proc.setwinsize(rows, cols)
+    def write(self, data):
+        if isinstance(data, str):
+            data = data.encode("utf-8", errors="replace")
+        self._proc.write(data)
 
-        def isalive(self):
-            return self._proc.isalive()
+    def setwinsize(self, rows, cols):
+        self._proc.setwinsize(rows, cols)
 
-        def terminate(self, force=False):
-            self._proc.terminate(force=force)
+    def isalive(self):
+        return self._proc.isalive()
+
+    def terminate(self, force=False):
+        self._proc.terminate(force=force)
