@@ -1,9 +1,9 @@
-"""Tests for the /api/profiles endpoints (issue #72).
+"""Tests for the /api/profiles endpoints (issue #72, updated #163).
 
 Tests the profile manager API:
 - GET /api/profiles lists probe profiles with latest usage data
-- GET /api/profiles/priority returns the current priority profile
-- PUT /api/profiles/priority sets the priority profile
+- GET /api/profiles/main returns the current main profile slot name + existence
+- PUT /api/profiles/main copies credentials from a source profile into the main slot
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -99,85 +99,132 @@ async def test_profiles_list_no_probe_result(client, tmp_path):
     assert data[0]["five_hour_pct"] is None
 
 
-async def test_profiles_list_priority_flag(client, tmp_path):
-    """Priority profile is marked with is_priority=True."""
+async def test_profiles_list_includes_main_profile_name(client, tmp_path):
+    """Each profile entry includes main_profile_name and is_main=False (the main slot
+    is a distinct copy target, never one of the tracked profiles)."""
     app_config = client.app["app_config"]
     cfg = config.read_config(app_config)
     cfg["probe_profiles"] = ["alice", "bob"]
-    cfg["priority_profile"] = "bob"
     config.write_config(app_config, cfg)
 
     with patch("claude_rts.server.ServiceCardRegistry.get", return_value=None):
         resp = await client.get("/api/profiles")
 
     data = await resp.json()
-    alice = next(p for p in data if p["profile"] == "alice")
-    bob = next(p for p in data if p["profile"] == "bob")
-    assert alice["is_priority"] is False
-    assert bob["is_priority"] is True
+    assert all(p["is_main"] is False for p in data)
+    assert all(p["main_profile_name"] == "main" for p in data)
 
 
-# ── GET /api/profiles/priority ───────────────────────────────────────────────
+# ── GET /api/profiles/main ───────────────────────────────────────────────────
 
 
-async def test_priority_get_default(client):
-    """Fresh config returns priority_profile=null."""
-    resp = await client.get("/api/profiles/priority")
+async def test_main_profile_get_default(client):
+    """Fresh config returns the default main_profile_name 'main' with exists=False."""
+    with patch("claude_rts.server.exec_in_util", new_callable=AsyncMock, return_value=(1, "")):
+        resp = await client.get("/api/profiles/main")
     assert resp.status == 200
     data = await resp.json()
-    assert data["priority_profile"] is None
+    assert data["main_profile_name"] == "main"
+    assert data["exists"] is False
 
 
-# ── PUT /api/profiles/priority ───────────────────────────────────────────────
+async def test_main_profile_get_reports_exists_true(client):
+    """When the credentials file is present in the util container, exists=True."""
+    with patch("claude_rts.server.exec_in_util", new_callable=AsyncMock, return_value=(0, "")):
+        resp = await client.get("/api/profiles/main")
+    data = await resp.json()
+    assert data["exists"] is True
 
 
-async def test_priority_put_valid(client):
-    """Set priority to a valid profile, verify GET returns it."""
+async def test_main_profile_get_custom_name(client):
+    """main_profile_name override in config is reflected in the response."""
+    app_config = client.app["app_config"]
+    cfg = config.read_config(app_config)
+    cfg["main_profile_name"] = "custom-slot"
+    config.write_config(app_config, cfg)
+
+    with patch("claude_rts.server.exec_in_util", new_callable=AsyncMock, return_value=(1, "")):
+        resp = await client.get("/api/profiles/main")
+    data = await resp.json()
+    assert data["main_profile_name"] == "custom-slot"
+
+
+# ── PUT /api/profiles/main ───────────────────────────────────────────────────
+
+
+async def test_main_profile_set_copies_credentials(client):
+    """PUT with a valid source profile invokes the util-container credential copy."""
     app_config = client.app["app_config"]
     cfg = config.read_config(app_config)
     cfg["probe_profiles"] = ["hongy"]
     config.write_config(app_config, cfg)
 
-    resp = await client.put(
-        "/api/profiles/priority",
-        json={"priority_profile": "hongy"},
-    )
+    mock_exec = AsyncMock(return_value=(0, ""))
+    with patch("claude_rts.server.exec_in_util", mock_exec):
+        resp = await client.put(
+            "/api/profiles/main",
+            json={"source_profile": "hongy"},
+        )
     assert resp.status == 200
     data = await resp.json()
-    assert data["priority_profile"] == "hongy"
+    assert data["main_profile_name"] == "main"
+    assert data["source_profile"] == "hongy"
+    assert data["status"] == "ok"
 
-    # Verify persistence via GET
-    resp2 = await client.get("/api/profiles/priority")
-    data2 = await resp2.json()
-    assert data2["priority_profile"] == "hongy"
+    # Verify the copy command references the correct source and destination.
+    assert mock_exec.call_count == 1
+    sent_cmd = mock_exec.call_args[0][1]
+    assert "/profiles/hongy/.credentials.json" in sent_cmd
+    assert "/profiles/main/.credentials.json" in sent_cmd
 
 
-async def test_priority_put_invalid_profile(client):
-    """Setting priority to a profile not in probe_profiles returns 400."""
+async def test_main_profile_set_unknown_source_returns_400(client):
+    """Setting main to a profile not in probe_profiles/discovered returns 400."""
     resp = await client.put(
-        "/api/profiles/priority",
-        json={"priority_profile": "nonexistent"},
+        "/api/profiles/main",
+        json={"source_profile": "nonexistent"},
     )
     assert resp.status == 400
 
 
-async def test_priority_put_null_clears(client):
-    """Setting priority_profile to null clears it."""
+async def test_main_profile_set_missing_source_returns_400(client):
+    """PUT without source_profile returns 400."""
+    resp = await client.put("/api/profiles/main", json={})
+    assert resp.status == 400
+
+
+async def test_main_profile_set_cannot_promote_into_itself(client):
+    """Attempting to promote the main slot into itself returns 400."""
     app_config = client.app["app_config"]
     cfg = config.read_config(app_config)
-    cfg["probe_profiles"] = ["hongy"]
-    cfg["priority_profile"] = "hongy"
+    cfg["probe_profiles"] = ["main"]  # pathological: main in tracked list
+    cfg["main_profile_name"] = "main"
     config.write_config(app_config, cfg)
 
     resp = await client.put(
-        "/api/profiles/priority",
-        json={"priority_profile": None},
+        "/api/profiles/main",
+        json={"source_profile": "main"},
     )
-    assert resp.status == 200
+    assert resp.status == 400
 
-    resp2 = await client.get("/api/profiles/priority")
-    data2 = await resp2.json()
-    assert data2["priority_profile"] is None
+
+async def test_main_profile_set_copy_failure_returns_500(client):
+    """When the in-container copy command fails, the server returns 500."""
+    app_config = client.app["app_config"]
+    cfg = config.read_config(app_config)
+    cfg["probe_profiles"] = ["hongy"]
+    config.write_config(app_config, cfg)
+
+    with patch(
+        "claude_rts.server.exec_in_util",
+        new_callable=AsyncMock,
+        return_value=(1, "cp: no such file"),
+    ):
+        resp = await client.put(
+            "/api/profiles/main",
+            json={"source_profile": "hongy"},
+        )
+    assert resp.status == 500
 
 
 # ── Route registration ───────────────────────────────────────────────────────
@@ -186,4 +233,4 @@ async def test_priority_put_null_clears(client):
 async def test_app_has_profiles_routes(app):
     routes = [r.resource.canonical for r in app.router.routes() if hasattr(r, "resource")]
     assert "/api/profiles" in routes
-    assert "/api/profiles/priority" in routes
+    assert "/api/profiles/main" in routes

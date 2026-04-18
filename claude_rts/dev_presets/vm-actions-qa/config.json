@@ -1,7 +1,7 @@
 {
   "startup_script": "util-terminal",
   "default_canvas": "vm-actions-qa",
-  "priority_profile": "mykey",
+  "main_profile_name": "main",
   "probe_profiles": [],
   "sessions": {
     "orphan_timeout": 60,

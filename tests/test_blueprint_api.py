@@ -111,7 +111,7 @@ def test_find_refs_nested():
 def test_validate_minimal_valid():
     bp = {
         "name": "test",
-        "steps": [{"action": "get_priority_profile", "out": "p"}],
+        "steps": [{"action": "get_main_profile", "out": "p"}],
     }
     result = validate_blueprint(bp)
     assert result["valid"] is True
@@ -120,7 +120,7 @@ def test_validate_minimal_valid():
 
 
 def test_validate_missing_name():
-    bp = {"steps": [{"action": "get_priority_profile"}]}
+    bp = {"steps": [{"action": "get_main_profile"}]}
     result = validate_blueprint(bp)
     assert result["valid"] is False
     assert any("name" in e for e in result["errors"])
@@ -204,7 +204,7 @@ def test_validate_output_var_chain():
     bp = {
         "name": "test",
         "steps": [
-            {"action": "get_priority_profile", "out": "cred"},
+            {"action": "get_main_profile", "out": "cred"},
             {"action": "open_terminal", "cmd": "echo $cred"},
         ],
     }
@@ -236,7 +236,7 @@ def test_validate_for_each():
 
 def test_crud_write_read_delete(tmp_path):
     app_config = config.load(tmp_path / ".sc")
-    bp = {"name": "test-bp", "steps": [{"action": "get_priority_profile"}]}
+    bp = {"name": "test-bp", "steps": [{"action": "get_main_profile"}]}
 
     assert write_blueprint(app_config, "test-bp", bp) is True
     assert read_blueprint(app_config, "test-bp") == bp
@@ -309,7 +309,7 @@ async def test_api_create_and_get(aiohttp_client, tmp_path, monkeypatch):
     app = create_app(app_config, test_mode=True)
     client = await aiohttp_client(app)
 
-    bp = {"name": "my-bp", "steps": [{"action": "get_priority_profile"}]}
+    bp = {"name": "my-bp", "steps": [{"action": "get_main_profile"}]}
     resp = await client.post("/api/blueprints", json=bp)
     assert resp.status == 201
 
@@ -325,7 +325,7 @@ async def test_api_create_duplicate(aiohttp_client, tmp_path, monkeypatch):
     app = create_app(app_config, test_mode=True)
     client = await aiohttp_client(app)
 
-    bp = {"name": "dup", "steps": [{"action": "get_priority_profile"}]}
+    bp = {"name": "dup", "steps": [{"action": "get_main_profile"}]}
     resp = await client.post("/api/blueprints", json=bp)
     assert resp.status == 201
     resp = await client.post("/api/blueprints", json=bp)
@@ -338,7 +338,7 @@ async def test_api_update(aiohttp_client, tmp_path, monkeypatch):
     app = create_app(app_config, test_mode=True)
     client = await aiohttp_client(app)
 
-    bp = {"name": "upd", "steps": [{"action": "get_priority_profile"}]}
+    bp = {"name": "upd", "steps": [{"action": "get_main_profile"}]}
     await client.post("/api/blueprints", json=bp)
 
     bp["description"] = "updated"
@@ -356,7 +356,7 @@ async def test_api_delete(aiohttp_client, tmp_path, monkeypatch):
     app = create_app(app_config, test_mode=True)
     client = await aiohttp_client(app)
 
-    bp = {"name": "del-me", "steps": [{"action": "get_priority_profile"}]}
+    bp = {"name": "del-me", "steps": [{"action": "get_main_profile"}]}
     await client.post("/api/blueprints", json=bp)
 
     resp = await client.delete("/api/blueprints/del-me")
@@ -397,7 +397,7 @@ async def test_api_validate_valid(aiohttp_client, tmp_path, monkeypatch):
         json={
             "blueprint": {
                 "name": "test",
-                "steps": [{"action": "get_priority_profile", "out": "p"}],
+                "steps": [{"action": "get_main_profile", "out": "p"}],
             },
         },
     )

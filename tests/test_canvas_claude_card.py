@@ -159,12 +159,12 @@ async def test_canvas_claude_card_cmd_includes_profile(monkeypatch):
     assert "test-profile" in card.cmd
 
 
-async def test_canvas_claude_card_no_profile(monkeypatch):
-    """The computed cmd works without profile (no CLAUDE_CONFIG_DIR)."""
+async def test_canvas_claude_card_no_profile_defaults_to_main(monkeypatch):
+    """Without an explicit profile, the card falls back to the main slot (#163)."""
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
     mgr = SessionManager()
     card = CanvasClaudeCard(session_manager=mgr, container="my-container")
-    assert "CLAUDE_CONFIG_DIR" not in card.cmd
+    assert "CLAUDE_CONFIG_DIR=/profiles/main" in card.cmd
 
 
 async def test_canvas_claude_card_no_bash_wrapper(monkeypatch):
@@ -324,10 +324,10 @@ async def test_canvas_claude_card_seed_trust_settings_profile(monkeypatch):
 
 
 async def test_canvas_claude_card_seed_trust_settings_no_profile(monkeypatch):
-    """_seed_claude_settings falls back to /home/util/.claude when no profile.
+    """_seed_claude_settings writes into /profiles/main when no profile is passed (#163).
 
-    The util container runs as user ``util`` with home ``/home/util`` (see
-    Dockerfile.util), so that's the correct default config dir for claude.
+    Mirrors the __init__ fallback so the settings.json written for the trust
+    prompt and the directory referenced by CLAUDE_CONFIG_DIR stay consistent.
     """
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
     calls = []
@@ -341,7 +341,7 @@ async def test_canvas_claude_card_seed_trust_settings_no_profile(monkeypatch):
     card = CanvasClaudeCard(session_manager=mgr, container="my-container")
     card._seed_claude_settings()
     shell_script = calls[0][-1]
-    assert "/home/util/.claude" in shell_script
+    assert "/profiles/main" in shell_script
     mgr.stop_all()
 
 

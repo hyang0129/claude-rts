@@ -248,8 +248,16 @@ _METADATA_DIRS = {"backups", "cache", "telemetry", "plugins", "sessions", "proje
 
 
 async def discover_profiles(app_config: AppConfig) -> list[str]:
-    """Scan /profiles in the util container and return sorted profile names."""
+    """Scan /profiles in the util container and return sorted profile names.
+
+    The main profile slot (default name "main", configurable via
+    ``main_profile_name`` in config.json) is a credential swap target, not a
+    tracked profile, so it is excluded from the returned list.
+    """
     cfg = _get_config(app_config)
+    app_cfg = read_config(app_config)
+    main_name = app_cfg.get("main_profile_name") or "main"
+    excluded = _METADATA_DIRS | {main_name}
     try:
         cmd = f"{_DOCKER} exec {cfg['name']} find /profiles -mindepth 1 -maxdepth 1 -type d"
         rc, stdout, _ = await _run(cmd, timeout=10)
@@ -259,7 +267,7 @@ async def discover_profiles(app_config: AppConfig) -> list[str]:
         names = []
         for line in stdout.splitlines():
             name = line.strip().rsplit("/", 1)[-1]
-            if name and not name.startswith(".") and name not in _METADATA_DIRS:
+            if name and not name.startswith(".") and name not in excluded:
                 names.append(name)
         names.sort()
         logger.info("discover_profiles: found {} profile(s): {}", len(names), names)

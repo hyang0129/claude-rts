@@ -1,7 +1,7 @@
 {
   "startup_script": "util-terminal",
   "default_canvas": "vm-qa",
-  "priority_profile": "team-alpha",
+  "main_profile_name": "main",
   "probe_profiles": [],
   "sessions": {
     "orphan_timeout": 60,

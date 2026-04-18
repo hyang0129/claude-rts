@@ -16,7 +16,7 @@ _start_time = time.monotonic()
 from .config import AppConfig, read_config, write_config, list_canvases, read_canvas, write_canvas, delete_canvas  # noqa: E402
 from .discovery import discover_hubs  # noqa: E402
 from .startup import run_startup  # noqa: E402
-from .util_container import ensure_util_container, discover_profiles  # noqa: E402
+from .util_container import ensure_util_container, discover_profiles, exec_in_util  # noqa: E402
 from .sessions import SessionManager  # noqa: E402
 from .cards import ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegistry, CanvasClaudeCard, BlueprintCard  # noqa: E402
 from .event_bus import EventBus  # noqa: E402
@@ -619,7 +619,7 @@ async def profiles_list_handler(request: web.Request) -> web.Response:
     app_config: AppConfig = request.app["app_config"]
     registry: ServiceCardRegistry = request.app["service_card_registry"]
     config = read_config(app_config)
-    priority_profile = config.get("priority_profile")
+    main_profile_name = config.get("main_profile_name") or "main"
 
     # Merge discovered profiles with any manually configured ones
     discovered = request.app.get("discovered_profiles", [])
@@ -629,7 +629,10 @@ async def profiles_list_handler(request: web.Request) -> web.Response:
     profiles = []
     for profile in probe_profiles:
         card = registry.get("claude-usage", profile)
-        entry = {"profile": profile, "is_priority": profile == priority_profile}
+        # is_main is informational only — the main slot is a dedicated copy
+        # destination, not one of the tracked profiles. Always false here;
+        # UI renders the "Set as in-use" button from this endpoint.
+        entry = {"profile": profile, "is_main": False, "main_profile_name": main_profile_name}
         if card and card.last_result:
             r = card.last_result
             entry.update(
@@ -660,33 +663,84 @@ async def profiles_list_handler(request: web.Request) -> web.Response:
     return web.json_response(profiles)
 
 
-async def priority_get_handler(request: web.Request) -> web.Response:
-    """GET /api/profiles/priority — return the current priority profile."""
+async def main_profile_get_handler(request: web.Request) -> web.Response:
+    """GET /api/profiles/main — return the configured main profile slot name.
+
+    Returns {"main_profile_name": "<name>", "exists": <bool>} where exists
+    reports whether the credential file for the main slot is present in the
+    util container. A missing credential file means no profile has been
+    promoted yet; callers should show an error + retry UI.
+    """
     app_config: AppConfig = request.app["app_config"]
     config = read_config(app_config)
-    return web.json_response({"priority_profile": config.get("priority_profile")})
+    name = config.get("main_profile_name") or "main"
+
+    # Best-effort: check if credentials file exists in the util container.
+    exists = False
+    try:
+        rc, _ = await exec_in_util(
+            app_config,
+            f"test -f /profiles/{name}/.credentials.json",
+            timeout=5,
+        )
+        exists = rc == 0
+    except Exception:
+        # Container not running or transient — report exists=False
+        exists = False
+
+    return web.json_response({"main_profile_name": name, "exists": exists})
 
 
-async def priority_put_handler(request: web.Request) -> web.Response:
-    """PUT /api/profiles/priority — set the priority profile."""
+async def main_profile_set_handler(request: web.Request) -> web.Response:
+    """PUT /api/profiles/main — promote a tracked profile into the main slot.
+
+    Body: {"source_profile": "<tracked-name>"}
+
+    Copies only the credentials file (.credentials.json) from
+    /profiles/<source> into /profiles/<main_profile_name>/. Session history,
+    settings, and other state in the main slot are preserved. Running PTY
+    sessions are not restarted — they will pick up the new credential on
+    their next Claude API call.
+    """
     app_config: AppConfig = request.app["app_config"]
     try:
         body = await request.json()
     except json.JSONDecodeError:
         raise web.HTTPBadRequest(text="Invalid JSON")
 
-    priority = body.get("priority_profile")
-    config = read_config(app_config)
-    if priority is not None:
-        discovered = request.app.get("discovered_profiles", [])
-        config_profiles = config.get("probe_profiles", [])
-        all_profiles = set(discovered + config_profiles)
-        if priority not in all_profiles:
-            raise web.HTTPBadRequest(text=f"Profile '{priority}' not found in discovered or configured profiles")
+    source = body.get("source_profile")
+    if not source or not isinstance(source, str):
+        raise web.HTTPBadRequest(text="'source_profile' field required in body")
 
-    config["priority_profile"] = priority
-    write_config(app_config, config)
-    return web.json_response({"priority_profile": priority})
+    # Validate against known profiles to avoid copying from arbitrary paths.
+    config = read_config(app_config)
+    discovered = request.app.get("discovered_profiles", [])
+    config_profiles = config.get("probe_profiles", [])
+    all_profiles = set(discovered + config_profiles)
+    if source not in all_profiles:
+        raise web.HTTPBadRequest(text=f"Profile '{source}' not found in discovered or configured profiles")
+
+    main_name = config.get("main_profile_name") or "main"
+    if source == main_name:
+        raise web.HTTPBadRequest(text=f"Cannot promote the main slot '{main_name}' into itself")
+
+    # Copy the credential file inside the util container. `cp -f` overwrites
+    # atomically from the perspective of each read call. Directory is created
+    # first so a fresh main slot works on first promotion.
+    copy_cmd = (
+        f"sh -c 'mkdir -p /profiles/{main_name} && "
+        f"cp -f /profiles/{source}/.credentials.json /profiles/{main_name}/.credentials.json'"
+    )
+    try:
+        rc, stdout = await exec_in_util(app_config, copy_cmd, timeout=10)
+    except RuntimeError as exc:
+        raise web.HTTPServiceUnavailable(text=f"Utility container unavailable: {exc}")
+    if rc != 0:
+        logger.warning("main_profile_set: copy failed (rc={}): {}", rc, stdout)
+        raise web.HTTPInternalServerError(text=f"Failed to copy credentials from '{source}' into main slot")
+
+    logger.info("main_profile_set: promoted '{}' into main slot '{}'", source, main_name)
+    return web.json_response({"main_profile_name": main_name, "source_profile": source, "status": "ok"})
 
 
 async def claude_usage_handler(request: web.Request) -> web.Response:
@@ -794,24 +848,6 @@ async def claude_terminal_create(request: web.Request) -> web.Response:
     container = request.query.get("container", "").strip()
     if not cmd:
         raise web.HTTPBadRequest(text="Missing 'cmd' query parameter")
-
-    # Interpolate ${priority_credential} with the current priority profile from
-    # config. Mirrors the client-side substitution in static/index.html so
-    # Canvas Claude (MCP) can pass the placeholder through unchanged. If no
-    # priority profile is set, the placeholder is left as-is so callers can
-    # detect the misconfiguration downstream.
-    if "${priority_credential}" in cmd:
-        app_config: AppConfig = request.app["app_config"]
-        cfg = read_config(app_config)
-        priority_profile = cfg.get("priority_profile")
-        if priority_profile:
-            cmd = cmd.replace("${priority_credential}", str(priority_profile))
-            logger.info(
-                "claude_terminal_create: interpolated ${{priority_credential}} -> {!r}",
-                priority_profile,
-            )
-        else:
-            logger.warning("claude_terminal_create: cmd contains ${{priority_credential}} but no priority_profile set")
 
     try:
         cols = int(request.query.get("cols", 80))
@@ -1042,14 +1078,14 @@ async def canvas_claude_create(request: web.Request) -> web.Response:
     canvas_name = request.query.get("canvas_name", "").strip() or None
     api_base_url = request.query.get("api_base_url", "http://host.docker.internal:3000").strip()
 
-    # Fall back to the configured priority profile if none was specified.
+    # Fall back to the configured main profile slot when none was specified.
+    # The main slot is always a valid target; its credentials are populated
+    # via PUT /api/profiles/main. If the file is absent the Canvas Claude
+    # card will surface a retry overlay on failed auth — we do not 400 here.
     if not profile:
         app_cfg: AppConfig = request.app["app_config"]
         cfg = read_config(app_cfg)
-        profile = cfg.get("priority_profile") or None
-
-    if not profile:
-        raise web.HTTPBadRequest(text="profile is required (no priority_profile configured)")
+        profile = cfg.get("main_profile_name") or "main"
 
     layout: dict = {}
     try:
@@ -1394,8 +1430,8 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
 
     app.router.add_get("/api/profiles", profiles_list_handler)
     app.router.add_get("/api/profiles/discover", profiles_discover_handler)
-    app.router.add_get("/api/profiles/priority", priority_get_handler)
-    app.router.add_put("/api/profiles/priority", priority_put_handler)
+    app.router.add_get("/api/profiles/main", main_profile_get_handler)
+    app.router.add_put("/api/profiles/main", main_profile_set_handler)
     app.router.add_post("/api/claude-usage", claude_usage_handler)
     app.router.add_post("/api/probe/claude-usage", probe_claude_usage_handler)
 

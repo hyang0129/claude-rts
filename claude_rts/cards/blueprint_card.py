@@ -192,8 +192,8 @@ class BlueprintCard(BaseCard):
             else:
                 resolved[key] = interpolate_value(val, self.variables, field_name=key)
 
-        if action == "get_priority_profile":
-            return await self._step_get_priority_profile(resolved)
+        if action == "get_main_profile":
+            return await self._step_get_main_profile(resolved)
         elif action == "discover_containers":
             return await self._step_discover_containers(resolved)
         elif action == "start_container":
@@ -211,8 +211,16 @@ class BlueprintCard(BaseCard):
 
     # ── Step implementations ──────────────────────────────────────────
 
-    async def _step_get_priority_profile(self, step: dict) -> str:
-        """Retrieve the current priority profile from config."""
+    async def _step_get_main_profile(self, step: dict) -> str:
+        """Return the configured main profile slot name.
+
+        Replaces the legacy ``get_priority_profile`` step. The main slot is
+        the single credential target populated via the Profile Manager's
+        "Set as in-use" button; blueprint consumers use this string as a
+        profile name (e.g. to build ``CLAUDE_CONFIG_DIR=/profiles/<name>``).
+        Unlike ``get_priority_profile``, this step never raises when the
+        slot is unconfigured because the name always defaults to ``"main"``.
+        """
         if self._app is None:
             raise RuntimeError("No app reference — cannot read config")
 
@@ -220,11 +228,9 @@ class BlueprintCard(BaseCard):
 
         app_config = self._app["app_config"]
         config = read_config(app_config)
-        profile = config.get("priority_profile")
-        if not profile:
-            raise RuntimeError("No priority_profile configured")
-        await self._log(f"  Priority profile: {profile}")
-        return profile
+        name = config.get("main_profile_name") or "main"
+        await self._log(f"  Main profile: {name}")
+        return name
 
     async def _step_discover_containers(self, step: dict) -> list:
         """Discover containers via the VM discover API."""
@@ -397,17 +403,14 @@ class BlueprintCard(BaseCard):
         canvas_name = step.get("canvas_name")
         api_base_url = step.get("api_base_url", "http://host.docker.internal:3000")
 
-        # Resolve profile from inject or priority
+        # Resolve profile from inject or fall back to the main profile slot.
         inject = step.get("inject", {})
         if not profile and "credential" in inject:
             profile = inject["credential"]
         if not profile:
             app_config = self._app["app_config"]
             config = read_config(app_config)
-            profile = config.get("priority_profile")
-
-        if not profile:
-            raise RuntimeError("open_claude_terminal requires a profile (no priority_profile configured)")
+            profile = config.get("main_profile_name") or "main"
 
         layout = {}
         for key in ("x", "y", "w", "h"):

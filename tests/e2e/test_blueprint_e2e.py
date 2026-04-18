@@ -148,25 +148,11 @@ class TestBlueprintTerminalInjection:
         blueprint = {
             "name": marker_name,
             "parameters": [],
-            "steps": [{"action": "get_priority_profile", "out": "cred"}],
+            "steps": [{"action": "get_main_profile", "out": "cred"}],
         }
 
-        # Set up a priority profile so get_priority_profile doesn't fail.
-        try:
-            api(
-                backend_port,
-                "/api/config",
-                method="PUT",
-                json={
-                    "probe_profiles": ["e2e-profile"],
-                    "sessions": {"orphan_timeout": 60, "scrollback_size": 65536, "tmux_persistence": True},
-                    "util_container": {"name": "supreme-claudemander-util"},
-                    "vm_manager": {"favorites": []},
-                },
-            )
-            api(backend_port, "/api/profiles/priority", method="PUT", json={"priority_profile": "e2e-profile"})
-        except Exception:
-            pytest.skip("Could not configure priority profile — skipping label test")
+        # get_main_profile never fails (defaults to 'main'), so no extra setup
+        # is required here — the blueprint will always succeed.
 
         api(backend_port, "/api/blueprints", method="POST", json=blueprint)
 

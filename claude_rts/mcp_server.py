@@ -393,9 +393,8 @@ TOOL_SCHEMAS = [
             "use these to make cards large, small, or place them in specific screen regions. "
             "The canvas is 3840x2160 (4K). To run a command inside a Docker container, set "
             "both 'cmd' and 'container'. The server handles docker exec automatically. "
-            "The special placeholder ${priority_credential} in cmd is replaced server-side "
-            "with the user's priority profile name (useful for launching claude with a "
-            "specific API credential)."
+            "To launch claude with the user's in-use credential, reference the main profile "
+            "slot directly: cmd='env CLAUDE_CONFIG_DIR=/profiles/main claude'."
         ),
         "inputSchema": {
             "type": "object",
@@ -408,12 +407,11 @@ TOOL_SCHEMAS = [
                         "docker exec automatically). Examples: "
                         "cmd='bash', container='my-dev' opens a bash shell in the container. "
                         "cmd='claude --dangerously-skip-permissions', container='my-dev' "
-                        "launches Claude Code inside the container. "
-                        "The placeholder ${priority_credential} in cmd is replaced server-side "
-                        "with the current priority profile name from config — e.g. "
-                        "cmd='claude --profile ${priority_credential}' becomes "
-                        "cmd='claude --profile my-key'. If no priority profile is set, the "
-                        "placeholder is left as-is and a warning is logged."
+                        "launches Claude Code inside the container. To launch claude with "
+                        "the user's in-use credential, reference the main slot directly: "
+                        "cmd='env CLAUDE_CONFIG_DIR=/profiles/main claude --dangerously-skip-permissions'. "
+                        "No server-side placeholder substitution is performed on cmd — the "
+                        "string is passed through unchanged."
                     ),
                 },
                 "hub": {

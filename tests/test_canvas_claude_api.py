@@ -127,17 +127,23 @@ async def test_canvas_claude_clear(aiohttp_client, app_factory):
     assert result["status"] == "ok"
 
 
-async def test_canvas_claude_create_no_profile_no_priority_returns_400(aiohttp_client, app_factory):
-    """POST /api/canvas-claude/create without profile and no priority_profile in config returns 400."""
+async def test_canvas_claude_create_defaults_to_main_profile(aiohttp_client, app_factory):
+    """POST /api/canvas-claude/create without profile defaults to the main slot (#163).
+
+    Previously this returned 400 when no priority_profile was configured. The
+    main slot always has a valid name (default 'main'), so the fallback now
+    succeeds unconditionally — credential absence is surfaced later by the
+    card's retry overlay, not by the create endpoint.
+    """
     client = await aiohttp_client(app_factory())
     resp = await client.post("/api/canvas-claude/create?container=test-container")
-    assert resp.status == 400
-    text = await resp.text()
-    assert "profile is required" in text
+    assert resp.status == 200
+    data = await resp.json()
+    assert data.get("profile") == "main"
 
 
-async def test_canvas_claude_create_falls_back_to_priority_profile(aiohttp_client, tmp_path, monkeypatch):
-    """POST /api/canvas-claude/create without profile falls back to priority_profile from config."""
+async def test_canvas_claude_create_uses_configured_main_profile_name(aiohttp_client, tmp_path, monkeypatch):
+    """The configurable main_profile_name in config.json overrides the 'main' default."""
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
     monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", _mock_subprocess_run)
 
@@ -145,8 +151,7 @@ async def test_canvas_claude_create_falls_back_to_priority_profile(aiohttp_clien
     from claude_rts.server import create_app
 
     app_config = cfg_module.load(tmp_path / ".sc")
-    # Seed priority_profile into config before creating the app
-    cfg_module.write_config(app_config, {"priority_profile": "test-profile"})
+    cfg_module.write_config(app_config, {"main_profile_name": "custom-slot"})
     app = create_app(app_config, test_mode=True)
 
     from aiohttp.test_utils import TestClient, TestServer
@@ -155,4 +160,4 @@ async def test_canvas_claude_create_falls_back_to_priority_profile(aiohttp_clien
         resp = await client.post("/api/canvas-claude/create?container=test-container")
         assert resp.status == 200
         data = await resp.json()
-        assert data.get("profile") == "test-profile"
+        assert data.get("profile") == "custom-slot"

@@ -338,7 +338,8 @@ class TestSpawnCanvasClaudeNoProfile:
     # guarantee, which is valid on both presets.
 
     def test_canvas_claude_spawns_without_priority_profile(self, page):
-        """Canvas Claude spawn completes even when /api/profiles/priority returns empty."""
+        """Canvas Claude spawn completes — the main slot fallback (#163) means no
+        priority_profile is ever required, and /api/profiles/main always returns a name."""
         page_errors = []
         page.on("pageerror", lambda err: page_errors.append(str(err)))
 

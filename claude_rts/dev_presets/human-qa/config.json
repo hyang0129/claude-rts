@@ -1,7 +1,7 @@
 {
   "startup_script": "util-terminal",
   "default_canvas": "human-qa",
-  "priority_profile": "hongy2",
+  "main_profile_name": "main",
   "probe_profiles": ["hongy2"],
   "sessions": {
     "orphan_timeout": 300,
@@ -24,7 +24,7 @@
         "type": "docker",
         "actions": [
           {"label": "Terminal", "type": "terminal"},
-          {"label": "Claude", "type": "terminal", "shell_prefix": "env CLAUDE_CONFIG_DIR=/profiles/${priority_credential} claude", "import_keys": ["priority_credential"]}
+          {"label": "Claude", "type": "terminal", "shell_prefix": "env CLAUDE_CONFIG_DIR=/profiles/main claude"}
         ]
       },
       {

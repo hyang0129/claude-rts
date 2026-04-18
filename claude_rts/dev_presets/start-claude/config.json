@@ -2,7 +2,7 @@
   "startup_script": "util-terminal",
   "default_canvas": "start-claude-qa",
   "probe_profiles": ["test-profile"],
-  "priority_profile": "test-profile",
+  "main_profile_name": "main",
   "sessions": {
     "orphan_timeout": 60,
     "scrollback_size": 65536,

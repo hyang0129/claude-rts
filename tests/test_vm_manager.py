@@ -156,10 +156,10 @@ async def test_vm_favorites_with_custom_actions(client):
             "actions": [
                 {"label": "Terminal", "type": "terminal"},
                 {
-                    "label": "Claude (web creds)",
+                    "label": "Claude (main slot)",
                     "type": "terminal",
-                    "shell_prefix": "cd /workspace/web && claude --config-dir ${priority_credential}",
-                    "import_keys": ["priority_credential"],
+                    "shell_prefix": "cd /workspace/web && claude --config-dir /profiles/main",
+                    "import_keys": [],
                 },
             ],
         }
@@ -171,7 +171,7 @@ async def test_vm_favorites_with_custom_actions(client):
     data = await resp2.json()
     assert len(data[0]["actions"]) == 2
     assert data[0]["actions"][1]["shell_prefix"].startswith("cd /workspace/web")
-    assert "priority_credential" in data[0]["actions"][1]["import_keys"]
+    assert data[0]["actions"][1]["shell_prefix"].endswith("/profiles/main")
 
 
 # ── Start container ──────────────────────────────────────────────────────────

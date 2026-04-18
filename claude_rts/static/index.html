@@ -1824,19 +1824,23 @@ class TerminalCard extends Card {
       e.stopPropagation();
       btn.disabled = true;
       try {
-        const resp = await fetch('/api/profiles/priority');
+        const resp = await fetch('/api/profiles/main');
         if (!resp.ok) {
-          this.term.write(`\r\n\x1b[31m[Failed to fetch priority profile: HTTP ${resp.status}]\x1b[0m\r\n`);
+          this.term.write(`\r\n\x1b[31m[Failed to fetch main profile: HTTP ${resp.status}]\x1b[0m\r\n`);
           return;
         }
         const data = await resp.json();
-        const name = data.priority_profile;
+        const name = data.main_profile_name;
         if (!name) {
-          this.term.write('\r\n\x1b[33m[No priority profile set — configure one in the Profile Manager]\x1b[0m\r\n');
+          this.term.write('\r\n\x1b[33m[No main profile configured — set one in the Profile Manager]\x1b[0m\r\n');
           return;
         }
         if (!/^[a-zA-Z0-9._-]+$/.test(name)) {
           this.term.write('\r\n\x1b[31m[Invalid profile name — contains unsafe characters]\x1b[0m\r\n');
+          return;
+        }
+        if (data.exists === false) {
+          this.term.write('\r\n\x1b[33m[Main profile has no credentials yet — click "Set as in-use" in the Profile Manager]\x1b[0m\r\n');
           return;
         }
         const command = `env CLAUDE_CONFIG_DIR=/profiles/${name} claude\n`;
@@ -1846,7 +1850,7 @@ class TerminalCard extends Card {
           this.term.write('\r\n\x1b[31m[Not connected — cannot send command]\x1b[0m\r\n');
         }
       } catch (err) {
-        this.term.write(`\r\n\x1b[31m[Error fetching priority profile: ${err.message}]\x1b[0m\r\n`);
+        this.term.write(`\r\n\x1b[31m[Error fetching main profile: ${err.message}]\x1b[0m\r\n`);
       } finally {
         btn.disabled = false;
       }
@@ -1993,21 +1997,23 @@ class CanvasClaudeCard extends TerminalCard {
     const btn = this.el.querySelector(`[data-pending-retry="${this.id}"]`);
     const hint = this.el.querySelector(`[data-pending-hint="${this.id}"]`);
     if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
-    if (hint) { hint.style.color = '#6c7086'; hint.textContent = 'Looking up priority profile…'; }
+    if (hint) { hint.style.color = '#6c7086'; hint.textContent = 'Looking up main profile…'; }
 
     try {
       let profile = null;
-      const pr = await fetch('/api/profiles/priority');
+      let mainHasCreds = false;
+      const pr = await fetch('/api/profiles/main');
       if (pr.ok) {
         const pd = await pr.json();
-        if (pd.priority_profile && /^[a-zA-Z0-9._-]+$/.test(pd.priority_profile)) {
-          profile = pd.priority_profile;
+        if (pd.main_profile_name && /^[a-zA-Z0-9._-]+$/.test(pd.main_profile_name)) {
+          profile = pd.main_profile_name;
+          mainHasCreds = pd.exists === true;
         }
       }
 
-      if (!profile) {
+      if (!profile || !mainHasCreds) {
         if (btn) { btn.disabled = false; btn.textContent = 'Retry'; }
-        if (hint) { hint.style.color = '#f38ba8'; hint.textContent = 'Still no priority profile. Set one in the Profile Manager and try again.'; }
+        if (hint) { hint.style.color = '#f38ba8'; hint.textContent = 'No main profile configured — click "Set as in-use" on a tracked profile in the Profile Manager, then try again.'; }
         return;
       }
 
@@ -2176,8 +2182,8 @@ CARD_TYPE_REGISTRY.register('canvas_claude', {
   defaultSize: { w: 960, h: 640 },
   menuSection: 'canvas-claude',
   // Async prep: (a) drop stale session IDs via `/api/sessions` probe so a
-  // restarted server doesn't leave a zombie card, (b) resolve priority profile
-  // from `/api/profiles/priority` when none was passed in, (c) fill defaults
+  // restarted server doesn't leave a zombie card, (b) resolve main profile
+  // from `/api/profiles/main` when none was passed in, (c) fill defaults
   // for hub / container / canvasName. This is the single owner of the
   // staleness-check contract for canvas-claude cards.
   async prepareOpts(opts) {
@@ -2196,14 +2202,15 @@ CARD_TYPE_REGISTRY.register('canvas_claude', {
         opts.sessionId = null;
       }
     }
-    // Resolve profile from priority credential when none provided.
+    // Resolve profile from the main slot when none provided. The main slot
+    // name is always valid (defaults to "main") so we don't need a fallback.
     if (!opts.sessionId && !opts.profile) {
       try {
-        const pr = await fetch('/api/profiles/priority');
+        const pr = await fetch('/api/profiles/main');
         if (pr.ok) {
           const pd = await pr.json();
-          if (pd.priority_profile && /^[a-zA-Z0-9._-]+$/.test(pd.priority_profile)) {
-            opts.profile = pd.priority_profile;
+          if (pd.main_profile_name && /^[a-zA-Z0-9._-]+$/.test(pd.main_profile_name)) {
+            opts.profile = pd.main_profile_name;
           }
         }
       } catch (_) { /* non-fatal */ }
@@ -2383,13 +2390,12 @@ const WIDGET_REGISTRY = {
         html += '<th style="text-align:left;padding:4px 6px">7d</th>';
         html += '<th style="text-align:right;padding:4px 6px">Burn/day</th>';
         html += '<th style="text-align:right;padding:4px 6px">Resets</th>';
-        html += '<th style="text-align:center;padding:4px 6px">Priority</th>';
+        html += '<th style="text-align:center;padding:4px 6px">In Use</th>';
         html += '</tr>';
 
         for (const p of profiles) {
-          const rowStyle = p.is_priority ? 'background:#1e1e2e' : '';
-          html += `<tr style="${rowStyle};border-bottom:1px solid #181825">`;
-          html += `<td style="padding:4px 6px;font-weight:${p.is_priority ? 'bold' : 'normal'}">${esc(p.profile)}</td>`;
+          html += '<tr style="border-bottom:1px solid #181825">';
+          html += `<td style="padding:4px 6px">${esc(p.profile)}</td>`;
           if (p.probe_available) {
             html += `<td style="padding:4px 6px">${pctBar(p.five_hour_pct)}</td>`;
             html += `<td style="padding:4px 6px">${pctBar(p.seven_day_pct)}</td>`;
@@ -2398,25 +2404,29 @@ const WIDGET_REGISTRY = {
           } else {
             html += '<td colspan="4" style="padding:4px 6px;color:#a6adc8;font-style:italic">Probing…</td>';
           }
-          if (p.is_priority) {
-            html += '<td style="padding:4px 6px;text-align:center;color:#a6e3a1">★</td>';
-          } else {
-            html += `<td style="padding:4px 6px;text-align:center"><button data-set-priority="${esc(p.profile)}" style="background:none;border:1px solid #45475a;color:#cdd6f4;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px">Set</button></td>`;
-          }
+          html += `<td style="padding:4px 6px;text-align:center"><button data-set-main="${esc(p.profile)}" style="background:none;border:1px solid #45475a;color:#cdd6f4;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px">Set as in-use</button></td>`;
           html += '</tr>';
         }
         html += '</table>';
         body.innerHTML = html;
 
-        body.querySelectorAll('[data-set-priority]').forEach(btn => {
+        body.querySelectorAll('[data-set-main]').forEach(btn => {
           btn.addEventListener('click', async () => {
-            const profile = btn.getAttribute('data-set-priority');
-            const r = await fetch('/api/profiles/priority', {
+            const profile = btn.getAttribute('data-set-main');
+            btn.disabled = true;
+            const orig = btn.textContent;
+            btn.textContent = 'Copying…';
+            const r = await fetch('/api/profiles/main', {
               method: 'PUT',
               headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({priority_profile: profile}),
+              body: JSON.stringify({source_profile: profile}),
             });
-            if (!r.ok) console.error('Failed to set priority:', r.status);
+            if (!r.ok) {
+              console.error('Failed to promote profile:', r.status, await r.text());
+              btn.textContent = 'Failed';
+              setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 2000);
+              return;
+            }
             card.render();
           });
         });
@@ -2446,8 +2456,8 @@ const WIDGET_REGISTRY = {
 
         const favorites = await favsResp.json();
         const allContainers = await discoverResp.json();
-        const config = configResp.ok ? await configResp.json() : {};
-        const priorityProfile = config.priority_profile || null;
+        const _config = configResp.ok ? await configResp.json() : {};
+        void _config; // reserved for future use (was priority_profile lookup)
 
         // Build a lookup of discovered containers
         const containerMap = {};

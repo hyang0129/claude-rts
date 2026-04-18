@@ -24,7 +24,7 @@ _BLUEPRINT_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 # Valid step actions
 VALID_ACTIONS = frozenset(
     {
-        "get_priority_profile",
+        "get_main_profile",
         "discover_containers",
         "start_container",
         "open_terminal",
@@ -36,7 +36,7 @@ VALID_ACTIONS = frozenset(
 
 # Default timeouts per action type (seconds)
 DEFAULT_TIMEOUTS = {
-    "get_priority_profile": 10,
+    "get_main_profile": 10,
     "discover_containers": 30,
     "start_container": 120,
     "open_terminal": 30,

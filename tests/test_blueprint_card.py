@@ -75,20 +75,19 @@ async def test_blueprint_card_descriptor():
     assert desc["x"] == 100
 
 
-# ── Step execution: get_priority_profile ─────────────────────────────────────
+# ── Step execution: get_main_profile (renamed from get_priority_profile, #163) ───
 
 
-async def test_step_get_priority_profile(tmp_path, monkeypatch):
+async def test_step_get_main_profile_uses_config_value(tmp_path, monkeypatch):
     app, bus, mgr, reg = _make_app(tmp_path, monkeypatch)
 
-    # Set up priority profile in config
     from claude_rts.config import write_config
 
-    write_config(app["app_config"], {"priority_profile": "alice"})
+    write_config(app["app_config"], {"main_profile_name": "alice"})
 
     bp = {
         "name": "test",
-        "steps": [{"action": "get_priority_profile", "out": "cred"}],
+        "steps": [{"action": "get_main_profile", "out": "cred"}],
     }
     card = BlueprintCard(blueprint=bp, app=app)
     card.bus = bus
@@ -104,7 +103,29 @@ async def test_step_get_priority_profile(tmp_path, monkeypatch):
     mgr.stop_all()
 
 
-async def test_step_get_priority_profile_missing(tmp_path, monkeypatch):
+async def test_step_get_main_profile_defaults_to_main(tmp_path, monkeypatch):
+    """Unlike the old get_priority_profile, get_main_profile never fails — it
+    falls back to the conventional 'main' slot name when nothing is configured."""
+    app, bus, mgr, reg = _make_app(tmp_path, monkeypatch)
+
+    bp = {
+        "name": "test",
+        "steps": [{"action": "get_main_profile", "out": "cred"}],
+    }
+    card = BlueprintCard(blueprint=bp, app=app)
+    card.bus = bus
+    reg.register(card)
+
+    await card.start()
+    await asyncio.sleep(0.5)
+
+    assert card.variables.get("cred") == "main"
+    mgr.stop_all()
+
+
+async def test_step_get_priority_profile_legacy_action_rejected(tmp_path, monkeypatch):
+    """Old 'get_priority_profile' action is removed from VALID_ACTIONS; blueprints
+    that still use it must fail fast rather than silently succeed (#163)."""
     app, bus, mgr, reg = _make_app(tmp_path, monkeypatch)
 
     events = []
@@ -125,8 +146,11 @@ async def test_step_get_priority_profile_missing(tmp_path, monkeypatch):
     await card.start()
     await asyncio.sleep(0.5)
 
-    # Should have emitted blueprint:failed
+    # Blueprint must fail — the action no longer exists.
     assert any(e[0] == "blueprint:failed" for e in events)
+    # The failure message should clearly name the unknown action.
+    failure_payload = next(e[1] for e in events if e[0] == "blueprint:failed")
+    assert "get_priority_profile" in str(failure_payload)
     mgr.stop_all()
 
 
@@ -220,12 +244,12 @@ async def test_variable_binding_chain(tmp_path, monkeypatch):
 
     from claude_rts.config import write_config
 
-    write_config(app["app_config"], {"priority_profile": "bob"})
+    write_config(app["app_config"], {"main_profile_name": "bob"})
 
     bp = {
         "name": "test",
         "steps": [
-            {"action": "get_priority_profile", "out": "cred"},
+            {"action": "get_main_profile", "out": "cred"},
             {"action": "open_terminal", "cmd": "echo $cred", "out": "term"},
         ],
     }
@@ -263,7 +287,9 @@ async def test_failure_halts_execution(tmp_path, monkeypatch):
     bp = {
         "name": "test",
         "steps": [
-            # This will fail because no priority_profile
+            # This will fail — 'get_priority_profile' is no longer a valid
+            # action (removed in #163). Blueprint dispatch must reject it
+            # before the second step runs.
             {"action": "get_priority_profile", "out": "cred"},
             # This should NOT execute
             {"action": "open_terminal", "cmd": "echo should-not-run", "out": "term"},
@@ -293,7 +319,7 @@ async def test_completed_event(tmp_path, monkeypatch):
 
     from claude_rts.config import write_config
 
-    write_config(app["app_config"], {"priority_profile": "alice"})
+    write_config(app["app_config"], {"main_profile_name": "alice"})
 
     events = []
 
@@ -304,7 +330,7 @@ async def test_completed_event(tmp_path, monkeypatch):
 
     bp = {
         "name": "test",
-        "steps": [{"action": "get_priority_profile", "out": "p"}],
+        "steps": [{"action": "get_main_profile", "out": "p"}],
     }
     card = BlueprintCard(blueprint=bp, app=app)
     card.bus = bus
@@ -327,7 +353,7 @@ async def test_log_events(tmp_path, monkeypatch):
 
     from claude_rts.config import write_config
 
-    write_config(app["app_config"], {"priority_profile": "alice"})
+    write_config(app["app_config"], {"main_profile_name": "alice"})
 
     log_messages = []
 
@@ -338,7 +364,7 @@ async def test_log_events(tmp_path, monkeypatch):
 
     bp = {
         "name": "test",
-        "steps": [{"action": "get_priority_profile", "out": "p"}],
+        "steps": [{"action": "get_main_profile", "out": "p"}],
     }
     card = BlueprintCard(blueprint=bp, app=app)
     card.bus = bus
@@ -348,7 +374,7 @@ async def test_log_events(tmp_path, monkeypatch):
     await asyncio.sleep(0.5)
 
     assert any("Starting blueprint" in m for m in log_messages)
-    assert any("get_priority_profile" in m for m in log_messages)
+    assert any("get_main_profile" in m for m in log_messages)
     assert any("completed successfully" in m for m in log_messages)
     mgr.stop_all()
 
@@ -361,11 +387,11 @@ async def test_execution_log_file(tmp_path, monkeypatch):
 
     from claude_rts.config import write_config
 
-    write_config(app["app_config"], {"priority_profile": "alice"})
+    write_config(app["app_config"], {"main_profile_name": "alice"})
 
     bp = {
         "name": "test",
-        "steps": [{"action": "get_priority_profile", "out": "p"}],
+        "steps": [{"action": "get_main_profile", "out": "p"}],
     }
     card = BlueprintCard(blueprint=bp, app=app)
     card.bus = bus
@@ -393,11 +419,11 @@ async def test_self_close_on_completion(tmp_path, monkeypatch):
 
     from claude_rts.config import write_config
 
-    write_config(app["app_config"], {"priority_profile": "alice"})
+    write_config(app["app_config"], {"main_profile_name": "alice"})
 
     bp = {
         "name": "test",
-        "steps": [{"action": "get_priority_profile", "out": "p"}],
+        "steps": [{"action": "get_main_profile", "out": "p"}],
     }
     card = BlueprintCard(blueprint=bp, app=app)
     card.bus = bus
@@ -418,7 +444,7 @@ async def test_self_close_on_failure(tmp_path, monkeypatch):
 
     bp = {
         "name": "test",
-        "steps": [{"action": "get_priority_profile", "out": "p"}],
+        "steps": [{"action": "get_main_profile", "out": "p"}],
     }
     card = BlueprintCard(blueprint=bp, app=app)
     card.bus = bus

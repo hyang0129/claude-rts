@@ -52,7 +52,7 @@ To add a new preset: create a directory under `dev_presets/` with a `config.json
 |--------|---------|
 | `default` | Bare util-terminal + empty probe-qa canvas |
 | `profiles` | Profile Manager widget pre-placed on canvas |
-| `start-claude` | Start Claude button QA — priority_profile pre-set, Profile Manager widget on canvas |
+| `start-claude` | Start Claude button QA — main profile slot (`main_profile_name: "main"`), Profile Manager widget on canvas |
 | `stress-test` | Layout QA — 6 cards at edge positions, varying sizes, overlapping z-order |
 | `claude-api` | Claude terminal control API QA — empty canvas for programmatic terminal lifecycle |
 
@@ -81,7 +81,7 @@ CLAUDE_RTS_TEST_MODE=1 python -m claude_rts   # enables puppeting API at /api/te
 | `test_dev_config.py` | 8 | Dev-config preset loading and setup |
 | `test_sessions.py` | 30 | ScrollbackBuffer, SessionManager, test puppeting API |
 | `test_terminal_card.py` | 18 | TerminalCard lifecycle, CardRegistry, server integration, display_name, recovery_script |
-| `test_claude_api.py` | 38 | Claude terminal control API (CRUD, send/read, strip_ansi, /ws/control, full lifecycle, ${priority_credential}, rename, recovery-script, card_updated broadcast) |
+| `test_claude_api.py` | 38 | Claude terminal control API (CRUD, send/read, strip_ansi, /ws/control, full lifecycle, cmd pass-through, rename, recovery-script, card_updated broadcast) |
 | `test_event_bus.py` | 14 | EventBus core (subscribe, emit, unsubscribe, wildcard, async, errors, clear) + integration (ServiceCard bus emit, CardRegistry events) |
 | `test_vm_manager.py` | 18 | VM Manager API (discover containers, favorites CRUD, start/stop container, per-container actions, route registration) |
 | `test_mcp_server.py` | 64 | MCP server tool functions (terminal CRUD/rename/recovery + VM discover/favorites/actions/start/stop/append/get + blueprint list/get/save/delete/spawn) and JSON-RPC dispatch |
@@ -101,7 +101,7 @@ Tests use `MockPty` to avoid needing Docker. E2E tests require Playwright and El
 | GET | `/api/sessions` | List active sessions |
 | GET | `/api/widgets/system-info` | System info widget data |
 | GET | `/api/profiles` | Probe profiles with usage data, sorted by burn rate |
-| GET/PUT | `/api/profiles/priority` | Read/set priority profile |
+| GET/PUT | `/api/profiles/main` | Read the main profile slot name / promote a tracked profile (credential copy) |
 | GET | `/api/vms/discover` | Discover all Docker containers (running + stopped) with status |
 | GET/PUT | `/api/vms/favorites` | Read/write VM Manager favorites list |
 | POST | `/api/vms/{name}/start` | Start a stopped Docker container |
@@ -154,7 +154,7 @@ Each favorite container has an `actions` array of blueprint-action objects. Acti
 
 When an action button is clicked, the frontend calls `POST /api/blueprints/spawn` with `{name: act.blueprint, context: {container: "<fav-name>", ...act.context}}`. The container name is always injected automatically. New favorites default to an empty actions array.
 
-`POST /api/claude/terminal/create` performs the same `${priority_credential}` substitution server-side on its `cmd` query parameter, so Canvas Claude (via the `open_terminal` MCP tool) can pass the placeholder through unchanged. If no `priority_profile` is configured, the placeholder is left as-is and a warning is logged.
+`POST /api/claude/terminal/create` passes its `cmd` query parameter through verbatim — no placeholder substitution is performed. To launch claude with the in-use credential, reference the main profile slot directly: `cmd=env CLAUDE_CONFIG_DIR=/profiles/main claude`. The main slot is populated by clicking "Set as in-use" in the Profile Manager, which copies the selected profile's `.credentials.json` into `/profiles/<main_profile_name>/`.
 
 ## Canvas Claude MCP Tools
 
@@ -162,7 +162,7 @@ The Canvas Claude card (`claude_rts/mcp_server.py`) exposes a JSON-RPC stdio MCP
 
 | Tool | Wraps | Purpose |
 |---|---|---|
-| `open_terminal` | `POST /api/claude/terminal/create` | Spawn a new terminal card (supports `x, y, w, h, container, hub`). Server interpolates `${priority_credential}` in `cmd`. |
+| `open_terminal` | `POST /api/claude/terminal/create` | Spawn a new terminal card (supports `x, y, w, h, container, hub`). `cmd` is passed through verbatim; reference `/profiles/main` directly to use the in-use credential. |
 | `read_terminal` | `GET /api/claude/terminal/{id}/read` | Read scrollback (default: strip ANSI) |
 | `write_terminal` | `POST /api/claude/terminal/{id}/send` | Write keystrokes to a terminal |
 | `list_terminals` | `GET /api/claude/terminals` | List active terminal cards |

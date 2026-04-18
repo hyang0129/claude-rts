@@ -50,7 +50,7 @@ DEFAULT_CONFIG = {
     "theme": "catppuccin-mocha",
     "startup_script": "util-terminal",
     "probe_profiles": [],
-    "priority_profile": None,
+    "main_profile_name": "main",
     "util_container": {
         "name": "supreme-claudemander-util",
         "image": "supreme-claudemander-util:latest",

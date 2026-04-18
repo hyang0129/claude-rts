@@ -136,34 +136,15 @@ async def test_create_terminal_with_layout(aiohttp_client, app_factory):
     assert data["h"] == 400
 
 
-async def test_create_terminal_interpolates_priority_credential(aiohttp_client, tmp_path, monkeypatch):
-    """cmd containing ${priority_credential} is substituted with config priority_profile."""
+async def test_create_terminal_passes_cmd_through_unchanged(aiohttp_client, tmp_path, monkeypatch):
+    """cmd is passed through verbatim — no ${priority_credential} substitution (issue #163).
+
+    The former server-side placeholder was removed. Any literal placeholder
+    string in cmd must appear unchanged in the resulting card's exec field.
+    """
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
     app_config = config.load(tmp_path / ".sc")
-    # Write priority_profile to config
-    cfg = config.read_config(app_config)
-    cfg["priority_profile"] = "mykey"
-    config.write_config(app_config, cfg)
 
-    app = create_app(app_config, test_mode=True)
-    client = await aiohttp_client(app)
-    # URL-encode the ${priority_credential} placeholder
-    import urllib.parse
-
-    cmd = "claude --api-key ${priority_credential}"
-    resp = await client.post(f"/api/claude/terminal/create?cmd={urllib.parse.quote(cmd)}")
-    assert resp.status == 200
-    data = await resp.json()
-    # The card's exec field should reflect the substituted cmd
-    assert data["exec"] == "claude --api-key mykey"
-    assert "${priority_credential}" not in data["exec"]
-
-
-async def test_create_terminal_interpolation_no_priority_profile(aiohttp_client, tmp_path, monkeypatch):
-    """cmd with ${priority_credential} is left unchanged when no priority_profile is set."""
-    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
-    app_config = config.load(tmp_path / ".sc")
-    # No priority_profile set (default)
     app = create_app(app_config, test_mode=True)
     client = await aiohttp_client(app)
     import urllib.parse
@@ -172,7 +153,7 @@ async def test_create_terminal_interpolation_no_priority_profile(aiohttp_client,
     resp = await client.post(f"/api/claude/terminal/create?cmd={urllib.parse.quote(cmd)}")
     assert resp.status == 200
     data = await resp.json()
-    # Unchanged — placeholder still present
+    # Verbatim — no substitution, no warning, no change.
     assert data["exec"] == "claude --api-key ${priority_credential}"
 
 
