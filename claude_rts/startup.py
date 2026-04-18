@@ -9,14 +9,13 @@ Custom scripts: executable files in ~/.supreme-claudemander/startup/ that output
 
 import asyncio
 import json
-import sys
 
 from loguru import logger
 
 from .config import AppConfig, read_config
 from .discovery import discover_hubs
 
-_DOCKER = "docker.exe" if sys.platform == "win32" else "docker"
+_DOCKER = "docker"
 
 # Built-in script names
 BUILTIN_SCRIPTS = {"discover-devcontainers", "from-layout", "util-terminal"}
@@ -35,7 +34,7 @@ async def run_startup(script_name: str, app_config: AppConfig) -> list[dict]:
     For custom scripts in ~/.supreme-claudemander/startup/, executes them and parses JSON.
 
     Returns a list of card descriptors, e.g.:
-      [{"type": "terminal", "name": "hub_1", "exec": "docker.exe exec -it ..."}]
+      [{"type": "terminal", "name": "hub_1", "exec": "docker exec -it ..."}]
     """
     if script_name == "discover-devcontainers":
         return await _builtin_discover_devcontainers()

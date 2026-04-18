@@ -2,7 +2,6 @@
 
 import asyncio
 import re
-import sys
 import time
 
 import pyte
@@ -10,7 +9,7 @@ from loguru import logger
 
 from .service_card import ServiceCard
 
-_DOCKER = "docker.exe" if sys.platform == "win32" else "docker"
+_DOCKER = "docker"
 _RESET_HOURS = re.compile(r"(\d+)h\s*(\d+)?m?")
 _RESET_MINUTES_ONLY = re.compile(r"(\d+)m")
 _AUTH_REQUIRED = re.compile(

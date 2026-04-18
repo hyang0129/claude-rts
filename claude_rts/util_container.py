@@ -9,10 +9,9 @@ It stays alive via `sleep infinity` and commands are executed via `docker exec`.
 import asyncio
 import json
 import pathlib
-import sys
 import time
 
-_DOCKER = "docker.exe" if sys.platform == "win32" else "docker"
+_DOCKER = "docker"
 
 from loguru import logger  # noqa: E402
 

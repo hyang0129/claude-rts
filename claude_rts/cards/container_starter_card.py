@@ -1,13 +1,12 @@
 """ContainerStarterCard: transient card that starts a container and probes exec-readiness."""
 
 import asyncio
-import sys
 
 from loguru import logger
 
 from .base import BaseCard
 
-_DOCKER_CMD = "docker.exe" if sys.platform == "win32" else "docker"
+_DOCKER_CMD = "docker"
 
 
 class ContainerStarterCard(BaseCard):

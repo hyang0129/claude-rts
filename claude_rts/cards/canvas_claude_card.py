@@ -7,14 +7,11 @@ import json as _json
 import pathlib as _pathlib
 import re as _re
 import subprocess as _subprocess
-import sys as _sys
-
 from loguru import logger
 
 from .terminal_card import TerminalCard
 
-# Platform-aware Docker binary — matches pattern in server.py, discovery.py, etc.
-_DOCKER = "docker.exe" if _sys.platform == "win32" else "docker"
+_DOCKER = "docker"
 
 # Only alphanumeric, hyphens, and underscores are safe for shell interpolation.
 _SAFE_NAME = _re.compile(r"^[a-zA-Z0-9_-]+$")
