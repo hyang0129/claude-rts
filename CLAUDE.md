@@ -52,7 +52,7 @@ To add a new preset: create a directory under `dev_presets/` with a `config.json
 |--------|---------|
 | `default` | Bare util-terminal + empty probe-qa canvas |
 | `profiles` | Profile Manager widget pre-placed on canvas |
-| `start-claude` | Start Claude button QA — main profile slot (`main_profile_name: "main"`), Profile Manager widget on canvas |
+| `start-claude` | Start Claude button QA — main profile slot (`main_profile_name: "main"`), Profile Manager widget on canvas. `/profiles/main/.credentials.json` is **not** pre-populated; promote `test-profile` via "Set as in-use" before clicking Start Claude, or the button surfaces the "no credentials yet" warning. |
 | `stress-test` | Layout QA — 6 cards at edge positions, varying sizes, overlapping z-order |
 | `claude-api` | Claude terminal control API QA — empty canvas for programmatic terminal lifecycle |
 

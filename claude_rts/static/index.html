@@ -1974,14 +1974,14 @@ class CanvasClaudeCard extends TerminalCard {
     const msg = document.createElement('div');
     msg.dataset.pendingMsg = this.id;
     msg.style.cssText = 'color:#cdd6f4;font-size:13px;font-weight:bold';
-    msg.textContent = this.profile ? `Profile: ${this.profile}` : 'No priority profile set';
+    msg.textContent = this.profile ? `Profile: ${this.profile}` : 'Main profile unavailable';
 
     const hint = document.createElement('div');
     hint.dataset.pendingHint = this.id;
     hint.style.cssText = 'color:#6c7086;font-size:11px;line-height:1.6;max-width:280px';
     hint.textContent = this.profile
       ? 'Click Retry when the util container is running and credentials are ready.'
-      : 'Set a priority profile in the Profile Manager widget, then click Retry.';
+      : 'Click "Set as in-use" on a tracked profile in the Profile Manager, then click Retry.';
 
     const btn = document.createElement('button');
     btn.dataset.pendingRetry = this.id;
@@ -2445,19 +2445,18 @@ const WIDGET_REGISTRY = {
       try {
         const esc = (s) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 
-        // Load favorites and discovered containers in parallel
-        const [favsResp, discoverResp, configResp] = await Promise.all([
+        // Load favorites and discovered containers in parallel.
+        // (A third /api/config fetch was dropped in #163 review — it was
+        // only used for the removed priority_profile lookup.)
+        const [favsResp, discoverResp] = await Promise.all([
           fetch('/api/vms/favorites'),
           fetch('/api/vms/discover'),
-          fetch('/api/config'),
         ]);
         if (!favsResp.ok) throw new Error(`Favorites: HTTP ${favsResp.status}`);
         if (!discoverResp.ok) throw new Error(`Discover: HTTP ${discoverResp.status}`);
 
         const favorites = await favsResp.json();
         const allContainers = await discoverResp.json();
-        const _config = configResp.ok ? await configResp.json() : {};
-        void _config; // reserved for future use (was priority_profile lookup)
 
         // Build a lookup of discovered containers
         const containerMap = {};

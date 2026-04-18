@@ -14,9 +14,9 @@ The blueprint system solves this by providing a declarative, replayable artifact
 
 - **Start/stop containers** via `POST /api/vms/{name}/start|stop`
 - **Discover containers** via `GET /api/vms/discover`
-- **Spawn terminal cards** via `POST /api/claude/terminal/create` with `cmd`, `hub`, `container`, layout params, and `${priority_credential}` interpolation
+- **Spawn terminal cards** via `POST /api/claude/terminal/create` with `cmd`, `hub`, `container`, layout params (cmd is passed through verbatim — no placeholder interpolation; reference `/profiles/main` directly, see #163)
 - **Spawn Canvas Claude cards** via `POST /api/canvas-claude/create` with `profile`, `container`, layout params
-- **Read priority profile** via `GET /api/profiles/priority`
+- **Read main profile slot** via `GET /api/profiles/main` (returns `{main_profile_name, exists}`; renamed from `/api/profiles/priority` in #163)
 - **EventBus** emits `card:registered` / `card:unregistered` events and fans out to `/ws/control` WebSocket clients
 - **CARD_TYPE_REGISTRY** on the frontend provides `spawn()`, `deserialize()`, and `_mount()` for typed card instantiation
 - **ServiceCard** base class supports cards that perform a job and emit results via EventBus
@@ -107,7 +107,7 @@ This pattern:
 
 | Action | Completes when | Output |
 |---|---|---|
-| `get_priority_profile` | API returns value | profile name string |
+| `get_main_profile` | API returns value | profile name string (defaults to `"main"`, renamed from `get_priority_profile` in #163) |
 | `discover_containers` | API returns list | container list |
 | `start_container` | `ContainerStarterCard` emits `container:ready` | container name |
 | `open_terminal` | Server API returns `session_id` | session_id + card descriptor |
@@ -119,7 +119,7 @@ Within-card one-liners are fire-and-forget from the BlueprintCard's perspective 
 Example step list:
 ```json
 [
-  { "action": "get_priority_profile", "out": "credential" },
+  { "action": "get_main_profile", "out": "credential" },
   { "action": "start_container", "container": "hub3", "out": "container_name" },
   { "action": "open_claude_terminal", "container": "$container_name",
     "inject": { "credential": "$credential", "hub": "hub3" } }
@@ -153,7 +153,7 @@ The pre-spawn preview shows the **resolved step list** (what the blueprint will 
 **Decision**: Push-model injection. At spawn time, the canvas assembles a typed context object and injects it into the BlueprintCard. Every parameter must be declared with explicit provenance:
 
 - **User-supplied**: provided at blueprint invocation time (e.g., branch name, target path)
-- **Canvas-context-injected**: resolved from canvas state at spawn time (e.g., `priority_credential`, discovered container names)
+- **Canvas-context-injected**: resolved from canvas state at spawn time (e.g., the main profile slot name from `/api/profiles/main`, discovered container names)
 - **Static default**: baked into the blueprint definition
 
 Undeclared use of canvas state is a pre-spawn validation error. The pre-spawn preview shows resolved values ("will use credential: alice"), not just parameter names.
@@ -290,7 +290,7 @@ This keeps v1 minimal: the card does its job, logs what happened, and gets out o
 - [ ] `POST /api/blueprints/validate` returns resolved step list preview with parameter values
 - [ ] `BlueprintCard` registers in `CardRegistry` and appears on canvas when spawned
 - [ ] BlueprintCard executes steps sequentially with `$variable` binding
-- [ ] `get_priority_profile` step retrieves current priority profile
+- [ ] `get_main_profile` step retrieves current main profile slot name (renamed from `get_priority_profile` in #163)
 - [ ] `discover_containers` step returns container list
 - [ ] `start_container` step spawns a `ContainerStarterCard` and waits for `container:ready` event
 - [ ] `ContainerStarterCard` probes readiness via `docker exec <name> true`, emits result, self-closes

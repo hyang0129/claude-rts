@@ -307,6 +307,10 @@ async def test_failure_halts_execution(tmp_path, monkeypatch):
     # Should have emitted failed event
     failed_events = [e for e in events if e[0] == "blueprint:failed"]
     assert len(failed_events) == 1
+    # Assert the failure is attributable to the legacy action, not some
+    # incidental error — otherwise this test would false-pass if a bug
+    # caused the first step to succeed via a different path.
+    assert "get_priority_profile" in str(failed_events[0][1])
     assert "error" in failed_events[0][1]
     mgr.stop_all()
 
