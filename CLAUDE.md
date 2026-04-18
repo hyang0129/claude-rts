@@ -16,12 +16,12 @@ Verify the port is free before starting. Running multiple instances causes port 
 
 ## Key Design Decisions
 
-- **pywinpty for ConPTY**: `asyncio.create_subprocess_exec` only gives pipes (no PTY), so `docker.exe exec -it` fails or has no echo. pywinpty provides a real Windows ConPTY.
+- **ptyprocess for POSIX PTY**: `ptyprocess` is the PTY backend on Linux/macOS. The Windows ConPTY branch (`pywinpty`) was removed — Windows is community-supported best-effort only.
 - **Session persistence**: SessionManager decouples PTY lifetime from WebSocket. PTYs run in server memory with a 64KB scrollback ring buffer. Orphan reaper cleans up after 5 min.
 - **Single HTML file**: All JS/CSS is inline in `index.html`. External libs (xterm.js) load from CDN. No npm, no bundler.
 - **Card class hierarchy**: `Card` base → `TerminalCard`, `WidgetCard`, `LoaderCard`. Enables mixed dashboards.
 - **Limited container lifecycle (start/stop only)**: supreme-claudemander can start and stop Docker containers via the VM Manager card. Creating, removing, and image management remain out of scope.
-- **docker.exe not docker**: On Windows, `docker` (no extension) is a shell script that `CreateProcessW` can't execute. Always use `docker.exe`.
+- **Plain `docker` binary**: Always use `docker` (no `.exe`). The runtime is Linux/macOS-native. Windows is community-supported best-effort.
 
 ## Dev Config Presets
 

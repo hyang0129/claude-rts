@@ -19,7 +19,10 @@ jobs:
       - run: ruff format --check .
 
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,7 +47,7 @@ jobs:
             && docker tag ghcr.io/hyang0129/supreme-claudemander-util:latest supreme-claudemander-util:latest \
             || echo "GHCR pull failed — server will fall back to local build"
       - name: Run Playwright smoke tests (headless)
-        run: python -m pytest tests/e2e/ -v --timeout=120
+        run: python -m pytest tests/e2e/ -v --timeout=120 --ignore=tests/e2e/real
         env:
           CLAUDE_RTS_TEST_MODE: "1"
           CLAUDE_RTS_PORT: "3099"

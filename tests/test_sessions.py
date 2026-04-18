@@ -186,7 +186,7 @@ async def test_create_session_no_tmux_no_double_wrap(monkeypatch):
     MockPty.spawn = tracking_spawn
     try:
         mgr = SessionManager()
-        full_cmd = "docker.exe exec -it my-container bash -l"
+        full_cmd = "docker exec -it my-container bash -l"
         mgr.create_session(full_cmd, container="my-container")
         assert spawned_cmds[-1] == full_cmd
         mgr.stop_all()

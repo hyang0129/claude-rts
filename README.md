@@ -5,6 +5,8 @@ An RTS-style terminal canvas for managing devcontainer hubs. Terminal shells liv
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
+**Primary platform: Linux and macOS.** Windows is community-supported (see below).
+
 ## What it does
 
 - Opens a browser with a 4K canvas showing all your running devcontainers
@@ -36,30 +38,85 @@ An RTS-style terminal canvas for managing devcontainer hubs. Terminal shells liv
 
 ## Quick start
 
-### Prerequisites
+### Devcontainer (recommended)
 
-- Windows 10/11 with Docker Desktop running
+Open this repository in VS Code and choose **Reopen in Container**. The devcontainer installs all dependencies and starts the server automatically. This is the easiest path on any platform.
+
+### Linux / macOS (native)
+
+Requirements:
+
 - Python 3.10+
-- Running devcontainers (with `devcontainer.local_folder` label)
+- Docker running (containers accessible via `docker` CLI)
 
-### Build and install from source
+Install and run:
+
+```bash
+pip install supreme-claudemander
+python -m claude_rts
+```
+
+The server starts on `http://localhost:3000` and opens your browser automatically. Press `Ctrl+C` to stop — your containers keep running.
+
+### Windows (community supported)
+
+```bash
+pip install "supreme-claudemander[windows]"
+python -m claude_rts
+```
+
+> **Note**: The `[windows]` extra installs `pywinpty` as a placeholder for future community contribution. PTY-backed features (terminal cards, util-container PTY commands) do not currently work on Windows — `pty_compat.py` uses `ptyprocess` which is POSIX-only. The server will start, but spawning terminal cards will fail. For a fully working experience on a Windows machine, use the [devcontainer](#devcontainer-recommended) path. See [issue #157](https://github.com/hyang0129/supreme-claudemander/issues/157) to contribute a Windows PTY branch.
+
+### Build from source
 
 ```bash
 git clone https://github.com/hyang0129/supreme-claudemander.git
 cd supreme-claudemander
-pip install build
-python -m build
-python -m venv ~/.supreme-claudemander/venv
-~/.supreme-claudemander/venv/Scripts/pip install dist/supreme_claudemander-*.whl
+pip install -e .
+python -m claude_rts
 ```
 
-Then run:
+## Architecture
+
+```
+Browser (localhost:3000)
+  └─ 4K canvas with pan/zoom
+       ├─ Terminal cards (xterm.js) ─── WebSocket ───┐
+       ├─ Minimap                                    │
+       └─ Context menu                               │
+                                                     │
+Python server (aiohttp) — runs on the HOST           │
+  ├─ GET  /           → index.html                   │
+  ├─ GET  /api/hubs   → discover containers          │
+  └─ WS   /ws/{hub} ←───────────────────────────────┘
+       └─ PTY → docker exec -it ...
+```
+
+**Server-on-host**: The Python server runs on your host machine (not inside a container) and communicates with Docker containers via the Docker socket. This lets it manage container lifecycles and forward PTY sessions without needing privileged access inside a container.
+
+**Backend**: Python aiohttp server. On Linux/macOS, PTYs use the standard `pty` module. On Windows, pywinpty provides ConPTY terminal bridging.
+
+**Frontend**: Single `index.html` file. xterm.js for terminal rendering. No build step, no npm — external libs load from CDN.
+
+**Container discovery**: Queries `docker ps` for containers with the `devcontainer.local_folder` label.
+
+## Options
+
+```
+python -m claude_rts --port 4000          # custom port
+python -m claude_rts --no-browser         # don't auto-open browser
+python -m claude_rts --electron           # launch in Electron shell
+python -m claude_rts --config-dir PATH    # use a custom config directory (default: ~/.supreme-claudemander)
+python -m claude_rts --dev-config         # isolated dev config (wiped on each start)
+```
+
+### `--config-dir`
+
+By default, config and canvas layouts are stored in `~/.supreme-claudemander/`. Pass `--config-dir` to point to a different directory — useful for running multiple isolated instances or for CI environments:
 
 ```bash
-~/.supreme-claudemander/venv/Scripts/supreme-claudemander
+python -m claude_rts --config-dir /tmp/my-test-config
 ```
-
-The server starts on `http://localhost:3000` and opens your browser automatically. Press `Ctrl+C` to stop — your containers keep running.
 
 #### Electron shell (optional)
 
@@ -67,16 +124,7 @@ The `--electron` flag requires Node.js and the repo's `electron/` dependencies:
 
 ```bash
 cd electron && npm install && cd ..
-SUPREME_CLAUDEMANDER_ELECTRON_DIR=/path/to/repo/electron \
-  ~/.supreme-claudemander/venv/Scripts/supreme-claudemander --electron
-```
-
-### Options
-
-```
-supreme-claudemander --port 4000       # custom port
-supreme-claudemander --no-browser      # don't auto-open browser
-supreme-claudemander --electron        # launch in Electron shell
+python -m claude_rts --electron
 ```
 
 ## Controls
@@ -118,28 +166,6 @@ Each terminal card shows a hub symbol (A, B, C...) colored by state:
 
 The minimap in the top-left corner shows all card positions as colored symbols. Click anywhere on it to jump to that location.
 
-## Architecture
-
-```
-Browser (localhost:3000)
-  └─ 4K canvas with pan/zoom
-       ├─ Terminal cards (xterm.js) ─── WebSocket ───┐
-       ├─ Minimap                                    │
-       └─ Context menu                               │
-                                                     │
-Python server (aiohttp)                              │
-  ├─ GET  /           → index.html                   │
-  ├─ GET  /api/hubs   → discover containers          │
-  └─ WS   /ws/{hub} ←───────────────────────────────┘
-       └─ pywinpty ConPTY → docker.exe exec -it ...
-```
-
-**Backend**: Python aiohttp server with pywinpty for Windows ConPTY terminal bridging.
-
-**Frontend**: Single `index.html` file. xterm.js for terminal rendering. No build step, no npm — external libs load from CDN.
-
-**Container discovery**: Queries `docker.exe ps` for containers with the `devcontainer.local_folder` label.
-
 ## Settings
 
 Click the gear icon in the status bar to configure:
@@ -150,6 +176,20 @@ Click the gear icon in the status bar to configure:
 - **Idle threshold**: seconds before a terminal is marked idle (3/5/10/30)
 
 Settings are saved to localStorage.
+
+## Configuration
+
+Config is stored in `~/.supreme-claudemander/config.json` (or the directory specified by `--config-dir`):
+
+```json
+{
+  "startup_script": "discover-devcontainers",
+  "sessions": { "orphan_timeout": 300, "scrollback_size": 65536 },
+  "util_container": { "name": "supreme-claudemander-util", "mounts": {} }
+}
+```
+
+Canvas layouts are stored in `~/.supreme-claudemander/canvases/{name}.json`.
 
 ## Development
 

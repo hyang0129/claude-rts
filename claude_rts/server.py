@@ -133,7 +133,7 @@ async def widget_system_info_handler(request: web.Request) -> web.Response:
     return web.json_response(data)
 
 
-_DOCKER_CMD = "docker.exe" if sys.platform == "win32" else "docker"
+_DOCKER_CMD = "docker"
 
 
 # ── VM Manager API ───────────────────────────────────────────────────────────

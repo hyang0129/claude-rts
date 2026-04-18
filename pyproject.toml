@@ -22,13 +22,15 @@ classifiers = [
 ]
 dependencies = [
     "aiohttp>=3.9",
-    "pywinpty>=2.0; sys_platform == 'win32'",
-    "ptyprocess>=0.7; sys_platform != 'win32'",
+    "ptyprocess>=0.7",
     "loguru>=0.7",
     "pyte>=0.8",
 ]
 
 [project.optional-dependencies]
+windows = [
+    "pywinpty>=2.0",
+]
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -63,6 +65,10 @@ claude_rts = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "requires_pty: marks tests as requiring a real PTY (deselect with -m 'not requires_pty')",
+    "real_docker: marks tests as requiring real Docker containers (not run in CI)",
+]
 
 [tool.ruff]
 target-version = "py310"

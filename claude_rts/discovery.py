@@ -2,9 +2,8 @@
 
 import asyncio
 import re
-import sys
 
-_DOCKER = "docker.exe" if sys.platform == "win32" else "docker"
+_DOCKER = "docker"
 
 
 async def discover_hubs() -> list[dict]:

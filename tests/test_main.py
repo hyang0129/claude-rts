@@ -129,3 +129,39 @@ def test_electron_flag_skips_browser():
             pass
         # webbrowser.open should never be referenced in startup
         mock_wb.open.assert_not_called()
+
+
+def test_config_dir_flag_passes_resolved_path():
+    """Verify --config-dir passes a resolved Path to config.load."""
+    with (
+        patch("sys.argv", ["supreme-claudemander", "--config-dir", "/tmp/test-config", "--no-browser"]),
+        patch("claude_rts.__main__.web") as _mock_web,
+        patch("claude_rts.__main__.create_app") as mock_create,
+        patch("claude_rts.__main__.config") as mock_config,
+    ):
+        import pathlib
+
+        mock_config.load.return_value = MagicMock()
+        mock_create.return_value = MagicMock()
+        try:
+            main()
+        except SystemExit:
+            pass
+        mock_config.load.assert_called_once_with(pathlib.Path("/tmp/test-config").resolve())
+
+
+def test_config_dir_not_provided_uses_default():
+    """Verify config.load() is called with no args when --config-dir is absent."""
+    with (
+        patch("sys.argv", ["supreme-claudemander", "--no-browser"]),
+        patch("claude_rts.__main__.web") as _mock_web,
+        patch("claude_rts.__main__.create_app") as mock_create,
+        patch("claude_rts.__main__.config") as mock_config,
+    ):
+        mock_config.load.return_value = MagicMock()
+        mock_create.return_value = MagicMock()
+        try:
+            main()
+        except SystemExit:
+            pass
+        mock_config.load.assert_called_once_with()

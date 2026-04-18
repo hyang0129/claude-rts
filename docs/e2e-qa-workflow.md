@@ -230,10 +230,10 @@ Round 3: Agent 4 (Runner) — final, report only, no more fixes
 - The feature starts/stops/queries Docker containers — spin up a test container
 - The feature reads/writes config files — use real filesystem with temp dirs
 - The feature makes HTTP calls to its own server — use the real running server
-- The feature exercises a subprocess (`docker.exe ps`, `docker.exe start`) — run the real command
+- The feature exercises a subprocess (`docker ps`, `docker start`) — run the real command
 - The external system has multiple outcomes that matter (success, failure, timeout, partial response)
 
-**Example:** VM Manager calls `docker.exe start <name>`. The test should start a real stopped container and verify it transitions to running. It should also test starting a non-existent container and verify the error is surfaced to the user.
+**Example:** VM Manager calls `docker start <name>`. The test should start a real stopped container and verify it transitions to running. It should also test starting a non-existent container and verify the error is surfaced to the user.
 
 ### Use mock when
 
@@ -253,12 +253,12 @@ def test_container():
     """Spin up a lightweight container for E2E tests."""
     name = "e2e-test-" + uuid.uuid4().hex[:8]
     subprocess.run(
-        ["docker.exe", "run", "-d", "--name", name, "alpine:latest", "sleep", "3600"],
+        ["docker", "run", "-d", "--name", name, "alpine:latest", "sleep", "3600"],
         check=True, capture_output=True,
     )
     yield name
     subprocess.run(
-        ["docker.exe", "rm", "-f", name],
+        ["docker", "rm", "-f", name],
         capture_output=True,
     )
 ```

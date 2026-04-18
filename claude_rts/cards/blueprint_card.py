@@ -15,6 +15,8 @@ from ..blueprint import (
     _VAR_NAME_RE,
 )
 
+_DOCKER = "docker"
+
 
 class BlueprintCard(BaseCard):
     """First-class server-side card that executes a blueprint step list.
@@ -236,11 +238,8 @@ class BlueprintCard(BaseCard):
             await self._log(f"  Discovered {len(containers)} container(s): {containers}")
             return containers
 
-        import sys
-
-        _docker_cmd = "docker.exe" if sys.platform == "win32" else "docker"
         proc = await asyncio.create_subprocess_exec(
-            _docker_cmd,
+            _DOCKER,
             "ps",
             "-a",
             "--format",
@@ -346,14 +345,11 @@ class BlueprintCard(BaseCard):
         # (non-tmux). tmux send-keys bypasses the terminal handshake entirely —
         # raw PTY writes race with tmux's device-attributes response and corrupt input.
         if cmd and card.session:
-            import sys as _sys
-
-            _docker = "docker.exe" if _sys.platform == "win32" else "docker"
             session_id = card.session_id
             if card.session.tmux_backed and container:
                 await asyncio.sleep(0.5)  # let tmux shell settle
                 proc = await asyncio.create_subprocess_exec(
-                    _docker,
+                    _DOCKER,
                     "exec",
                     container,
                     "tmux",

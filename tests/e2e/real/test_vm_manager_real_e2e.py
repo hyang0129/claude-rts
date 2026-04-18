@@ -1,19 +1,19 @@
 """Playwright E2E tests for the VM Manager card using REAL Docker containers.
 
 These tests launch the real backend with --dev-config vm-manager and exercise
-the actual docker.exe code paths (no test puppeting API, no mock container
+the actual docker code paths (no test puppeting API, no mock container
 data). Real containers are created/destroyed per test or per module.
 
-Requires Docker Desktop to be running. Skipped entirely if docker.exe is
-not available.
+Requires Docker to be running. Skipped entirely if docker
+is not available.
 
 Run:
     pip install pytest-playwright playwright
     python -m playwright install chromium
-    python -m pytest tests/e2e/test_vm_manager_real_e2e.py -v
+    python -m pytest tests/e2e/real/test_vm_manager_real_e2e.py -v
 
 Headed mode (shows the browser window):
-    HEADED=1 python -m pytest tests/e2e/test_vm_manager_real_e2e.py -v
+    HEADED=1 python -m pytest tests/e2e/real/test_vm_manager_real_e2e.py -v
 """
 
 import subprocess
@@ -34,10 +34,10 @@ pytestmark = pytest.mark.real_docker
 
 
 def _docker_available() -> bool:
-    """Return True if docker.exe ps succeeds."""
+    """Return True if docker ps succeeds."""
     try:
         r = subprocess.run(
-            ["docker.exe", "ps"],
+            ["docker", "ps"],
             capture_output=True,
             timeout=10,
         )
@@ -47,7 +47,7 @@ def _docker_available() -> bool:
 
 
 if not _docker_available():
-    pytest.skip("Docker is not available (docker.exe ps failed)", allow_module_level=True)
+    pytest.skip("Docker is not available (docker ps failed)", allow_module_level=True)
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -64,13 +64,13 @@ def running_container():
     """Create a real running Alpine container for the test module."""
     name = f"e2e-vm-running-{uuid.uuid4().hex[:8]}"
     subprocess.run(
-        ["docker.exe", "run", "-d", "--name", name, "alpine:latest", "sleep", "3600"],
+        ["docker", "run", "-d", "--name", name, "alpine:latest", "sleep", "3600"],
         check=True,
         capture_output=True,
     )
     yield name
     subprocess.run(
-        ["docker.exe", "rm", "-f", name],
+        ["docker", "rm", "-f", name],
         capture_output=True,
     )
 
@@ -84,13 +84,13 @@ def stopped_container():
     """
     name = f"e2e-vm-stopped-{uuid.uuid4().hex[:8]}"
     subprocess.run(
-        ["docker.exe", "run", "--name", name, "alpine:latest", "echo", "done"],
+        ["docker", "run", "--name", name, "alpine:latest", "echo", "done"],
         check=True,
         capture_output=True,
     )
     yield name
     subprocess.run(
-        ["docker.exe", "rm", "-f", name],
+        ["docker", "rm", "-f", name],
         capture_output=True,
     )
 
@@ -112,19 +112,19 @@ def startable_container():
     """
     name = f"e2e-vm-startable-{uuid.uuid4().hex[:8]}"
     subprocess.run(
-        ["docker.exe", "run", "-d", "--name", name, "alpine:latest", "sleep", "3600"],
+        ["docker", "run", "-d", "--name", name, "alpine:latest", "sleep", "3600"],
         check=True,
         capture_output=True,
     )
     subprocess.run(
-        ["docker.exe", "stop", name],
+        ["docker", "stop", name],
         check=True,
         capture_output=True,
         timeout=15,
     )
     yield name
     subprocess.run(
-        ["docker.exe", "rm", "-f", name],
+        ["docker", "rm", "-f", name],
         capture_output=True,
     )
 
@@ -137,13 +137,13 @@ def bash_container():
     """
     name = f"e2e-vm-bash-{uuid.uuid4().hex[:8]}"
     subprocess.run(
-        ["docker.exe", "run", "-d", "--name", name, "bash:latest", "sleep", "3600"],
+        ["docker", "run", "-d", "--name", name, "bash:latest", "sleep", "3600"],
         check=True,
         capture_output=True,
     )
     yield name
     subprocess.run(
-        ["docker.exe", "rm", "-f", name],
+        ["docker", "rm", "-f", name],
         capture_output=True,
     )
 
@@ -197,7 +197,7 @@ def ensure_vm_card_exists(page):
 def docker_inspect_state(name: str) -> str:
     """Return the Docker container state (e.g. 'running', 'exited')."""
     r = subprocess.run(
-        ["docker.exe", "inspect", "--format", "{{.State.Status}}", name],
+        ["docker", "inspect", "--format", "{{.State.Status}}", name],
         capture_output=True,
         text=True,
     )
@@ -519,7 +519,7 @@ class TestRealStatusAccuracy:
         name = f"e2e-vm-stoppable-{uuid.uuid4().hex[:8]}"
         subprocess.run(
             [
-                "docker.exe",
+                "docker",
                 "run",
                 "-d",
                 "--name",
@@ -571,7 +571,7 @@ class TestRealStatusAccuracy:
 
             # Stop the container externally
             subprocess.run(
-                ["docker.exe", "stop", name],
+                ["docker", "stop", name],
                 check=True,
                 capture_output=True,
                 timeout=15,
@@ -601,6 +601,6 @@ class TestRealStatusAccuracy:
 
         finally:
             subprocess.run(
-                ["docker.exe", "rm", "-f", name],
+                ["docker", "rm", "-f", name],
                 capture_output=True,
             )
