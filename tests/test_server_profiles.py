@@ -100,22 +100,41 @@ async def test_profiles_list_no_probe_result(client, tmp_path):
 
 
 async def test_profiles_list_includes_main_profile_name(client, tmp_path):
-    """Each profile entry includes main_profile_name (the active slot). An
-    ``is_main`` boolean is intentionally NOT returned — the main slot is a copy
-    destination, never one of the tracked profiles, so the field would always
-    be false and was dropped as dead payload (#163 review)."""
+    """Each profile entry includes main_profile_name and is_main.
+
+    ``is_main`` is True for exactly the profile that matches active_main_source
+    in config, and False for all others.  When active_main_source is absent
+    every entry has is_main=False.
+    """
     app_config = client.app["app_config"]
     cfg = config.read_config(app_config)
     cfg["probe_profiles"] = ["alice", "bob"]
+    cfg["active_main_source"] = "alice"
     config.write_config(app_config, cfg)
 
     with patch("claude_rts.server.ServiceCardRegistry.get", return_value=None):
         resp = await client.get("/api/profiles")
 
     data = await resp.json()
+    assert resp.status == 200
+    assert len(data) == 2
+    # main_profile_name is still broadcast on every entry
     assert all(p["main_profile_name"] == "main" for p in data)
-    # Negative assertion: the dead ``is_main`` field must not reappear.
-    assert all("is_main" not in p for p in data)
+    # is_main must be present and reflect active_main_source
+    by_profile = {p["profile"]: p for p in data}
+    assert by_profile["alice"]["is_main"] is True
+    assert by_profile["bob"]["is_main"] is False
+
+    # When active_main_source is absent, all is_main values must be False.
+    cfg2 = config.read_config(app_config)
+    cfg2.pop("active_main_source", None)
+    config.write_config(app_config, cfg2)
+
+    with patch("claude_rts.server.ServiceCardRegistry.get", return_value=None):
+        resp2 = await client.get("/api/profiles")
+
+    data2 = await resp2.json()
+    assert all(p["is_main"] is False for p in data2)
 
 
 # ── GET /api/profiles/main ───────────────────────────────────────────────────
@@ -179,6 +198,10 @@ async def test_main_profile_set_copies_credentials(client):
     sent_cmd = mock_exec.call_args[0][1]
     assert "/profiles/hongy/.credentials.json" in sent_cmd
     assert "/profiles/main/.credentials.json" in sent_cmd
+    # .claude.json must also be copied (best-effort, tolerating a missing source).
+    assert "/profiles/hongy/.claude.json" in sent_cmd
+    assert "/profiles/main/.claude.json" in sent_cmd
+    assert "|| true" in sent_cmd
 
 
 async def test_main_profile_set_unknown_source_returns_400(client):
