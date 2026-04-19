@@ -13,8 +13,9 @@ from .terminal_card import TerminalCard
 
 _DOCKER = "docker"
 
-# Only alphanumeric, hyphens, and underscores are safe for shell interpolation.
-_SAFE_NAME = _re.compile(r"^[a-zA-Z0-9_-]+$")
+# Alphanumeric, dots, hyphens, and underscores are safe for shell interpolation.
+# Dots are permitted so profile names like "foo.bar" (valid on the filesystem) are accepted.
+_SAFE_NAME = _re.compile(r"^[a-zA-Z0-9._-]+$")
 
 # Stable tmux session name used for canvas claude persistence.
 # Only one canvas claude per container is supported, so a fixed name is fine.
@@ -85,7 +86,7 @@ _TRUST_SETTINGS = {
 def _validate_name(value: str, label: str) -> None:
     """Raise ValueError if value contains characters unsafe for shell interpolation."""
     if not _SAFE_NAME.match(value):
-        raise ValueError(f"Invalid {label} {value!r}: only alphanumeric, hyphens, and underscores are allowed")
+        raise ValueError(f"Invalid {label} {value!r}: only alphanumeric, dots, hyphens, and underscores are allowed")
 
 
 class CanvasClaudeCard(TerminalCard):

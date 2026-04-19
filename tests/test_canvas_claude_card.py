@@ -207,6 +207,15 @@ async def test_canvas_claude_card_invalid_profile_rejected():
     mgr.stop_all()
 
 
+async def test_canvas_claude_card_dotted_profile_accepted():
+    """Profile name with dots (e.g. foo.bar) must be accepted — dots are valid filesystem chars."""
+    mgr = SessionManager()
+    # Should not raise
+    card = CanvasClaudeCard(session_manager=mgr, container="my-container", profile="foo.bar")
+    assert card.profile == "foo.bar"
+    mgr.stop_all()
+
+
 async def test_canvas_claude_card_ensure_tmux_attach(monkeypatch):
     """_ensure_tmux_session sets cmd to attach when tmux session exists."""
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)

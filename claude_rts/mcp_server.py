@@ -394,7 +394,9 @@ TOOL_SCHEMAS = [
             "The canvas is 3840x2160 (4K). To run a command inside a Docker container, set "
             "both 'cmd' and 'container'. The server handles docker exec automatically. "
             "To launch claude with the user's in-use credential, reference the main profile "
-            "slot directly: cmd='env CLAUDE_CONFIG_DIR=/profiles/main claude'."
+            "slot directly: cmd='env CLAUDE_CONFIG_DIR=/profiles/<main_profile_name> claude'. "
+            "The slot name defaults to 'main' but may be customized — call GET /api/profiles/main "
+            "to obtain the configured slot name for robustness."
         ),
         "inputSchema": {
             "type": "object",
@@ -409,7 +411,9 @@ TOOL_SCHEMAS = [
                         "cmd='claude --dangerously-skip-permissions', container='my-dev' "
                         "launches Claude Code inside the container. To launch claude with "
                         "the user's in-use credential, reference the main slot directly: "
-                        "cmd='env CLAUDE_CONFIG_DIR=/profiles/main claude --dangerously-skip-permissions'. "
+                        "cmd='env CLAUDE_CONFIG_DIR=/profiles/<main_profile_name> claude --dangerously-skip-permissions'. "
+                        "The slot name defaults to 'main' but may be customized; call "
+                        "GET /api/profiles/main to obtain the configured slot name for robustness. "
                         "No server-side placeholder substitution is performed on cmd — the "
                         "string is passed through unchanged."
                     ),
