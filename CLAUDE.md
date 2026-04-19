@@ -52,7 +52,7 @@ To add a new preset: create a directory under `dev_presets/` with a `config.json
 |--------|---------|
 | `default` | Bare util-terminal + empty probe-qa canvas |
 | `profiles` | Profile Manager widget pre-placed on canvas |
-| `start-claude` | Start Claude button QA — main profile slot (`main_profile_name: "main"`), Profile Manager widget on canvas. `/profiles/main/.credentials.json` is **not** pre-populated; promote `test-profile` via "Set as in-use" before clicking Start Claude, or the button surfaces the "no credentials yet" warning. |
+| `start-claude` | Start Claude button QA — main profile slot (`main_profile_name: "main"`), Profile Manager widget on canvas. `/profiles/main/.credentials.json` is **not** pre-populated; promote `test-profile` via "Set as in-use" before clicking Start Claude, or the button surfaces the "no credentials yet" warning. **Note:** this preset does not mount the `claude-profiles` named volume into the util container, so `/profiles` inside the util container is `root:root 755`; writes require running as root (e.g. `docker exec --user root`). |
 | `stress-test` | Layout QA — 6 cards at edge positions, varying sizes, overlapping z-order |
 | `claude-api` | Claude terminal control API QA — empty canvas for programmatic terminal lifecycle |
 
@@ -69,6 +69,18 @@ CLAUDE_RTS_TEST_MODE=1 python -m claude_rts   # enables puppeting API at /api/te
 **Always run `ruff format` before committing.** CI enforces formatting via `ruff format --check`.
 
 **Wait for CI to pass before merging PRs.** All GitHub Actions checks (lint, format, tests) must be green.
+
+### E2E Tests in the Devcontainer
+
+The devcontainer is configured to run the full E2E suite including Docker-gated and browser tests:
+
+- **Docker socket**: `postStartCommand` in `devcontainer.json` applies `chmod 666 /var/run/docker.sock` on every container start (not just creation). This is required because the socket is owned by `root:root GID=0` but the `docker` group inside the container has a different GID.
+- **Chromium for Playwright**: Install once after the container is created:
+  ```bash
+  pip install -e ".[e2e]" && python -m playwright install chromium
+  ```
+- **Docker-gated helpers** (`_ensure_util_profile`, `_clear_main_slot`): These helpers use `--user root` when writing to `/profiles` inside the util container. In `--dev-config` mode the `claude-profiles` named volume is **not** mounted, so `/profiles` is `root:root 755` and only writable as root.
+- **Stale util container state**: The util container persists `/profiles` between test runs. Tests that depend on the main slot being empty must call `_clear_main_slot()` at the start (see `test_no_main_credentials_shows_warning`).
 
 | File | Tests | What it covers |
 |------|-------|----------------|
