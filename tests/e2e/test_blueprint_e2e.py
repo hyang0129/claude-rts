@@ -238,6 +238,29 @@ class TestMainProfileBlueprint:
         assert save_resp.status_code in (200, 201), f"Blueprint save failed: {save_resp.status_code} {save_resp.text}"
 
         try:
+            # Install the WS interceptor BEFORE spawning so we capture log events
+            # that arrive while the blueprint executes. get_main_profile is instant
+            # (just a config read), so the log event can arrive before wait_for_function
+            # even runs its first poll if the interceptor is installed lazily inside
+            # the polling function.
+            page.evaluate(
+                """() => {
+                    window.__blueprintLogs = [];
+                    if (typeof controlWs !== 'undefined' && controlWs) {
+                        const origHandler = controlWs.onmessage;
+                        controlWs.onmessage = (ev) => {
+                            try {
+                                const msg = JSON.parse(ev.data);
+                                if (msg.type === 'blueprint:log' || msg.type === 'blueprint:completed') {
+                                    window.__blueprintLogs.push(msg);
+                                }
+                            } catch(e) {}
+                            if (origHandler) origHandler.call(controlWs, ev);
+                        };
+                    }
+                }"""
+            )
+
             # Spawn the blueprint
             spawn_resp = requests.post(
                 f"http://localhost:{backend_port}/api/blueprints/spawn",
@@ -248,34 +271,12 @@ class TestMainProfileBlueprint:
                 f"Blueprint spawn failed: {spawn_resp.status_code} {spawn_resp.text}"
             )
 
-            # Poll control WS for a blueprint:log event whose message contains
-            # "Main profile: main" (the exact string emitted by _step_get_main_profile).
-            # This is more specific than checking for the string 'main' anywhere in the
-            # event, which would falsely match the blueprint name _e2e_get_main_profile.
+            # Poll until a blueprint:log event arrives whose message contains
+            # "Main profile: main" (the exact string emitted by _step_get_main_profile)
+            # or the output-binding log line "-> $cred =".
             completed = page.wait_for_function(
                 """() => {
-                    // Install the interceptor on first call.
-                    if (typeof window.__blueprintLogs === 'undefined') {
-                        window.__blueprintLogs = [];
-                        if (typeof controlWs !== 'undefined' && controlWs) {
-                            const origHandler = controlWs.onmessage;
-                            controlWs.onmessage = (ev) => {
-                                try {
-                                    const msg = JSON.parse(ev.data);
-                                    if (msg.type === 'blueprint:log' || msg.type === 'blueprint:completed') {
-                                        window.__blueprintLogs.push(msg);
-                                    }
-                                } catch(e) {}
-                                if (origHandler) origHandler.call(controlWs, ev);
-                            };
-                        }
-                        return false;
-                    }
-                    // Look for the exact log line emitted by _step_get_main_profile:
-                    //   message: "  Main profile: main"
-                    // or the output-binding log line:
-                    //   message: "  -> $cred = 'main'"
-                    return window.__blueprintLogs.some(m =>
+                    return (window.__blueprintLogs || []).some(m =>
                         m.type === 'blueprint:log' && (
                             (m.message || '').includes('Main profile:') ||
                             (m.message || '').includes("-> $cred =")

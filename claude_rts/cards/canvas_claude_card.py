@@ -194,13 +194,25 @@ class CanvasClaudeCard(TerminalCard):
         without requiring an image rebuild. Runs synchronously; call from an executor.
         """
         src = _pathlib.Path(__file__).parent.parent / "mcp_server.py"
-        result = _subprocess.run(
-            [_DOCKER, "cp", str(src), f"{self._effective_container}:/home/util/mcp_server.py"],
-            timeout=10,
-            capture_output=True,
-        )
+        try:
+            result = _subprocess.run(
+                [_DOCKER, "cp", str(src), f"{self._effective_container}:/home/util/mcp_server.py"],
+                timeout=10,
+                capture_output=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "CanvasClaudeCard: docker cp raised {} — non-fatal, using existing mcp_server.py if any",
+                exc,
+            )
+            return
         if result.returncode != 0:
-            raise RuntimeError(f"Failed to sync mcp_server.py: {result.stderr.decode(errors='replace')}")
+            logger.warning(
+                "CanvasClaudeCard: failed to sync mcp_server.py to {} (non-fatal, using existing version if any): {}",
+                self._effective_container,
+                result.stderr.decode(errors="replace"),
+            )
+            return
         logger.debug("CanvasClaudeCard: synced mcp_server.py to {}", self._effective_container)
 
     def _seed_claude_settings(self) -> None:
