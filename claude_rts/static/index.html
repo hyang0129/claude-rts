@@ -1831,8 +1831,8 @@ class TerminalCard extends Card {
         }
         const data = await resp.json();
         const name = data.main_profile_name;
-        if (!/^[a-zA-Z0-9._-]+$/.test(name)) {
-          this.term.write('\r\n\x1b[31m[Invalid profile name — contains unsafe characters]\x1b[0m\r\n');
+        if (typeof name !== 'string' || name === '' || !/^[a-zA-Z0-9._-]+$/.test(name)) {
+          this.term.write('\r\n\x1b[31m[Main profile unavailable — check Profile Manager settings]\x1b[0m\r\n');
           return;
         }
         if (data.exists === false) {

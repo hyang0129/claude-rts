@@ -172,7 +172,7 @@ Each favorite container has an `actions` array of blueprint-action objects. Acti
 
 When an action button is clicked, the frontend calls `POST /api/blueprints/spawn` with `{name: act.blueprint, context: {container: "<fav-name>", ...act.context}}`. The container name is always injected automatically. New favorites default to an empty actions array.
 
-`POST /api/claude/terminal/create` passes its `cmd` query parameter through verbatim — no placeholder substitution is performed. To launch claude with the in-use credential, reference the main profile slot directly: `cmd=env CLAUDE_CONFIG_DIR=/profiles/main claude`. The main slot is populated by clicking "Set as in-use" in the Profile Manager, which copies the selected profile's `.credentials.json` into `/profiles/<main_profile_name>/`.
+`POST /api/claude/terminal/create` passes its `cmd` query parameter through verbatim — no placeholder substitution is performed. To launch claude with the in-use credential, reference the main profile slot directly: `cmd=env CLAUDE_CONFIG_DIR=/profiles/<main_profile_name> claude` (resolve the slot name first via `GET /api/profiles/main`; defaults to `main`). The main slot is populated by clicking "Set as in-use" in the Profile Manager, which copies the selected profile's `.credentials.json` into `/profiles/<main_profile_name>/`.
 
 ## Canvas Claude MCP Tools
 
@@ -180,7 +180,7 @@ The Canvas Claude card (`claude_rts/mcp_server.py`) exposes a JSON-RPC stdio MCP
 
 | Tool | Wraps | Purpose |
 |---|---|---|
-| `open_terminal` | `POST /api/claude/terminal/create` | Spawn a new terminal card (supports `x, y, w, h, container, hub`). `cmd` is passed through verbatim; reference `/profiles/main` directly to use the in-use credential. |
+| `open_terminal` | `POST /api/claude/terminal/create` | Spawn a new terminal card (supports `x, y, w, h, container, hub`). `cmd` is passed through verbatim; reference `/profiles/<main_profile_name>` directly to use the in-use credential (resolve the slot name via `GET /api/profiles/main`; defaults to `main`). |
 | `read_terminal` | `GET /api/claude/terminal/{id}/read` | Read scrollback (default: strip ANSI) |
 | `write_terminal` | `POST /api/claude/terminal/{id}/send` | Write keystrokes to a terminal |
 | `list_terminals` | `GET /api/claude/terminals` | List active terminal cards |

@@ -14,7 +14,7 @@ The blueprint system solves this by providing a declarative, replayable artifact
 
 - **Start/stop containers** via `POST /api/vms/{name}/start|stop`
 - **Discover containers** via `GET /api/vms/discover`
-- **Spawn terminal cards** via `POST /api/claude/terminal/create` with `cmd`, `hub`, `container`, layout params (cmd is passed through verbatim — no placeholder interpolation; reference `/profiles/main` directly, see #163)
+- **Spawn terminal cards** via `POST /api/claude/terminal/create` with `cmd`, `hub`, `container`, layout params (cmd is passed through verbatim — no placeholder interpolation; reference `/profiles/<main_profile_name>` directly, resolve slot name via `GET /api/profiles/main`, defaults to `main`, see #163)
 - **Spawn Canvas Claude cards** via `POST /api/canvas-claude/create` with `profile`, `container`, layout params
 - **Read main profile slot** via `GET /api/profiles/main` (returns `{main_profile_name, exists}`; renamed from `/api/profiles/priority` in #163)
 - **EventBus** emits `card:registered` / `card:unregistered` events and fans out to `/ws/control` WebSocket clients
