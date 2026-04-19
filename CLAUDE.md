@@ -4,10 +4,16 @@ RTS-style terminal canvas — devcontainer shells as draggable, resizable cards 
 
 ## Server Rule
 
-**Never run more than one server instance at a time.** Before starting a server, kill any existing one:
+**Never run more than one server instance at a time.** Before starting a server, kill any existing one. The devcontainer has no `pkill`/`fuser`/`killall`, so scan `/proc` directly:
 
 ```bash
-netstat -ano | grep "LISTENING" | grep -E ":300[0-9] " | awk '{print $NF}' | sort -u | while read pid; do taskkill //F //PID $pid 2>/dev/null; done
+for pid in $(ls /proc/ | grep -E '^[0-9]+$'); do
+  cmd=$(cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ')
+  echo "$cmd" | grep -q "python -m claude_rts" && kill "$pid"
+done
+sleep 1
+# verify port 3000 is clear (0BB8 = 3000, 0A = LISTEN)
+cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk '$2 ~ /:0BB8$/ && $4 == "0A"'
 ```
 
 Verify the port is free before starting. Running multiple instances causes port conflicts, confusing log output, and stale probe sessions.

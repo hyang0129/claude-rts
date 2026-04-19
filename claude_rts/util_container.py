@@ -114,15 +114,11 @@ async def start_container(app_config: AppConfig) -> bool:
     if not await build_image(app_config):
         return False
 
-    # Build mount args — always bind-mount mcp_server.py so the container
-    # has the latest tool definitions without an image rebuild.
+    # mcp_server.py is synced into the container via `docker cp` in
+    # CanvasClaudeCard._sync_mcp_server on each card start — not bind-mounted.
+    # A bind mount on a single file caused a WSL/Docker Desktop quirk where
+    # docker cp against the mount point turned it into a directory.
     mount_args = ""
-    if MCP_SERVER_PY.exists():
-        mcp_src = MCP_SERVER_PY.as_posix()
-        mount_args += f' -v "{mcp_src}:{CONTAINER_MCP_PATH}"'
-        logger.info("Mounting mcp_server.py {} -> {}", mcp_src, CONTAINER_MCP_PATH)
-    else:
-        logger.warning("mcp_server.py not found at {}, container will lack MCP tools", MCP_SERVER_PY)
 
     for host_path, container_path in cfg["mounts"].items():
         # Expand ~ in host path and normalize to forward slashes for Docker
@@ -288,10 +284,7 @@ async def discover_profiles(app_config: AppConfig) -> list[str]:
 
 
 async def _mounts_match(app_config: AppConfig) -> bool:
-    """Return True if the running container's bind mounts match the configured mounts.
-
-    Checks both user-configured mounts and the hardcoded mcp_server.py mount.
-    """
+    """Return True if the running container's bind mounts match the configured mounts."""
     cfg = _get_config(app_config)
     rc, stdout, _ = await _run(f'{_DOCKER} inspect {cfg["name"]} --format "{{{{json .Mounts}}}}"')
     if rc != 0:
@@ -300,16 +293,12 @@ async def _mounts_match(app_config: AppConfig) -> bool:
     actual_bind = {m["Destination"]: pathlib.Path(m["Source"]) for m in mounts if m.get("Type") == "bind"}
     actual_vol = {m["Destination"]: m["Name"] for m in mounts if m.get("Type") == "volume"}
 
-    # Check the hardcoded mcp_server.py mount
-    if MCP_SERVER_PY.exists():
-        if actual_bind.get(CONTAINER_MCP_PATH) != MCP_SERVER_PY:
-            logger.debug(
-                "_mounts_match: {} expected {} got {}",
-                CONTAINER_MCP_PATH,
-                MCP_SERVER_PY,
-                actual_bind.get(CONTAINER_MCP_PATH),
-            )
-            return False
+    # If a prior container version bind-mounted mcp_server.py, the new container
+    # spec no longer does — treat any stale mcp_server.py bind as a mismatch so
+    # the container is recreated.
+    if CONTAINER_MCP_PATH in actual_bind:
+        logger.debug("_mounts_match: stale mcp_server.py bind mount — will recreate")
+        return False
 
     for host_path, container_path in cfg["mounts"].items():
         expanded = pathlib.Path(host_path.replace("~", str(pathlib.Path.home())))

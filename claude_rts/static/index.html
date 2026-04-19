@@ -2404,7 +2404,11 @@ const WIDGET_REGISTRY = {
           } else {
             html += '<td colspan="4" style="padding:4px 6px;color:#a6adc8;font-style:italic">Probing…</td>';
           }
-          html += `<td style="padding:4px 6px;text-align:center"><button data-set-main="${esc(p.profile)}" style="background:none;border:1px solid #45475a;color:#cdd6f4;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px">Set as in-use</button></td>`;
+          if (p.is_main) {
+            html += `<td style="padding:4px 6px;text-align:center"><button disabled style="background:none;border:1px solid #a6e3a1;color:#a6e3a1;border-radius:4px;padding:2px 8px;font-size:11px;cursor:default">In Use ✓</button></td>`;
+          } else {
+            html += `<td style="padding:4px 6px;text-align:center"><button data-set-main="${esc(p.profile)}" style="background:none;border:1px solid #45475a;color:#cdd6f4;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px">Set as in-use</button></td>`;
+          }
           html += '</tr>';
         }
         html += '</table>';

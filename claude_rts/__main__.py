@@ -145,7 +145,7 @@ def main():
         app.on_startup.append(open_browser)
 
     logger.info("Press Ctrl+C to stop")
-    web.run_app(app, host="localhost", port=args.port, print=None)
+    web.run_app(app, host="127.0.0.1", port=args.port, print=None)
 
 
 if __name__ == "__main__":

@@ -628,6 +628,7 @@ async def profiles_list_handler(request: web.Request) -> web.Response:
     registry: ServiceCardRegistry = request.app["service_card_registry"]
     config = read_config(app_config)
     main_profile_name = config.get("main_profile_name") or "main"
+    active_main_source = config.get("active_main_source")
 
     # Merge discovered profiles with any manually configured ones
     discovered = request.app.get("discovered_profiles", [])
@@ -637,12 +638,7 @@ async def profiles_list_handler(request: web.Request) -> web.Response:
     profiles = []
     for profile in probe_profiles:
         card = registry.get("claude-usage", profile)
-        # main_profile_name is carried on every entry so frontend renders can
-        # surface the slot name without a second round-trip to /api/profiles/main.
-        # (A per-entry "is_main" boolean was considered but would always be false
-        # — the main slot is a copy destination, not a tracked profile — so it
-        # was dropped as dead payload. See issue #163 review.)
-        entry = {"profile": profile, "main_profile_name": main_profile_name}
+        entry = {"profile": profile, "main_profile_name": main_profile_name, "is_main": profile == active_main_source}
         if card and card.last_result:
             r = card.last_result
             entry.update(
@@ -707,7 +703,8 @@ async def main_profile_get_handler(request: web.Request) -> web.Response:
         logger.debug("main_profile_get: exists-check failed ({}); reporting exists=False", exc)
         exists = False
 
-    return web.json_response({"main_profile_name": name, "exists": exists})
+    active_source = config.get("active_main_source")
+    return web.json_response({"main_profile_name": name, "exists": exists, "active_main_source": active_source})
 
 
 async def main_profile_set_handler(request: web.Request) -> web.Response:
@@ -715,11 +712,13 @@ async def main_profile_set_handler(request: web.Request) -> web.Response:
 
     Body: {"source_profile": "<tracked-name>"}
 
-    Copies only the credentials file (.credentials.json) from
-    /profiles/<source> into /profiles/<main_profile_name>/. Session history,
-    settings, and other state in the main slot are preserved. Running PTY
-    sessions are not restarted — they will pick up the new credential on
-    their next Claude API call.
+    Copies .credentials.json and .claude.json from /profiles/<source> into
+    /profiles/<main_profile_name>/ so the main slot inherits both auth and
+    the source's onboarding/identity state (userID, oauthAccount, theme,
+    hasCompletedOnboarding). Without .claude.json, Claude shows its first-
+    run theme picker because the main slot has credentials but no identity.
+    Running PTY sessions are not restarted — they will pick up the new
+    credential on their next Claude API call.
     """
     app_config: AppConfig = request.app["app_config"]
     try:
@@ -751,12 +750,15 @@ async def main_profile_set_handler(request: web.Request) -> web.Response:
     if source == main_name:
         raise web.HTTPBadRequest(text=f"Cannot promote the main slot '{main_name}' into itself")
 
-    # Copy the credential file inside the util container. `cp -f` overwrites
-    # atomically from the perspective of each read call. Directory is created
-    # first so a fresh main slot works on first promotion.
+    # Copy the credential + identity files inside the util container. `cp -f`
+    # overwrites atomically from the perspective of each read call. Directory
+    # is created first so a fresh main slot works on first promotion.
+    # .claude.json is best-effort — a freshly-authed profile may not have one
+    # yet, in which case the main slot keeps whatever was there before.
     copy_cmd = (
         f"sh -c 'mkdir -p /profiles/{main_name} && "
-        f"cp -f /profiles/{source}/.credentials.json /profiles/{main_name}/.credentials.json'"
+        f"cp -f /profiles/{source}/.credentials.json /profiles/{main_name}/.credentials.json && "
+        f"(cp -f /profiles/{source}/.claude.json /profiles/{main_name}/.claude.json || true)'"
     )
     try:
         rc, stdout = await exec_in_util(app_config, copy_cmd, timeout=10)
@@ -766,6 +768,8 @@ async def main_profile_set_handler(request: web.Request) -> web.Response:
         logger.warning("main_profile_set: copy failed (rc={}): {}", rc, stdout)
         raise web.HTTPInternalServerError(text=f"Failed to copy credentials from '{source}' into main slot")
 
+    config["active_main_source"] = source
+    write_config(app_config, config)
     logger.info("main_profile_set: promoted '{}' into main slot '{}'", source, main_name)
     return web.json_response({"main_profile_name": main_name, "source_profile": source, "status": "ok"})
 
