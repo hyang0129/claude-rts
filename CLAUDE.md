@@ -58,7 +58,7 @@ To add a new preset: create a directory under `dev_presets/` with a `config.json
 |--------|---------|
 | `default` | Bare util-terminal + empty probe-qa canvas |
 | `profiles` | Profile Manager widget pre-placed on canvas |
-| `start-claude` | Start Claude button QA — main profile slot (`main_profile_name: "main"`), Profile Manager widget on canvas. `/profiles/main/.credentials.json` is **not** pre-populated; promote `test-profile` via "Set as in-use" before clicking Start Claude, or the button surfaces the "no credentials yet" warning. **Note:** this preset does not mount the `claude-profiles` named volume into the util container, so `/profiles` inside the util container is `root:root 755`; writes require running as root (e.g. `docker exec --user root`). |
+| `start-claude` | Start Claude button QA — main profile slot (`main_profile_name: "main"`), Profile Manager widget on canvas. `/profiles/main/.credentials.json` is **not** pre-populated; promote `test-profile` via "Set as in-use" before clicking Start Claude, or the button surfaces the "no credentials yet" warning. The preset mounts `claude-profiles:/profiles` so credentials persist across preset restarts — delete the named volume (`docker volume rm claude-profiles`) to reset to a clean state. |
 | `stress-test` | Layout QA — 6 cards at edge positions, varying sizes, overlapping z-order |
 | `claude-api` | Claude terminal control API QA — empty canvas for programmatic terminal lifecycle |
 
@@ -85,7 +85,7 @@ The devcontainer is configured to run the full E2E suite including Docker-gated 
   ```bash
   pip install -e ".[e2e]" && python -m playwright install chromium
   ```
-- **Docker-gated helpers** (`_ensure_util_profile`, `_clear_main_slot`): These helpers use `--user root` when writing to `/profiles` inside the util container. In `--dev-config` mode the `claude-profiles` named volume is **not** mounted, so `/profiles` is `root:root 755` and only writable as root.
+- **Docker-gated helpers** (`_ensure_util_profile`, `_clear_main_slot`): These helpers use `--user root` when writing to `/profiles` inside the util container. `--user root` is used defensively because `/profiles` may be owned by `root:root` inside the named volume on first creation (Docker initialises named-volume directories from the image filesystem, which may set the directory to `root:root 755`); running as root ensures writes succeed regardless of volume state.
 - **Stale util container state**: The util container persists `/profiles` between test runs. Tests that depend on the main slot being empty must call `_clear_main_slot()` at the start (see `test_no_main_credentials_shows_warning`).
 
 | File | Tests | What it covers |
