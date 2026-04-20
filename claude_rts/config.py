@@ -5,6 +5,7 @@ Config file: ~/.supreme-claudemander/config.json
 Canvas layouts: ~/.supreme-claudemander/canvases/{name}.json
 """
 
+import copy
 import json
 import os
 import pathlib
@@ -129,8 +130,10 @@ def read_config(app_config: AppConfig) -> dict:
     else:
         data = {}
 
-    # Merge defaults for any missing keys
-    merged = {**DEFAULT_CONFIG, **data}
+    # Merge defaults for any missing keys.
+    # Deep-copy DEFAULT_CONFIG so callers cannot mutate the global default
+    # (e.g. by appending to nested lists like container_manager.favorites).
+    merged = {**copy.deepcopy(DEFAULT_CONFIG), **data}
     return merged
 
 
