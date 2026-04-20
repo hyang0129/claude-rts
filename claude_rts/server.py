@@ -254,9 +254,84 @@ async def vm_start_handler(request: web.Request) -> web.Response:
     return web.json_response({"name": name, "state": "online"})
 
 
+async def _require_canvas_claude_owned(request: web.Request, name: str) -> web.Response | None:
+    """Guard: if the request originates from Canvas Claude (MCP), verify the container
+    carries the Docker label ``created_by=canvas-claude``. Returns a 403 JSON response
+    if the guard rejects, 500 if ``docker inspect`` fails, or None if the request is
+    allowed (either not Canvas-Claude-originated, or label matches).
+
+    Origin signal: query param ``via=canvas-claude`` OR header ``X-Canvas-Claude-Spawner``.
+    Human UI requests do NOT set these and bypass the guard entirely.
+    """
+    via = request.query.get("via", "").strip().lower()
+    spawner_hdr = request.headers.get("X-Canvas-Claude-Spawner", "").strip()
+    is_canvas_claude = via == "canvas-claude" or bool(spawner_hdr)
+    if not is_canvas_claude:
+        return None
+
+    # Test-mode hook: label lookup table keyed by container name
+    test_labels = request.app.get("_test_vm_labels")
+    if test_labels is not None:
+        label = test_labels.get(name, {}).get("created_by")
+        if label != "canvas-claude":
+            return web.json_response(
+                {"error": "not_canvas_claude_owned", "container": name},
+                status=403,
+            )
+        return None
+
+    # Real Docker path: inspect the container's created_by label
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _DOCKER_CMD,
+            "inspect",
+            "--format",
+            '{{index .Config.Labels "created_by"}}',
+            "--",
+            name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+    except Exception as exc:
+        logger.warning("created_by guard: docker inspect failed for '{}': {}", name, exc)
+        return web.json_response(
+            {"error": "docker_inspect_failed", "container": name, "detail": str(exc)},
+            status=500,
+        )
+    if proc.returncode != 0:
+        err = stderr.decode().strip() if stderr else "docker inspect failed"
+        logger.warning("created_by guard: docker inspect failed for '{}': {}", name, err)
+        return web.json_response(
+            {"error": "docker_inspect_failed", "container": name, "detail": err},
+            status=500,
+        )
+    label = stdout.decode().strip()
+    # `docker inspect --format '{{index .Config.Labels "created_by"}}'` returns
+    # the literal string "<no value>" when the label is missing.
+    if label != "canvas-claude":
+        logger.info(
+            "created_by guard: rejected Canvas-Claude stop of '{}' (label={!r})",
+            name,
+            label,
+        )
+        return web.json_response(
+            {"error": "not_canvas_claude_owned", "container": name},
+            status=403,
+        )
+    return None
+
+
 async def vm_stop_handler(request: web.Request) -> web.Response:
     """Stop a running Docker container by name."""
     name = request.match_info["name"]
+
+    # Authorization guard: when the request originates from Canvas Claude (MCP),
+    # enforce that the container was created by Canvas Claude. Human UI calls do
+    # NOT set the origin signal and are unaffected.
+    guard_resp = await _require_canvas_claude_owned(request, name)
+    if guard_resp is not None:
+        return guard_resp
 
     # In test mode, flip mock container state instead of calling Docker
     test_containers = request.app.get("_test_vm_containers")

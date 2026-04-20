@@ -540,7 +540,7 @@ def test_vm_start_container_missing_name():
 
 
 def test_vm_stop_container_calls_rest():
-    """vm_stop_container POSTs to /api/vms/{name}/stop."""
+    """vm_stop_container POSTs to /api/vms/{name}/stop with via=canvas-claude."""
     mock_resp = make_mock_response({"name": "foo-dev", "state": "offline"})
     with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
         result = tool_vm_stop_container({"name": "foo-dev"})
@@ -548,7 +548,8 @@ def test_vm_stop_container_calls_rest():
     req = mock_open.call_args[0][0]
     assert req.method == "POST"
     assert "/api/vms/foo-dev/stop" in req.full_url
-    assert "timeout=" not in req.full_url
+    # Guard origin signal must be present so server enforces created_by label
+    assert "via=canvas-claude" in req.full_url
 
 
 def test_vm_stop_container_with_timeout():
@@ -558,6 +559,36 @@ def test_vm_stop_container_with_timeout():
         tool_vm_stop_container({"name": "foo-dev", "timeout": 30})
     req = mock_open.call_args[0][0]
     assert "timeout=30" in req.full_url
+    assert "via=canvas-claude" in req.full_url
+
+
+def test_vm_stop_container_always_sends_origin_signal():
+    """vm_stop_container MUST carry via=canvas-claude so the server enforces
+    the created_by=canvas-claude Docker-label guard. Regression guard for #200."""
+    mock_resp = make_mock_response({"name": "foo", "state": "offline"})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        tool_vm_stop_container({"name": "foo"})
+    req = mock_open.call_args[0][0]
+    assert "via=canvas-claude" in req.full_url
+
+
+def test_vm_stop_container_propagates_403_guard_rejection():
+    """When the server returns 403 not_canvas_claude_owned, the MCP tool surfaces
+    the error instead of reporting success."""
+    import urllib.error
+
+    err_body = json.dumps({"error": "not_canvas_claude_owned", "container": "foo"}).encode()
+    http_err = urllib.error.HTTPError(
+        url="http://x/api/vms/foo/stop",
+        code=403,
+        msg="Forbidden",
+        hdrs=None,
+        fp=None,
+    )
+    http_err.read = lambda: err_body  # type: ignore[assignment]
+    with patch("urllib.request.urlopen", side_effect=http_err):
+        with pytest.raises(RuntimeError, match="403"):
+            tool_vm_stop_container({"name": "foo"})
 
 
 def test_vm_stop_container_missing_name():
