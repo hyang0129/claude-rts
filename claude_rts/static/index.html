@@ -1108,7 +1108,8 @@ class Card {
     this._cancelDrag = null;
     this._cancelResize = null;
     // Issue #151: card starring, rename, recovery, stable identity
-    this.starred = true;        // starred by default — all cards resume on reload
+    // Issue #194: unstarred by default — users explicitly star cards they want to persist
+    this.starred = false;       // unstarred by default; unstarred cards are not saved in layout
     this.displayName = '';       // user-friendly label (empty = use hub/container name)
     this.recoveryScript = '';    // shell command(s) to re-run on demand
     this.cardUid = '';           // stable UUID across restarts, generated once at creation
@@ -1135,7 +1136,7 @@ class Card {
     const starBtn = document.createElement('button');
     starBtn.className = 'star-btn';
     starBtn.dataset.star = this.id;
-    starBtn.title = this.starred ? 'Starred — will resume on reload' : 'Unstarred — dormant on reload';
+    starBtn.title = this.starred ? 'Starred — will persist across reload' : 'Unstarred — will not persist across reload';
     starBtn.textContent = this.starred ? '\u2605' : '\u2606';
     starBtn.style.cssText = 'background:none;border:none;cursor:pointer;font-size:14px;padding:0 4px;color:' + (this.starred ? '#f9e2af' : '#585b70');
     starBtn.addEventListener('click', (e) => {
@@ -1143,7 +1144,7 @@ class Card {
       this.starred = !this.starred;
       starBtn.textContent = this.starred ? '\u2605' : '\u2606';
       starBtn.style.color = this.starred ? '#f9e2af' : '#585b70';
-      starBtn.title = this.starred ? 'Starred — will resume on reload' : 'Unstarred — dormant on reload';
+      starBtn.title = this.starred ? 'Starred — will persist across reload' : 'Unstarred — will not persist across reload';
       saveLayout();
     });
     titlebar.appendChild(starBtn);
@@ -3381,10 +3382,12 @@ let currentCanvasName = 'main';
 let canvasList = [];  // list of available canvas names
 
 function saveLayout() {
+  // Issue #194: only starred cards persist across reload — unstarred cards are
+  // ephemeral and excluded from the saved layout.
   const data = {
     name: currentCanvasName,
     canvas_size: [CANVAS_W, CANVAS_H],
-    cards: cards.map(c => c.serialize()),
+    cards: cards.filter(c => c.starred).map(c => c.serialize()),
   };
   fetch(`/api/canvases/${encodeURIComponent(currentCanvasName)}`, {
     method: 'PUT',
