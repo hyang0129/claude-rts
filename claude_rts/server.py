@@ -463,56 +463,131 @@ async def container_create_handler(request: web.Request) -> web.Response:
         **cap_kwargs,
     )
 
-    # Test-mode hook: bypass the real subprocess call.
-    test_create = request.app.get("_test_container_create")
-    if test_create is not None:
-        # Record the spec for assertions.
-        test_create.setdefault("calls", []).append(
+    # ── 4-container global cap (#205) ─────────────────────────────────────
+    # Mirrors the 10-terminal cap pattern at ``claude_terminal_create``: the
+    # lock is held across the count-check + creation so concurrent requests
+    # cannot race past the cap. The cap counts only containers stamped with
+    # ``created_by=canvas-claude``; human-created containers are excluded.
+    max_containers = int(cfg.get("container_manager", {}).get("max_containers", 4))
+    create_lock: asyncio.Lock = request.app["container_create_lock"]
+    async with create_lock:
+        existing_names, count_err = await _count_canvas_claude_containers(request.app)
+        if count_err is not None:
+            return count_err
+        if len(existing_names) >= max_containers:
+            return web.json_response(
+                {
+                    "error": "container_cap_reached",
+                    "message": (
+                        f"Canvas Claude has reached the {max_containers}-container cap. "
+                        "Rebuild or remove one before creating another."
+                    ),
+                    "existing_container_ids": sorted(existing_names),
+                    "live_container_names": sorted(existing_names),
+                },
+                status=429,
+            )
+
+        # Test-mode hook: bypass the real subprocess call.
+        test_create = request.app.get("_test_container_create")
+        if test_create is not None:
+            # Record the spec for assertions.
+            test_create.setdefault("calls", []).append(
+                {
+                    "image": spec.image,
+                    "name": spec.name,
+                    "preset": spec.preset,
+                    "labels": dict(spec.labels),
+                    "devcontainer_json": spec.devcontainer_preset(),
+                }
+            )
+            if test_create.get("should_fail"):
+                return web.json_response(
+                    {"error": "creation_failed", "detail": test_create.get("error", "mock failure")},
+                    status=500,
+                )
+            # Register the new container in the test-labels map so subsequent
+            # count-checks (inside the same test) see it as canvas-claude-owned.
+            test_labels = request.app.get("_test_container_labels")
+            if test_labels is not None:
+                test_labels.setdefault(spec.name, {})["created_by"] = "canvas-claude"
+        else:
+            try:
+                await container_spec_mod.create(spec)
+            except RuntimeError as exc:
+                return web.json_response(
+                    {"error": "creation_failed", "detail": str(exc)},
+                    status=500,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("container_create: unexpected failure")
+                return web.json_response(
+                    {"error": "creation_failed", "detail": str(exc)},
+                    status=500,
+                )
+
+        # Auto-register as favorite (idempotent — skip if already present).
+        if "container_manager" not in cfg:
+            cfg["container_manager"] = {}
+        favorites = cfg["container_manager"].get("favorites", [])
+        if not any(f.get("name") == spec.name for f in favorites):
+            favorites.append({"name": spec.name, "type": "docker", "actions": []})
+            cfg["container_manager"]["favorites"] = favorites
+            write_config(app_config, cfg)
+
+        return web.json_response(
             {
-                "image": spec.image,
+                "container_id": spec.name,
                 "name": spec.name,
-                "preset": spec.preset,
-                "labels": dict(spec.labels),
-                "devcontainer_json": spec.devcontainer_preset(),
+                "image": spec.image,
+                "status": "created",
             }
         )
-        if test_create.get("should_fail"):
-            return web.json_response(
-                {"error": "creation_failed", "detail": test_create.get("error", "mock failure")},
-                status=500,
-            )
-    else:
-        try:
-            await container_spec_mod.create(spec)
-        except RuntimeError as exc:
-            return web.json_response(
-                {"error": "creation_failed", "detail": str(exc)},
-                status=500,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("container_create: unexpected failure")
-            return web.json_response(
-                {"error": "creation_failed", "detail": str(exc)},
-                status=500,
-            )
 
-    # Auto-register as favorite (idempotent — skip if already present).
-    if "container_manager" not in cfg:
-        cfg["container_manager"] = {}
-    favorites = cfg["container_manager"].get("favorites", [])
-    if not any(f.get("name") == spec.name for f in favorites):
-        favorites.append({"name": spec.name, "type": "docker", "actions": []})
-        cfg["container_manager"]["favorites"] = favorites
-        write_config(app_config, cfg)
 
-    return web.json_response(
-        {
-            "container_id": spec.name,
-            "name": spec.name,
-            "image": spec.image,
-            "status": "created",
-        }
-    )
+async def _count_canvas_claude_containers(
+    app: web.Application,
+) -> tuple[list[str], web.Response | None]:
+    """Return (names, error_response). Names are containers (running + stopped)
+    with the ``created_by=canvas-claude`` label. On docker failure, returns
+    ([], 500 response) — callers fail closed.
+
+    Test-mode path: when ``_test_container_labels`` is populated, derive the
+    count from that map so tests don't need to mock docker.
+    """
+    test_labels = app.get("_test_container_labels")
+    if test_labels is not None:
+        names = [name for name, entry in test_labels.items() if (entry or {}).get("created_by") == "canvas-claude"]
+        return names, None
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _DOCKER_CMD,
+            "ps",
+            "-a",
+            "--filter",
+            "label=created_by=canvas-claude",
+            "--format",
+            "{{.Names}}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("container_create: docker ps (cap count) failed: {}", exc)
+        return [], web.json_response(
+            {"error": "container_count_failed", "detail": str(exc)},
+            status=500,
+        )
+    if proc.returncode != 0:
+        err = stderr.decode().strip() if stderr else "docker ps failed"
+        logger.warning("container_create: docker ps (cap count) failed: {}", err)
+        return [], web.json_response(
+            {"error": "container_count_failed", "detail": err},
+            status=500,
+        )
+    names = [line.strip() for line in stdout.decode().splitlines() if line.strip()]
+    return names, None
 
 
 async def _inspect_container_for_rebuild(request: web.Request, name: str) -> tuple[dict | None, web.Response | None]:
@@ -2071,6 +2146,9 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app["canvas_claude_spawns"]: dict[str, set[str]] = {}
     # Per-spawner asyncio.Lock to make the cap-check+add atomic
     app["canvas_claude_spawn_locks"]: dict[str, asyncio.Lock] = {}
+    # Global lock for the 4-container cap (#205): serialises the count-check +
+    # create so concurrent requests can't race past the cap.
+    app["container_create_lock"] = asyncio.Lock()
     # Pending ephemeral timeout tasks keyed by session_id
     app["ephemeral_timers"]: dict[str, asyncio.Task] = {}
 
