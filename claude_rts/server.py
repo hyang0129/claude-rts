@@ -872,13 +872,85 @@ async def probe_claude_usage_handler(request: web.Request) -> web.Response:
 # ── Production Claude terminal control API ─────────────────────────────────
 
 
+async def _ephemeral_timeout_watcher(session_id: str, timeout_seconds: int, mgr: SessionManager) -> None:
+    """Sleep ``timeout_seconds`` then destroy the ephemeral session if still alive."""
+    await asyncio.sleep(timeout_seconds)
+    session = mgr.get_session(session_id)
+    if session is not None and session.alive:
+        logger.info("Ephemeral timeout: destroying session {} after {}s", session_id, timeout_seconds)
+        mgr.destroy_session(session_id)
+
+
 async def claude_terminal_create(request: web.Request) -> web.Response:
-    """POST /api/claude/terminal/create — create a TerminalCard + PTY session."""
+    """POST /api/claude/terminal/create — create a TerminalCard + PTY session.
+
+    New query params (all optional):
+      - ``ephemeral`` — ``"true"`` / ``"false"`` (default false). When true the
+        session is NOT registered in CardRegistry (no visible card, no
+        card:registered broadcast).  read/write/delete_terminal still work via
+        session_id.
+      - ``spawner_id`` — card id of the Canvas Claude card that owns this
+        terminal. When set, the spawn counts toward the per-spawner cap (10).
+      - ``timeout`` — integer seconds (default 60). Only meaningful when
+        ``ephemeral=true``; ignored for regular (non-ephemeral) terminals.
+        Must be in [1, 120].
+    """
     cmd = request.query.get("cmd", "").strip()
     hub = request.query.get("hub", "")
     container = request.query.get("container", "").strip()
     if not cmd:
         raise web.HTTPBadRequest(text="Missing 'cmd' query parameter")
+
+    ephemeral = request.query.get("ephemeral", "false").lower() in ("true", "1", "yes")
+    spawner_id = request.query.get("spawner_id", "").strip() or None
+
+    # Validate timeout.  Explicitly passing timeout without ephemeral=true is an
+    # error — the parameter has no effect on non-ephemeral terminals and silently
+    # accepting it would confuse callers.
+    timeout_raw = request.query.get("timeout", "60")
+    try:
+        timeout = int(timeout_raw)
+    except ValueError:
+        raise web.HTTPBadRequest(text="'timeout' must be an integer")
+
+    if "timeout" in request.query and not ephemeral:
+        return web.json_response(
+            {
+                "error": "timeout_requires_ephemeral",
+                "message": (
+                    "timeout is only meaningful with ephemeral=true. "
+                    "Use run_task (ephemeral) for timed ops, or open_terminal without timeout for visible terminals."
+                ),
+            },
+            status=400,
+        )
+
+    if ephemeral:
+        if timeout < 1:
+            return web.json_response(
+                {
+                    "error": "ephemeral_timeout_too_long",
+                    "message": (
+                        "timeout must be at least 1 second for ephemeral terminals. "
+                        "Use open_terminal for long-running work."
+                    ),
+                    "max_allowed": 120,
+                },
+                status=400,
+            )
+        if timeout > 120:
+            return web.json_response(
+                {
+                    "error": "ephemeral_timeout_too_long",
+                    "message": (
+                        "Timeout > 120s is not permitted for ephemeral terminals — "
+                        "ephemeral terminals are for short-running operations (ls, git pull, probes). "
+                        "Use open_terminal for longer work."
+                    ),
+                    "max_allowed": 120,
+                },
+                status=400,
+            )
 
     try:
         cols = int(request.query.get("cols", 80))
@@ -899,20 +971,119 @@ async def claude_terminal_create(request: web.Request) -> web.Response:
 
     mgr: SessionManager = request.app["session_manager"]
     card_registry: CardRegistry = request.app["card_registry"]
+    canvas_claude_spawns: dict[str, set[str]] = request.app["canvas_claude_spawns"]
+    canvas_claude_spawn_locks: dict[str, asyncio.Lock] = request.app["canvas_claude_spawn_locks"]
 
-    card = TerminalCard(
-        session_manager=mgr,
-        cmd=cmd,
-        hub=hub or None,
-        container=container or None,
-        layout=layout,
-    )
-    try:
-        await card.start()
-        card_registry.register(card)
-    except Exception:
-        logger.exception("claude_terminal_create: failed for cmd={!r}", cmd)
-        return web.json_response({"error": "Failed to spawn terminal"}, status=500)
+    # Cap enforcement: when spawner_id is set, refuse if 10 live sessions already.
+    # Acquire a per-spawner lock so the check+add is atomic across concurrent requests.
+    if spawner_id is not None:
+        spawner_lock = canvas_claude_spawn_locks.setdefault(spawner_id, asyncio.Lock())
+        async with spawner_lock:
+            live_ids = canvas_claude_spawns.get(spawner_id, set())
+            # Prune any session ids that are no longer alive
+            live_ids = {sid for sid in live_ids if mgr.get_session(sid) is not None}
+            canvas_claude_spawns[spawner_id] = live_ids
+            if len(live_ids) >= 10:
+                return web.json_response(
+                    {
+                        "error": "terminal_cap_reached",
+                        "message": (
+                            "Canvas Claude has reached the 10 live terminal cap. Close one before spawning another."
+                        ),
+                        "live_session_ids": sorted(live_ids),
+                    },
+                    status=429,
+                )
+
+            # --- Spawn inside the lock so the new session_id is added before release ---
+            if ephemeral:
+                try:
+                    session = mgr.create_session(
+                        cmd,
+                        hub=hub or None,
+                        container=container or None,
+                        dimensions=(rows, cols),
+                        kind="probe",
+                    )
+                except Exception:
+                    logger.exception("claude_terminal_create (ephemeral): failed for cmd={!r}", cmd)
+                    return web.json_response({"error": "Failed to spawn terminal"}, status=500)
+
+                session_id = session.session_id
+                canvas_claude_spawns.setdefault(spawner_id, set()).add(session_id)
+            else:
+                card = TerminalCard(
+                    session_manager=mgr,
+                    cmd=cmd,
+                    hub=hub or None,
+                    container=container or None,
+                    layout=layout,
+                )
+                try:
+                    await card.start()
+                    card_registry.register(card)
+                except Exception:
+                    logger.exception("claude_terminal_create: failed for cmd={!r}", cmd)
+                    return web.json_response({"error": "Failed to spawn terminal"}, status=500)
+                canvas_claude_spawns.setdefault(spawner_id, set()).add(card.session_id)
+        # Lock released — fall through to common post-spawn logic below.
+    else:
+        # No spawner_id: no cap enforcement, no lock needed.
+        if ephemeral:
+            try:
+                session = mgr.create_session(
+                    cmd,
+                    hub=hub or None,
+                    container=container or None,
+                    dimensions=(rows, cols),
+                    kind="probe",
+                )
+            except Exception:
+                logger.exception("claude_terminal_create (ephemeral): failed for cmd={!r}", cmd)
+                return web.json_response({"error": "Failed to spawn terminal"}, status=500)
+        else:
+            card = TerminalCard(
+                session_manager=mgr,
+                cmd=cmd,
+                hub=hub or None,
+                container=container or None,
+                layout=layout,
+            )
+            try:
+                await card.start()
+                card_registry.register(card)
+            except Exception:
+                logger.exception("claude_terminal_create: failed for cmd={!r}", cmd)
+                return web.json_response({"error": "Failed to spawn terminal"}, status=500)
+
+    # --- Common post-spawn logic ---
+    if ephemeral:
+        session_id = session.session_id  # type: ignore[possibly-undefined]
+
+        # Schedule timeout watcher
+        timer_task = asyncio.create_task(
+            _ephemeral_timeout_watcher(session_id, timeout, mgr),
+            name=f"ephemeral-timeout-{session_id}",
+        )
+        request.app["ephemeral_timers"][session_id] = timer_task
+
+        logger.info(
+            "claude_terminal_create: ephemeral session {} created for cmd={!r} (timeout={}s, spawner={})",
+            session_id,
+            cmd,
+            timeout,
+            spawner_id,
+        )
+        return web.json_response(
+            {
+                "session_id": session_id,
+                "ephemeral": True,
+                "cmd": cmd,
+            }
+        )
+
+    # --- Non-ephemeral response ---
+    card = card  # type: ignore[possibly-undefined]
 
     # Resize if non-default dimensions requested
     if cols != 80 or rows != 24:
@@ -928,33 +1099,54 @@ async def claude_terminal_create(request: web.Request) -> web.Response:
 
 
 async def claude_terminal_send(request: web.Request) -> web.Response:
-    """POST /api/claude/terminal/{id}/send — write text to PTY."""
+    """POST /api/claude/terminal/{id}/send — write text to PTY.
+
+    Works for both regular (card-registered) and ephemeral (session-only) terminals.
+    The ``{id}`` path segment is the session_id in both cases.
+    """
     card_id = request.match_info["id"]
     card_registry: CardRegistry = request.app["card_registry"]
+    mgr: SessionManager = request.app["session_manager"]
+
     card = card_registry.get_terminal(card_id)
-    if not card or not card.alive:
-        raise web.HTTPNotFound(text="Terminal not found")
+    if card and card.alive:
+        session = card.session
+    else:
+        # Fallback: check session_manager directly (ephemeral session)
+        session = mgr.get_session(card_id)
+        if not session or not session.alive:
+            raise web.HTTPNotFound(text="Terminal not found")
 
     text = await request.text()
-    card.session.pty.write(text)
+    session.pty.write(text)
     # Touch last_client_time to prevent orphan reaping
-    card.session.last_client_time = time.monotonic()
+    session.last_client_time = time.monotonic()
 
     return web.json_response({"status": "ok", "sent": len(text)})
 
 
 async def claude_terminal_read(request: web.Request) -> web.Response:
-    """GET /api/claude/terminal/{id}/read — return scrollback (optionally ANSI-stripped)."""
+    """GET /api/claude/terminal/{id}/read — return scrollback (optionally ANSI-stripped).
+
+    Works for both regular (card-registered) and ephemeral (session-only) terminals.
+    """
     card_id = request.match_info["id"]
     card_registry: CardRegistry = request.app["card_registry"]
+    mgr: SessionManager = request.app["session_manager"]
+
     card = card_registry.get_terminal(card_id)
-    if not card or not card.alive:
-        raise web.HTTPNotFound(text="Terminal not found")
+    if card and card.alive:
+        session = card.session
+    else:
+        # Fallback: check session_manager directly (ephemeral session)
+        session = mgr.get_session(card_id)
+        if not session or not session.alive:
+            raise web.HTTPNotFound(text="Terminal not found")
 
     # Touch last_client_time to prevent orphan reaping
-    card.session.last_client_time = time.monotonic()
+    session.last_client_time = time.monotonic()
 
-    data = card.session.scrollback.get_all()
+    data = session.scrollback.get_all()
     output = data.decode("utf-8", errors="replace")
 
     do_strip = request.query.get("strip_ansi", "").lower() in ("true", "1", "yes")
@@ -965,7 +1157,7 @@ async def claude_terminal_read(request: web.Request) -> web.Response:
         {
             "output": output,
             "size": len(data),
-            "total_written": card.session.scrollback.total_written,
+            "total_written": session.scrollback.total_written,
         }
     )
 
@@ -996,19 +1188,31 @@ async def claude_terminal_status(request: web.Request) -> web.Response:
 
 
 async def claude_terminal_delete(request: web.Request) -> web.Response:
-    """DELETE /api/claude/terminal/{id} — stop card, clean up."""
+    """DELETE /api/claude/terminal/{id} — stop card, clean up.
+
+    Works for both regular (card-registered) and ephemeral (session-only)
+    terminals.  For ephemerals the on_destroy hook handles spawner-set cleanup
+    and timer cancellation automatically.
+    """
     card_id = request.match_info["id"]
     card_registry: CardRegistry = request.app["card_registry"]
+    mgr: SessionManager = request.app["session_manager"]
 
     card = card_registry.get_terminal(card_id)
-    if not card:
+    if card:
+        # Regular terminal: stop via card lifecycle, then unregister
+        await card.stop()
+        card_registry.unregister(card_id)
+        logger.info("claude_terminal_delete: removed card {}", card_id)
+        return web.json_response({"status": "ok"})
+
+    # Ephemeral (or any) session not in card_registry — look up by session_id
+    session = mgr.get_session(card_id)
+    if not session:
         raise web.HTTPNotFound(text="Terminal not found")
 
-    # Stop card (destroys PTY via SessionManager)
-    await card.stop()
-    card_registry.unregister(card_id)
-
-    logger.info("claude_terminal_delete: removed {}", card_id)
+    mgr.destroy_session(card_id)
+    logger.info("claude_terminal_delete: destroyed ephemeral session {}", card_id)
     return web.json_response({"status": "ok"})
 
 
@@ -1438,6 +1642,12 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app["test_mode"] = test_mode
     app["discovered_profiles"] = []
     app["control_ws_clients"] = []
+    # Per-spawner live session tracking for Canvas Claude terminal cap
+    app["canvas_claude_spawns"]: dict[str, set[str]] = {}
+    # Per-spawner asyncio.Lock to make the cap-check+add atomic
+    app["canvas_claude_spawn_locks"]: dict[str, asyncio.Lock] = {}
+    # Pending ephemeral timeout tasks keyed by session_id
+    app["ephemeral_timers"]: dict[str, asyncio.Task] = {}
 
     # Static + API routes
     app.router.add_get("/", index_handler)
@@ -1532,6 +1742,43 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
 
         event_bus.subscribe("card:registered", _on_card_event)
         event_bus.subscribe("card:unregistered", _on_card_event)
+
+        # Wire SessionManager on_destroy → spawner tracking + timer cancellation
+        def _on_session_destroy(session_id: str, session) -> None:
+            """Prune destroyed session from spawner sets and cancel timeout timer."""
+            canvas_claude_spawns: dict[str, set[str]] = app["canvas_claude_spawns"]
+            for spawner_set in canvas_claude_spawns.values():
+                spawner_set.discard(session_id)
+
+            ephemeral_timers: dict[str, asyncio.Task] = app["ephemeral_timers"]
+            timer = ephemeral_timers.pop(session_id, None)
+            if timer is not None and not timer.done():
+                timer.cancel()
+
+        mgr.add_on_destroy(_on_session_destroy)
+
+        # On CanvasClaudeCard unregister: destroy all sessions owned by that spawner
+        async def _on_canvas_claude_unregistered(event_type: str, payload: dict) -> None:
+            if payload.get("card_type") != "canvas-claude":
+                return
+            spawner_id = payload.get("card_id")
+            if not spawner_id:
+                return
+            canvas_claude_spawns: dict[str, set[str]] = app["canvas_claude_spawns"]
+            owned = canvas_claude_spawns.pop(spawner_id, set())
+            # Remove the per-spawner lock entry (lock is never re-used after card removal)
+            app["canvas_claude_spawn_locks"].pop(spawner_id, None)
+            session_manager: SessionManager = app["session_manager"]
+            for sid in list(owned):
+                if session_manager.get_session(sid) is not None:
+                    logger.info(
+                        "canvas-claude unregistered: destroying session {} (spawner={})",
+                        sid,
+                        spawner_id,
+                    )
+                    session_manager.destroy_session(sid)
+
+        event_bus.subscribe("card:unregistered", _on_canvas_claude_unregistered)
 
         # Wire blueprint events → /ws/control broadcast
         async def _on_blueprint_event(event_type: str, payload: dict) -> None:

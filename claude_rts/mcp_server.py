@@ -36,7 +36,27 @@ def _resolve_api_base(argv: list[str] | None = None) -> str:
     return os.environ.get("SUPREME_CLAUDEMANDER_API", _DEFAULT_API_BASE)
 
 
+def _resolve_spawner_id(argv: list[str] | None = None) -> str | None:
+    """Resolve the spawner card ID from argv.
+
+    Looks for ``--spawner-id <id>`` or ``--spawner-id=<id>`` on the command
+    line.  Returns None if not provided — callers omit the query param when
+    no spawner is set (user-spawned terminals have no cap).
+    """
+    args = sys.argv[1:] if argv is None else argv
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--spawner-id" and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith("--spawner-id="):
+            return a.split("=", 1)[1]
+        i += 1
+    return None
+
+
 API_BASE = _resolve_api_base()
+SPAWNER_ID = _resolve_spawner_id()
 
 
 def read_message():
@@ -83,8 +103,79 @@ def tool_open_terminal(args):
     for key in ("hub", "container", "x", "y", "w", "h"):
         if key in args and args[key] is not None:
             params += f"&{key}={urllib.parse.quote(str(args[key]))}"
-    result = http_request("POST", f"/api/claude/terminal/create?{params}")
+    if SPAWNER_ID:
+        params += f"&spawner_id={urllib.parse.quote(SPAWNER_ID)}"
+    try:
+        result = http_request("POST", f"/api/claude/terminal/create?{params}")
+    except RuntimeError as e:
+        err_str = str(e)
+        if "429" in err_str:
+            # Try to parse structured error body
+            try:
+                body_start = err_str.find("{")
+                if body_start != -1:
+                    err_body = json.loads(err_str[body_start:])
+                    live = err_body.get("live_session_ids", [])
+                    return (
+                        f"Error: Terminal cap reached. You have {len(live)} live terminal(s) "
+                        f"from this Canvas Claude card (cap: 10). "
+                        f"Close some terminals first. Live session IDs: {live}"
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+        raise
     return f"Terminal created. session_id: {result.get('session_id')}"
+
+
+def tool_run_task(args):
+    """Run a short-running command in an ephemeral PTY (no visible card)."""
+    cmd = args.get("cmd", "")
+    if not cmd:
+        raise ValueError("cmd is required")
+    timeout = args.get("timeout", 60)
+    try:
+        timeout = int(timeout)
+    except (TypeError, ValueError):
+        raise ValueError("timeout must be an integer")
+    params = f"cmd={urllib.parse.quote(cmd)}&ephemeral=true&timeout={timeout}"
+    for key in ("hub", "container"):
+        if key in args and args[key] is not None:
+            params += f"&{key}={urllib.parse.quote(str(args[key]))}"
+    if SPAWNER_ID:
+        params += f"&spawner_id={urllib.parse.quote(SPAWNER_ID)}"
+    try:
+        result = http_request("POST", f"/api/claude/terminal/create?{params}")
+    except RuntimeError as e:
+        err_str = str(e)
+        if "400" in err_str:
+            try:
+                body_start = err_str.find("{")
+                if body_start != -1:
+                    err_body = json.loads(err_str[body_start:])
+                    if err_body.get("error") == "ephemeral_timeout_too_long":
+                        max_allowed = err_body.get("max_allowed", 120)
+                        return (
+                            f"Error: {err_body.get('message', 'Timeout too long')} "
+                            f"(max_allowed={max_allowed}). "
+                            f"Use open_terminal for commands that need longer than {max_allowed}s."
+                        )
+            except Exception:  # noqa: BLE001
+                pass
+        if "429" in err_str:
+            try:
+                body_start = err_str.find("{")
+                if body_start != -1:
+                    err_body = json.loads(err_str[body_start:])
+                    live = err_body.get("live_session_ids", [])
+                    return (
+                        f"Error: Terminal cap reached. You have {len(live)} live terminal(s) "
+                        f"from this Canvas Claude card (cap: 10). "
+                        f"Close some terminals first. Live session IDs: {live}"
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+        raise
+    return f"Ephemeral task started. session_id: {result.get('session_id')} (timeout: {timeout}s)"
 
 
 def tool_read_terminal(args):
@@ -362,6 +453,7 @@ def tool_blueprint_spawn(args):
 
 TOOL_HANDLERS = {
     "open_terminal": tool_open_terminal,
+    "run_task": tool_run_task,
     "read_terminal": tool_read_terminal,
     "write_terminal": tool_write_terminal,
     "list_terminals": tool_list_terminals,
@@ -469,6 +561,57 @@ TOOL_SCHEMAS = [
                         "h=1200 for a very tall card. Combine with w for a 'big' terminal: "
                         "w=1200, h=800 gives a large card. w=1800, h=1400 fills most of "
                         "the canvas."
+                    ),
+                },
+            },
+            "required": ["cmd"],
+        },
+    },
+    {
+        "name": "run_task",
+        "description": (
+            "Run a short-running command in an ephemeral PTY (no visible card). "
+            "Default timeout 60s. Max timeout 120s — longer operations should use "
+            "`open_terminal` instead. Use for: ls, git pull, probes, one-shot checks. "
+            "The session is automatically destroyed when the command exits (PTY EOF) or "
+            "the timeout elapses, whichever comes first. Returns a session_id that can "
+            "be used with read_terminal / write_terminal / delete_terminal during the "
+            "session's lifetime. A per-Canvas-Claude cap of 10 live terminals applies "
+            "across both run_task and open_terminal — the 11th spawn returns an error "
+            "listing the live session IDs so you can close some first."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cmd": {
+                    "type": "string",
+                    "description": (
+                        "Command to run in the ephemeral terminal. When 'container' is "
+                        "also set, runs inside that Docker container via docker exec. "
+                        "Examples: 'ls -la', 'git pull', 'pytest tests/ -q'."
+                    ),
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": (
+                        "Seconds before the ephemeral session is force-destroyed. "
+                        "Default: 60. Max: 120. Values > 120 are rejected — use "
+                        "open_terminal for commands that need longer than 120s."
+                    ),
+                },
+                "container": {
+                    "type": "string",
+                    "description": (
+                        "Exact Docker container name to run the command in (optional). "
+                        "When set, cmd runs inside this container via docker exec. "
+                        "Use vm_discover_containers to find available container names."
+                    ),
+                },
+                "hub": {
+                    "type": "string",
+                    "description": (
+                        "Hub name for devcontainer-based sessions (optional). "
+                        "Usually not needed when using 'container' directly."
                     ),
                 },
             },

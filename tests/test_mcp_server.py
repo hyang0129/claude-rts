@@ -11,11 +11,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from claude_rts.mcp_server import (
     _DEFAULT_API_BASE,
     _resolve_api_base,
+    _resolve_spawner_id,
     handle_request,
     tool_delete_terminal,
     tool_list_terminals,
     tool_open_terminal,
     tool_read_terminal,
+    tool_run_task,
     tool_write_terminal,
     tool_rename_terminal,
     tool_set_recovery_script,
@@ -188,6 +190,7 @@ def test_handle_request_tools_list():
     names = {t["name"] for t in tools}
     assert names == {
         "open_terminal",
+        "run_task",
         "read_terminal",
         "write_terminal",
         "list_terminals",
@@ -416,7 +419,8 @@ def test_tools_list_includes_vm_and_blueprint_tools():
     assert "rename_terminal" in names
     assert "set_recovery_script" in names
     assert "get_recovery_script" in names
-    assert len(names) == 21
+    assert "run_task" in names
+    assert len(names) == 22
 
 
 # ── vm_get_container_actions ──────────────────────────────────────────────
@@ -818,3 +822,130 @@ def test_handle_request_tools_call_rename():
     assert resp["id"] == 99
     assert resp["result"]["isError"] is False
     assert "Test" in resp["result"]["content"][0]["text"]
+
+
+# ── _resolve_spawner_id tests (#193) ─────────────────────────────────────────
+
+
+def test_resolve_spawner_id_space_separated():
+    """--spawner-id <id> is parsed correctly."""
+    result = _resolve_spawner_id(["--spawner-id", "my-card-abc"])
+    assert result == "my-card-abc"
+
+
+def test_resolve_spawner_id_equals_form():
+    """--spawner-id=<id> is also recognised."""
+    result = _resolve_spawner_id(["--spawner-id=my-card-def"])
+    assert result == "my-card-def"
+
+
+def test_resolve_spawner_id_not_present():
+    """Without --spawner-id, returns None."""
+    result = _resolve_spawner_id(["--api-base", "http://x:3000"])
+    assert result is None
+
+
+def test_resolve_spawner_id_with_other_flags():
+    """--spawner-id parsed correctly when mixed with other flags."""
+    result = _resolve_spawner_id(["--api-base", "http://x:3000", "--spawner-id", "card-xyz", "--foo"])
+    assert result == "card-xyz"
+
+
+# ── tool_run_task tests (#193) ────────────────────────────────────────────────
+
+
+def test_tool_run_task_forwards_params():
+    """tool_run_task POSTs with ephemeral=true and correct timeout."""
+    mock_resp = make_mock_response({"session_id": "rts-ephemeral-1", "ephemeral": True})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_run_task({"cmd": "ls -la", "timeout": 30})
+    assert "rts-ephemeral-1" in result
+    call_args = mock_open.call_args
+    req = call_args[0][0]
+    assert "ephemeral=true" in req.full_url
+    assert "timeout=30" in req.full_url
+    assert "cmd=ls" in req.full_url or "cmd=" in req.full_url
+    assert req.method == "POST"
+
+
+def test_tool_run_task_default_timeout():
+    """tool_run_task uses timeout=60 by default."""
+    mock_resp = make_mock_response({"session_id": "rts-ephemeral-2", "ephemeral": True})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_run_task({"cmd": "echo hi"})
+    assert "rts-ephemeral-2" in result
+    req = mock_open.call_args[0][0]
+    assert "timeout=60" in req.full_url
+
+
+def test_tool_run_task_includes_spawner_id_when_set(monkeypatch):
+    """tool_run_task appends spawner_id query param when SPAWNER_ID is set."""
+    import claude_rts.mcp_server as mcp_mod
+
+    original = mcp_mod.SPAWNER_ID
+    try:
+        mcp_mod.SPAWNER_ID = "spawner-card-999"
+        mock_resp = make_mock_response({"session_id": "rts-eph-3", "ephemeral": True})
+        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+            tool_run_task({"cmd": "pwd"})
+        req = mock_open.call_args[0][0]
+        assert "spawner_id=spawner-card-999" in req.full_url
+    finally:
+        mcp_mod.SPAWNER_ID = original
+
+
+def test_tool_run_task_surfaces_timeout_error():
+    """tool_run_task returns clear error message on HTTP 400 ephemeral_timeout_too_long."""
+    import urllib.error
+
+    err_body = json.dumps(
+        {
+            "error": "ephemeral_timeout_too_long",
+            "message": "Timeout > 120s is not permitted for ephemeral terminals",
+            "max_allowed": 120,
+        }
+    ).encode()
+    http_err = urllib.error.HTTPError("http://test/api/claude/terminal/create", 400, "Bad Request", {}, None)
+    http_err.read = lambda: err_body
+
+    with patch("urllib.request.urlopen", side_effect=http_err):
+        result = tool_run_task({"cmd": "sleep 200", "timeout": 200})
+
+    assert "Error" in result
+    assert "120" in result
+    assert "open_terminal" in result or "timeout" in result.lower()
+
+
+def test_tool_run_task_surfaces_cap_error():
+    """tool_run_task returns error message with live_session_ids on HTTP 429."""
+    import urllib.error
+
+    live_ids = ["rts-1", "rts-2", "rts-3", "rts-4", "rts-5", "rts-6", "rts-7", "rts-8", "rts-9", "rts-10"]
+    err_body = json.dumps(
+        {
+            "error": "terminal_cap_reached",
+            "message": "Canvas Claude has reached the 10 live terminal cap.",
+            "live_session_ids": live_ids,
+        }
+    ).encode()
+    http_err = urllib.error.HTTPError("http://test/api/claude/terminal/create", 429, "Too Many Requests", {}, None)
+    http_err.read = lambda: err_body
+
+    with patch("urllib.request.urlopen", side_effect=http_err):
+        result = tool_run_task({"cmd": "ls"})
+
+    assert "Error" in result
+    assert "10" in result
+    assert "cap" in result.lower() or "live" in result.lower()
+
+
+def test_tool_run_task_missing_cmd():
+    """tool_run_task raises ValueError when cmd is missing."""
+    with pytest.raises(ValueError, match="cmd is required"):
+        tool_run_task({})
+
+
+def test_tool_run_task_invalid_timeout():
+    """tool_run_task raises ValueError when timeout is not numeric."""
+    with pytest.raises(ValueError, match="timeout must be an integer"):
+        tool_run_task({"cmd": "ls", "timeout": "bad"})
