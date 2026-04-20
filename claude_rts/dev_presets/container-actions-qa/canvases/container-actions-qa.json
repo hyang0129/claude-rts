@@ -1,10 +1,10 @@
 {
-  "name": "vm-actions-qa",
+  "name": "container-actions-qa",
   "canvas_size": [3840, 2160],
   "cards": [
     {
       "type": "widget",
-      "widgetType": "vm-manager",
+      "widgetType": "container-manager",
       "x": 100,
       "y": 100,
       "w": 520,

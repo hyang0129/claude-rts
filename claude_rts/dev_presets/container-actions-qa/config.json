@@ -1,6 +1,6 @@
 {
   "startup_script": "util-terminal",
-  "default_canvas": "vm-actions-qa",
+  "default_canvas": "container-actions-qa",
   "main_profile_name": "main",
   "probe_profiles": [],
   "sessions": {
@@ -17,7 +17,7 @@
       "~/.claude-profiles": "/profiles"
     }
   },
-  "vm_manager": {
+  "container_manager": {
     "favorites": [
       {
         "name": "supreme-claudemander-util",
