@@ -30,6 +30,7 @@ from claude_rts.mcp_server import (
     tool_container_append_action,
     tool_container_start,
     tool_container_stop,
+    tool_container_stats,
     tool_container_create,
     tool_container_rebuild,
     tool_blueprint_list,
@@ -207,6 +208,7 @@ def test_handle_request_tools_list():
         "container_append_action",
         "container_start",
         "container_stop",
+        "container_stats",
         "container_add_favorite",
         "container_create",
         "container_rebuild",
@@ -426,7 +428,8 @@ def test_tools_list_includes_container_and_blueprint_tools():
     assert "get_recovery_script" in names
     assert "run_task" in names
     assert "container_create" in names
-    assert len(names) == 24
+    assert "container_stats" in names
+    assert len(names) == 25
 
 
 # ── container_get_actions ──────────────────────────────────────────────
@@ -566,6 +569,28 @@ def test_container_stop_with_timeout():
     req = mock_open.call_args[0][0]
     assert "timeout=30" in req.full_url
     assert "via=canvas-claude" in req.full_url
+
+
+def test_container_stats_calls_rest():
+    """container_stats GETs /api/containers/{name}/stats."""
+    payload = {
+        "name": "foo-dev",
+        "cpu_percent": "1.23%",
+        "mem_usage": "100MiB",
+        "mem_limit": "1GiB",
+    }
+    mock_resp = make_mock_response(payload)
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_container_stats({"name": "foo-dev"})
+    assert "foo-dev" in result
+    req = mock_open.call_args[0][0]
+    assert req.method == "GET"
+    assert "/api/containers/foo-dev/stats" in req.full_url
+
+
+def test_container_stats_missing_name():
+    with pytest.raises(ValueError, match="name is required"):
+        tool_container_stats({})
 
 
 def test_container_stop_always_sends_origin_signal():

@@ -373,6 +373,16 @@ def tool_container_stop(args):
     return f"Stopped {name}: {json.dumps(result)}"
 
 
+def tool_container_stats(args):
+    """Return live CPU/MEM stats for a single container via GET /api/containers/{name}/stats."""
+    name = args.get("name", "") or args.get("container", "")
+    if not name:
+        raise ValueError("name is required")
+    safe_name = urllib.parse.quote(name, safe="")
+    result = http_request("GET", f"/api/containers/{safe_name}/stats")
+    return json.dumps(result)
+
+
 def tool_container_add_favorite(args):
     name = args.get("name", "")
     if not name:
@@ -529,6 +539,7 @@ TOOL_HANDLERS = {
     "container_append_action": tool_container_append_action,
     "container_start": tool_container_start,
     "container_stop": tool_container_stop,
+    "container_stats": tool_container_stats,
     "container_add_favorite": tool_container_add_favorite,
     "container_create": tool_container_create,
     "container_rebuild": tool_container_rebuild,
@@ -1010,6 +1021,28 @@ TOOL_SCHEMAS = [
                         "Seconds to wait before force-killing the container (optional). "
                         "Default: Docker's default (usually 10s). Set higher for graceful "
                         "shutdown of services."
+                    ),
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "container_stats",
+        "description": (
+            "Return live CPU/MEM stats for a single container (snapshot from "
+            "`docker stats --no-stream`). Useful for observability — check whether "
+            "a container is using abnormal resources before stopping/rebuilding. "
+            "Accepts either 'name' or 'container' as the parameter key."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Name of the Docker container (also accepted as 'container'). "
+                        "Container must be running — stopped containers return 404."
                     ),
                 },
             },

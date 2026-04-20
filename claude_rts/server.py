@@ -145,6 +145,169 @@ async def widget_system_info_handler(request: web.Request) -> web.Response:
 _DOCKER_CMD = "docker"
 
 
+async def widget_container_stats_handler(request: web.Request) -> web.Response:
+    """Return live CPU/MEM stats for every Docker container (running + stopped).
+
+    Runs ``docker stats --no-stream --format '{{json .}}'`` for running containers
+    and ``docker ps -a`` to include stopped containers (zeroed stats). Each row
+    is augmented with the ``created_by`` label so the UI can flag canvas-claude
+    ownership.
+    """
+    # Test-mode injection: return mocked payload verbatim
+    test_stats = request.app.get("_test_container_stats")
+    if test_stats is not None:
+        return web.json_response({"containers": list(test_stats)})
+
+    # 1) docker ps -a to enumerate all containers + their created_by label
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _DOCKER_CMD,
+            "ps",
+            "-a",
+            "--format",
+            '{{.Names}}|{{.State}}|{{.Label "created_by"}}',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+    except FileNotFoundError:
+        return web.json_response({"error": "docker_unavailable"}, status=500)
+
+    if proc.returncode != 0:
+        err = stderr.decode().strip() if stderr else "docker ps failed"
+        logger.warning("widget_container_stats: docker ps failed: {}", err)
+        return web.json_response({"error": err}, status=500)
+
+    containers: list[dict] = []
+    for line in stdout.decode().strip().splitlines():
+        parts = line.split("|", 2)
+        if len(parts) < 2:
+            continue
+        name = parts[0].strip()
+        state = parts[1].strip().lower()
+        created_by = parts[2].strip() if len(parts) > 2 else ""
+        containers.append(
+            {
+                "name": name,
+                "status": "running" if state == "running" else "stopped",
+                "cpu_percent": "0.00%",
+                "mem_usage": "0B",
+                "mem_limit": "0B",
+                "mem_percent": "0.00%",
+                "net_io": "--",
+                "block_io": "--",
+                "pids": 0,
+                "created_by": created_by,
+            }
+        )
+
+    if not containers:
+        return web.json_response({"containers": []})
+
+    # 2) docker stats --no-stream on running containers
+    try:
+        stats_proc = await asyncio.create_subprocess_exec(
+            _DOCKER_CMD,
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{json .}}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stats_out, stats_err = await stats_proc.communicate()
+    except FileNotFoundError:
+        return web.json_response({"containers": containers})
+
+    if stats_proc.returncode == 0:
+        by_name = {c["name"]: c for c in containers}
+        for line in stats_out.decode().strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                s = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            n = s.get("Name") or s.get("Container") or ""
+            if n not in by_name:
+                continue
+            c = by_name[n]
+            c["cpu_percent"] = s.get("CPUPerc", "0.00%")
+            mem_usage_raw = s.get("MemUsage", "0B / 0B")
+            # MemUsage format: "123MiB / 1.5GiB"
+            if " / " in mem_usage_raw:
+                used, limit = mem_usage_raw.split(" / ", 1)
+                c["mem_usage"] = used.strip()
+                c["mem_limit"] = limit.strip()
+            else:
+                c["mem_usage"] = mem_usage_raw
+            c["mem_percent"] = s.get("MemPerc", "0.00%")
+            c["net_io"] = s.get("NetIO", "--")
+            c["block_io"] = s.get("BlockIO", "--")
+            try:
+                c["pids"] = int(s.get("PIDs", 0))
+            except (TypeError, ValueError):
+                c["pids"] = 0
+
+    return web.json_response({"containers": containers})
+
+
+async def container_single_stats_handler(request: web.Request) -> web.Response:
+    """Return live stats for a single container via ``docker stats --no-stream``."""
+    name = request.match_info["name"]
+
+    test_stats = request.app.get("_test_container_stats")
+    if test_stats is not None:
+        for c in test_stats:
+            if c.get("name") == name:
+                return web.json_response(c)
+        return web.json_response({"error": f"No such container: {name}"}, status=404)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _DOCKER_CMD,
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{json .}}",
+            "--",
+            name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+    except FileNotFoundError:
+        return web.json_response({"error": "docker_unavailable"}, status=500)
+
+    if proc.returncode != 0:
+        err = stderr.decode().strip() if stderr else "docker stats failed"
+        return web.json_response({"error": err}, status=500)
+
+    line = stdout.decode().strip().splitlines()
+    if not line:
+        return web.json_response({"error": f"No stats for: {name}"}, status=404)
+
+    try:
+        s = json.loads(line[0])
+    except json.JSONDecodeError:
+        return web.json_response({"error": "invalid stats output"}, status=500)
+
+    mem_usage_raw = s.get("MemUsage", "0B / 0B")
+    used, limit = (mem_usage_raw.split(" / ", 1) + [""])[:2] if " / " in mem_usage_raw else (mem_usage_raw, "")
+    return web.json_response(
+        {
+            "name": s.get("Name") or name,
+            "cpu_percent": s.get("CPUPerc", "0.00%"),
+            "mem_usage": used.strip(),
+            "mem_limit": limit.strip(),
+            "mem_percent": s.get("MemPerc", "0.00%"),
+            "net_io": s.get("NetIO", "--"),
+            "block_io": s.get("BlockIO", "--"),
+        }
+    )
+
+
 # ── Container Manager API ────────────────────────────────────────────────────
 
 
@@ -2163,9 +2326,11 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_put("/api/canvases/{name}", canvas_put_handler)
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
     app.router.add_get("/api/widgets/system-info", widget_system_info_handler)
+    app.router.add_get("/api/widgets/container-stats", widget_container_stats_handler)
 
     # Container Manager API
     app.router.add_get("/api/containers/discover", container_discover_handler)
+    app.router.add_get("/api/containers/{name}/stats", container_single_stats_handler)
     app.router.add_get("/api/containers/favorites", container_favorites_get_handler)
     app.router.add_put("/api/containers/favorites", container_favorites_put_handler)
     app.router.add_post("/api/containers/{name}/start", container_start_handler)

@@ -2317,6 +2317,57 @@ CARD_TYPE_REGISTRY.register('loader', {
 // Widget registry
 // ════════════════════════════════════════════
 const WIDGET_REGISTRY = {
+  'container-stats': {
+    label: 'Container Stats',
+    defaultRefreshInterval: 5000,
+    async render(body, card) {
+      try {
+        const resp = await fetch('/api/widgets/container-stats');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        if (data.error) throw new Error(data.error);
+
+        const containers = data.containers || [];
+        if (containers.length === 0) {
+          body.innerHTML = '<div class="widget-row"><span class="widget-label" style="color:#a6adc8">No managed containers</span></div>';
+          card.updateState('idle');
+          return;
+        }
+
+        const esc = (s) => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+        let html = '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+        html += '<tr style="color:#a6adc8;border-bottom:1px solid #313244">';
+        html += '<th style="text-align:left;padding:4px 6px">Name</th>';
+        html += '<th style="text-align:left;padding:4px 6px">Status</th>';
+        html += '<th style="text-align:right;padding:4px 6px">CPU%</th>';
+        html += '<th style="text-align:right;padding:4px 6px">Memory</th>';
+        html += '<th style="text-align:right;padding:4px 6px">Mem%</th>';
+        html += '</tr>';
+        for (const c of containers) {
+          const owned = c.created_by === 'canvas-claude';
+          const rowStyle = owned
+            ? 'border-bottom:1px solid #181825;background:rgba(137,180,250,0.08)'
+            : 'border-bottom:1px solid #181825';
+          const statusColor = c.status === 'running' ? '#a6e3a1' : '#6c7086';
+          html += `<tr style="${rowStyle}">`;
+          html += `<td style="padding:4px 6px">${esc(c.name)}${owned ? ' <span style="color:#89b4fa" title="canvas-claude owned">*</span>' : ''}</td>`;
+          html += `<td style="padding:4px 6px;color:${statusColor}">${esc(c.status)}</td>`;
+          html += `<td style="padding:4px 6px;text-align:right">${esc(c.cpu_percent)}</td>`;
+          html += `<td style="padding:4px 6px;text-align:right">${esc(c.mem_usage)}</td>`;
+          html += `<td style="padding:4px 6px;text-align:right">${esc(c.mem_percent)}</td>`;
+          html += '</tr>';
+        }
+        html += '</table>';
+        html += '<div style="font-size:10px;color:#6c7086;margin-top:4px">Snapshot, 5s refresh. * = canvas-claude-owned</div>';
+        body.innerHTML = html;
+        card.updateState('working');
+      } catch (err) {
+        body.innerHTML = `<div class="widget-row"><span class="widget-label" style="color:#f38ba8">Error: ${err.message}</span></div>`;
+        card.updateState('dead');
+      }
+    },
+  },
   'system-info': {
     label: 'System Info',
     defaultRefreshInterval: 10000,
