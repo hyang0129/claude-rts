@@ -10,6 +10,7 @@ import asyncio
 import re
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -114,6 +115,16 @@ class SessionManager:
         self.tmux_enabled = tmux_enabled
         self._reaper_task: Optional[asyncio.Task] = None
         self._tmux_cache: dict[str, bool] = {}
+        self._on_destroy_callbacks: list[Callable[[str, "Session"], None]] = []
+
+    def add_on_destroy(self, cb: Callable[[str, "Session"], None]) -> None:
+        """Register a callback to be called synchronously on session destroy.
+
+        The callback signature is ``cb(session_id: str, session: Session) -> None``.
+        Exceptions raised by the callback are caught and logged individually so
+        one bad callback does not prevent teardown from completing.
+        """
+        self._on_destroy_callbacks.append(cb)
 
     def create_session(
         self,
@@ -197,10 +208,23 @@ class SessionManager:
 
         If kill_tmux is True and the session has a container, also kill the
         tmux session inside the container so it doesn't persist.
+
+        All registered on_destroy callbacks are called synchronously before
+        the PTY is terminated.  Exceptions from individual callbacks are caught
+        and logged so one bad callback does not prevent teardown.
         """
         session = self._sessions.pop(session_id, None)
         if not session:
             return
+
+        # Invoke on_destroy callbacks before actual teardown so callbacks can
+        # still inspect session state if needed.
+        for cb in self._on_destroy_callbacks:
+            try:
+                cb(session_id, session)
+            except Exception:
+                logger.exception("on_destroy callback raised for session {}", session_id)
+
         session.alive = False
         if session.read_task:
             session.read_task.cancel()

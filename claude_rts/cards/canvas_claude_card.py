@@ -30,7 +30,7 @@ CONTAINER_PYTHON3 = "/usr/local/bin/python3"
 CONTAINER_MCP_SERVER = "/home/util/mcp_server.py"
 
 
-def _build_mcp_config(api_base_url: str) -> dict:
+def _build_mcp_config(api_base_url: str, spawner_id: str | None = None) -> dict:
     """Build the Claude Code MCP server config for the canvas tools.
 
     Belt-and-suspenders strategy to survive any ``env`` semantics quirk in
@@ -42,21 +42,26 @@ def _build_mcp_config(api_base_url: str) -> dict:
     2. **URL via argv, not env** — ``--api-base <url>`` is passed as an ``args``
        element so ``mcp_server.py`` resolves the API base without depending on
        ``SUPREME_CLAUDEMANDER_API`` at all.
-    3. **Explicit env merge** — PATH / HOME / USER / LANG are re-declared in
+    3. **Spawner ID via argv** — ``--spawner-id <id>`` is passed so the MCP
+       server can attribute terminals to this card and enforce the per-card cap.
+    4. **Explicit env merge** — PATH / HOME / USER / LANG are re-declared in
        ``env`` so that, even if Claude Code replaces (rather than merges with)
        the parent environment, the subprocess still has everything it needs.
        ``SUPREME_CLAUDEMANDER_API`` is also kept for backward compat with older
        MCP servers on disk.
     """
+    args = [
+        CONTAINER_MCP_SERVER,
+        "--api-base",
+        api_base_url,
+    ]
+    if spawner_id:
+        args += ["--spawner-id", spawner_id]
     return {
         "mcpServers": {
             "canvas": {
                 "command": CONTAINER_PYTHON3,
-                "args": [
-                    CONTAINER_MCP_SERVER,
-                    "--api-base",
-                    api_base_url,
-                ],
+                "args": args,
                 "env": {
                     "PATH": "/usr/local/bin:/usr/bin:/bin",
                     "HOME": "/home/util",
@@ -133,14 +138,6 @@ class CanvasClaudeCard(TerminalCard):
         if profile:
             _validate_name(profile, "profile")
 
-        # Build the MCP config JSON. Written into settings.json by
-        # _seed_claude_settings() so Claude loads it automatically on start.
-        mcp_config = _build_mcp_config(api_base_url)
-        mcp_json = _json.dumps(mcp_config)
-        self._mcp_config = mcp_config
-        self._mcp_json = mcp_json
-        self._mcp_sha256 = _hashlib.sha256(mcp_json.encode()).hexdigest()
-
         # Build the inner claude command (without docker/tmux wrapping).
         # The actual PTY command is determined at start() time by
         # _ensure_tmux_session(), which decides between attach vs new-session.
@@ -173,6 +170,16 @@ class CanvasClaudeCard(TerminalCard):
         self.api_base_url = api_base_url
         self.profile = profile
         self.canvas_name = canvas_name
+
+        # Build the MCP config JSON after super().__init__ so self.id is
+        # available (BaseCard generates a uuid if card_id was None).
+        # The spawner_id wires the per-card terminal cap through to the MCP
+        # subprocess via --spawner-id on the mcp_server.py command line.
+        mcp_config = _build_mcp_config(api_base_url, spawner_id=self.id)
+        mcp_json = _json.dumps(mcp_config)
+        self._mcp_config = mcp_config
+        self._mcp_json = mcp_json
+        self._mcp_sha256 = _hashlib.sha256(mcp_json.encode()).hexdigest()
 
     # ── Descriptor serialization ───────────────────────────────────────
 

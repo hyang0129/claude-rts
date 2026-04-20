@@ -1,5 +1,6 @@
 """Tests for the production Claude terminal control API endpoints."""
 
+import asyncio
 import time
 
 import pytest
@@ -625,3 +626,180 @@ async def test_ws_control_receives_card_updated_on_rename(aiohttp_client, app_fa
         assert msg["type"] == "card_updated"
         assert msg["card_id"] == sid
         assert msg["display_name"] == "Renamed"
+
+
+# ── Ephemeral session tests (#193) ────────────────────────────────────────────
+
+
+async def test_create_ephemeral_session_skips_card_registry(aiohttp_client, app_factory):
+    """POST ?ephemeral=true creates a PTY session but skips CardRegistry."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=echo+hi&ephemeral=true&spawner_id=sp1")
+    assert resp.status == 200
+    data = await resp.json()
+    session_id = data["session_id"]
+    assert session_id
+
+    # Session must exist in session_manager
+    mgr = client.app["session_manager"]
+    assert mgr.get_session(session_id) is not None
+
+    # Must NOT be registered in CardRegistry
+    card_reg = client.app["card_registry"]
+    assert card_reg.get(session_id) is None
+
+
+async def test_ephemeral_timeout_too_long(aiohttp_client, app_factory):
+    """POST with ephemeral=true&timeout=121 returns HTTP 400 with ephemeral_timeout_too_long."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=sleep+200&ephemeral=true&timeout=121")
+    assert resp.status == 400
+    data = await resp.json()
+    assert data["error"] == "ephemeral_timeout_too_long"
+    assert data["max_allowed"] == 120
+
+
+async def test_ephemeral_timeout_too_short(aiohttp_client, app_factory):
+    """POST with ephemeral=true&timeout=0 returns HTTP 400 with ephemeral_timeout_too_long."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=echo+hi&ephemeral=true&timeout=0")
+    assert resp.status == 400
+    data = await resp.json()
+    assert data["error"] == "ephemeral_timeout_too_long"
+    assert data["max_allowed"] == 120
+
+
+async def test_ephemeral_timeout_expiry_destroys_session(aiohttp_client, app_factory):
+    """Ephemeral session with timeout=1 is auto-destroyed after ~1 second."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=sleep+999&ephemeral=true&timeout=1")
+    assert resp.status == 200
+    data = await resp.json()
+    session_id = data["session_id"]
+
+    mgr = client.app["session_manager"]
+    # Session exists immediately after creation
+    assert mgr.get_session(session_id) is not None
+
+    # Wait for the timeout watcher to fire (1s + 0.5s margin)
+    await asyncio.sleep(1.5)
+
+    # Session should now be gone
+    assert mgr.get_session(session_id) is None
+
+
+async def test_spawner_cap_enforced_at_11th(aiohttp_client, app_factory):
+    """The 11th spawn with the same spawner_id returns HTTP 429 terminal_cap_reached."""
+    client = await aiohttp_client(app_factory())
+    live_ids = []
+    for _ in range(10):
+        resp = await client.post("/api/claude/terminal/create?cmd=bash&spawner_id=capX")
+        assert resp.status == 200
+        data = await resp.json()
+        live_ids.append(data["session_id"])
+
+    # 11th spawn should be rejected
+    resp = await client.post("/api/claude/terminal/create?cmd=bash&spawner_id=capX")
+    assert resp.status == 429
+    data = await resp.json()
+    assert data["error"] == "terminal_cap_reached"
+    assert len(data["live_session_ids"]) == 10
+
+
+async def test_cap_decrements_on_delete(aiohttp_client, app_factory):
+    """Deleting a spawner-tracked terminal frees a slot so the 11th succeeds."""
+    client = await aiohttp_client(app_factory())
+    sids = []
+    for _ in range(10):
+        resp = await client.post("/api/claude/terminal/create?cmd=bash&spawner_id=capY")
+        assert resp.status == 200
+        sids.append((await resp.json())["session_id"])
+
+    # Delete one
+    resp = await client.delete(f"/api/claude/terminal/{sids[0]}")
+    assert resp.status == 200
+
+    # Now the 11th spawn should succeed
+    resp = await client.post("/api/claude/terminal/create?cmd=bash&spawner_id=capY")
+    assert resp.status == 200
+
+
+async def test_cap_counts_open_terminal_too(aiohttp_client, app_factory):
+    """The cap applies across ephemeral and non-ephemeral spawns for the same spawner."""
+    client = await aiohttp_client(app_factory())
+    # 5 regular + 5 ephemeral = 10 total
+    for _ in range(5):
+        resp = await client.post("/api/claude/terminal/create?cmd=bash&spawner_id=capZ")
+        assert resp.status == 200
+    for _ in range(5):
+        resp = await client.post("/api/claude/terminal/create?cmd=bash&ephemeral=true&spawner_id=capZ")
+        assert resp.status == 200
+
+    # 11th (either kind) should be rejected
+    resp = await client.post("/api/claude/terminal/create?cmd=bash&spawner_id=capZ")
+    assert resp.status == 429
+    data = await resp.json()
+    assert data["error"] == "terminal_cap_reached"
+
+
+async def test_user_spawned_no_spawner_id_uncapped(aiohttp_client, app_factory):
+    """Spawns without spawner_id are not capped (user-facing terminals)."""
+    client = await aiohttp_client(app_factory())
+    # Spawn 12 terminals without spawner_id — all should succeed
+    for _ in range(12):
+        resp = await client.post("/api/claude/terminal/create?cmd=bash")
+        assert resp.status == 200
+
+
+async def test_delete_works_on_ephemeral_session(aiohttp_client, app_factory):
+    """DELETE /api/claude/terminal/{id} works on ephemeral sessions (no card in registry)."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=sleep+999&ephemeral=true")
+    assert resp.status == 200
+    data = await resp.json()
+    session_id = data["session_id"]
+
+    # Verify session exists, no card
+    mgr = client.app["session_manager"]
+    card_reg = client.app["card_registry"]
+    assert mgr.get_session(session_id) is not None
+    assert card_reg.get(session_id) is None
+
+    # Delete should succeed
+    resp = await client.delete(f"/api/claude/terminal/{session_id}")
+    assert resp.status == 200
+
+    # Session should be gone
+    assert mgr.get_session(session_id) is None
+
+
+async def test_card_unregister_clears_spawner_set(aiohttp_client, app_factory):
+    """Emitting card:unregistered for a canvas-claude card destroys its owned sessions."""
+    client = await aiohttp_client(app_factory())
+    spawner = "sp-canvas-2"
+
+    # Spawn 2 ephemeral sessions under this spawner
+    sids = []
+    for _ in range(2):
+        resp = await client.post(f"/api/claude/terminal/create?cmd=sleep+999&ephemeral=true&spawner_id={spawner}")
+        assert resp.status == 200
+        sids.append((await resp.json())["session_id"])
+
+    mgr = client.app["session_manager"]
+    canvas_claude_spawns = client.app["canvas_claude_spawns"]
+    assert spawner in canvas_claude_spawns
+    assert len(canvas_claude_spawns[spawner]) == 2
+
+    # Emit card:unregistered for this spawner as a canvas-claude card
+    event_bus = client.app["event_bus"]
+    await event_bus.emit("card:unregistered", {"card_id": spawner, "card_type": "canvas-claude"})
+
+    # Allow the async callback to run
+    await asyncio.sleep(0.1)
+
+    # Spawner set should be removed
+    assert spawner not in canvas_claude_spawns
+
+    # Both sessions should be destroyed
+    for sid in sids:
+        assert mgr.get_session(sid) is None

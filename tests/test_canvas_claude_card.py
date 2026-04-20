@@ -446,3 +446,36 @@ async def test_canvas_claude_card_new_session_kills_tmux(monkeypatch):
     assert len(kill_calls) >= 1
     await card.stop()
     mgr.stop_all()
+
+
+# ── Spawner ID injection tests (#193) ─────────────────────────────────────────
+
+
+def test_build_mcp_config_includes_spawner_id():
+    """_build_mcp_config appends --spawner-id <id> to the args list when provided."""
+    cfg = _build_mcp_config("http://host.docker.internal:3000", spawner_id="card-abc-123")
+    args = cfg["mcpServers"]["canvas"]["args"]
+    assert "--spawner-id" in args
+    idx = args.index("--spawner-id")
+    assert args[idx + 1] == "card-abc-123"
+
+
+def test_build_mcp_config_no_spawner_id_omits_flag():
+    """_build_mcp_config does NOT include --spawner-id when spawner_id is None."""
+    cfg = _build_mcp_config("http://host.docker.internal:3000", spawner_id=None)
+    args = cfg["mcpServers"]["canvas"]["args"]
+    assert "--spawner-id" not in args
+
+
+def test_canvas_claude_card_mcp_args_include_spawner_id(monkeypatch):
+    """CanvasClaudeCard injects --spawner-id <card.id> into MCP subprocess args."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    card = CanvasClaudeCard(session_manager=mgr, container="my-container")
+
+    mcp_args = card._mcp_config["mcpServers"]["canvas"]["args"]
+    assert "--spawner-id" in mcp_args
+    idx = mcp_args.index("--spawner-id")
+    # The value must match the card's own id
+    assert mcp_args[idx + 1] == card.id
+    mgr.stop_all()
