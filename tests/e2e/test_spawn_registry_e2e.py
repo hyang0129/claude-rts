@@ -411,6 +411,35 @@ class TestSpawnFromSerializedMixedCanvas:
 
         Expected: exactly 3 cards restored (unknown hub entry silently skipped).
         """
+        # ── DIAGNOSTICS (issue: CI shows 0 cards, local shows 3) ─────────────
+        # Capture console + pageerror + network so a CI failure reveals the
+        # actual root cause instead of just an assertion count.
+        console_msgs: list[str] = []
+        page_errors: list[str] = []
+        network_log: list[str] = []
+
+        def _on_console(msg):
+            try:
+                console_msgs.append(f"[{msg.type}] {msg.text}")
+            except Exception as exc:  # pragma: no cover — best-effort diag
+                console_msgs.append(f"[console-capture-error] {exc}")
+
+        def _on_pageerror(err):
+            page_errors.append(str(err))
+
+        def _on_request(req):
+            if "/api/canvases/" in req.url or "/ws/" in req.url:
+                network_log.append(f"REQ  {req.method} {req.url}")
+
+        def _on_response(resp):
+            if "/api/canvases/" in resp.url:
+                network_log.append(f"RESP {resp.status} {resp.url}")
+
+        page.on("console", _on_console)
+        page.on("pageerror", _on_pageerror)
+        page.on("request", _on_request)
+        page.on("response", _on_response)
+
         # Get the first available hub from the client's in-memory hubs[] so that
         # spawnFromSerialized can find it via hubs.find(...) on restore.
         hub_info = page.evaluate(
@@ -422,10 +451,22 @@ class TestSpawnFromSerializedMixedCanvas:
         first_hub = hub_info["hub"]
         first_container = hub_info["container"]
 
-        # PUT the mixed canvas payload
-        page.evaluate(
+        # Capture pre-switch state for diagnostics
+        pre_state = page.evaluate(
+            """() => ({
+                currentCanvasName: typeof currentCanvasName !== 'undefined' ? currentCanvasName : null,
+                hubsCount: typeof hubs !== 'undefined' ? hubs.length : -1,
+                hubsList: typeof hubs !== 'undefined' ? hubs.map(h => h.hub) : [],
+                cardsCount: typeof cards !== 'undefined' ? cards.length : -1,
+                registryTypes: typeof CARD_TYPE_REGISTRY !== 'undefined'
+                    ? Object.keys(CARD_TYPE_REGISTRY._types) : [],
+            })"""
+        )
+
+        # PUT the mixed canvas payload and capture the response status
+        put_status = page.evaluate(
             f"""async () => {{
-                await fetch('/api/canvases/mixed-restore', {{
+                const r = await fetch('/api/canvases/mixed-restore', {{
                     method: 'PUT',
                     headers: {{'Content-Type': 'application/json'}},
                     body: JSON.stringify({{
@@ -442,19 +483,77 @@ class TestSpawnFromSerializedMixedCanvas:
                         pan: {{x: 0, y: 0}}, zoom: 1,
                     }}),
                 }});
+                return r.status;
             }}"""
+        )
+
+        # Verify the server persisted what we sent, by GETing it back.
+        readback = page.evaluate(
+            """async () => {
+                const r = await fetch('/api/canvases/mixed-restore');
+                if (!r.ok) return { status: r.status, body: null };
+                return { status: r.status, body: await r.json() };
+            }"""
         )
 
         # Clear canvas and switch to the saved layout
         clear_canvas(page)
         # Await switchCanvas directly — it awaits each spawnFromSerialized, which
         # pushes to cards[] synchronously via _mount before resolving.  By the
-        # time the await returns, cards.length reflects the final count.  This
-        # replaces a wait_for_function race that could time out under CI load.
-        page.evaluate("async () => { await switchCanvas('mixed-restore'); }")
+        # time the await returns, cards.length reflects the final count.
+        switch_result = page.evaluate(
+            """async () => {
+                try {
+                    await switchCanvas('mixed-restore');
+                    return { ok: true, cardsCount: cards.length,
+                             cardTypes: cards.map(c => c.type),
+                             currentCanvasName: currentCanvasName };
+                } catch (err) {
+                    return { ok: false, error: String(err),
+                             stack: err && err.stack ? String(err.stack) : null };
+                }
+            }"""
+        )
 
         total_cards = get_card_count(page)
-        assert total_cards == 3, f"Expected exactly 3 cards (unknown hub skipped); got {total_cards}"
+        post_state = page.evaluate(
+            """() => ({
+                cardsCount: cards.length,
+                cardTypes: cards.map(c => c.type),
+                currentCanvasName: currentCanvasName,
+                canvasChildren: document.getElementById('canvas')
+                    ? document.getElementById('canvas').children.length : -1,
+                hubsCount: hubs.length,
+            })"""
+        )
+
+        # Unbind listeners before potentially failing so Playwright doesn't
+        # keep accumulating noise into subsequent tests.
+        page.remove_listener("console", _on_console)
+        page.remove_listener("pageerror", _on_pageerror)
+        page.remove_listener("request", _on_request)
+        page.remove_listener("response", _on_response)
+
+        if total_cards != 3:
+            diag = [
+                "=== DIAGNOSTICS (test_mixed_canvas_restore) ===",
+                f"pre_state:       {pre_state}",
+                f"first_hub:       {first_hub!r}",
+                f"first_container: {first_container!r}",
+                f"put_status:      {put_status}",
+                f"readback:        {readback}",
+                f"switch_result:   {switch_result}",
+                f"post_state:      {post_state}",
+                f"total_cards:     {total_cards}",
+                f"console_msgs ({len(console_msgs)}):",
+                *[f"  {m}" for m in console_msgs],
+                f"page_errors ({len(page_errors)}):",
+                *[f"  {e}" for e in page_errors],
+                f"network_log ({len(network_log)}):",
+                *[f"  {n}" for n in network_log],
+                "=== END DIAGNOSTICS ===",
+            ]
+            pytest.fail(f"Expected exactly 3 cards (unknown hub skipped); got {total_cards}\n" + "\n".join(diag))
 
         card_types = page.evaluate("() => cards.map(c => c.type)")
         assert card_types[0] == "terminal", f"First card should be terminal, got {card_types[0]!r}"
