@@ -31,6 +31,7 @@ from claude_rts.mcp_server import (
     tool_container_start,
     tool_container_stop,
     tool_container_create,
+    tool_container_rebuild,
     tool_blueprint_list,
     tool_blueprint_get,
     tool_blueprint_save,
@@ -208,6 +209,7 @@ def test_handle_request_tools_list():
         "container_stop",
         "container_add_favorite",
         "container_create",
+        "container_rebuild",
         "blueprint_list",
         "blueprint_get",
         "blueprint_save",
@@ -413,6 +415,7 @@ def test_tools_list_includes_container_and_blueprint_tools():
     assert "container_start" in names
     assert "container_stop" in names
     assert "container_add_favorite" in names
+    assert "container_rebuild" in names
     assert "blueprint_list" in names
     assert "blueprint_get" in names
     assert "blueprint_save" in names
@@ -423,7 +426,7 @@ def test_tools_list_includes_container_and_blueprint_tools():
     assert "get_recovery_script" in names
     assert "run_task" in names
     assert "container_create" in names
-    assert len(names) == 23
+    assert len(names) == 24
 
 
 # ── container_get_actions ──────────────────────────────────────────────
@@ -649,6 +652,54 @@ def test_container_create_surfaces_whitelist_error():
         result = tool_container_create({"image": "evil/image:latest"})
     assert "not whitelisted" in result
     assert "ubuntu:24.04" in result
+
+
+# ── container_rebuild ────────────────────────────────────────────────────
+
+
+def test_container_rebuild_calls_rest():
+    """container_rebuild POSTs to /api/containers/{name}/rebuild with via=canvas-claude."""
+    mock_resp = make_mock_response({"container_id": "cc-owned", "name": "cc-owned", "status": "rebuilt"})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_container_rebuild({"name": "cc-owned"})
+    assert "cc-owned" in result
+    assert "rebuilt" in result
+    req = mock_open.call_args[0][0]
+    assert req.method == "POST"
+    assert "/api/containers/cc-owned/rebuild" in req.full_url
+    assert "via=canvas-claude" in req.full_url
+
+
+def test_container_rebuild_missing_name():
+    """container_rebuild raises ValueError when name is missing."""
+    with pytest.raises(ValueError, match="name is required"):
+        tool_container_rebuild({})
+
+
+def test_container_rebuild_propagates_403_guard_rejection():
+    """When the server returns 403 not_canvas_claude_owned, the MCP tool surfaces the error."""
+    import urllib.error
+
+    err_body = json.dumps({"error": "not_canvas_claude_owned", "container": "foo"}).encode()
+    http_err = urllib.error.HTTPError(
+        url="http://x/api/containers/foo/rebuild",
+        code=403,
+        msg="Forbidden",
+        hdrs=None,
+        fp=None,
+    )
+    http_err.read = lambda: err_body  # type: ignore[assignment]
+    with patch("urllib.request.urlopen", side_effect=http_err):
+        with pytest.raises(RuntimeError, match="403"):
+            tool_container_rebuild({"name": "foo"})
+
+
+def test_container_rebuild_in_tools_list():
+    """tools/list includes container_rebuild."""
+    msg = {"jsonrpc": "2.0", "id": 99, "method": "tools/list", "params": {}}
+    resp = handle_request(msg)
+    names = {t["name"] for t in resp["result"]["tools"]}
+    assert "container_rebuild" in names
 
 
 # ── Blueprint MCP tool tests ─────────────────────────────────────────────

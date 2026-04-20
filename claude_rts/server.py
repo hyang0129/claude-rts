@@ -500,6 +500,246 @@ async def container_create_handler(request: web.Request) -> web.Response:
     )
 
 
+async def _inspect_container_for_rebuild(request: web.Request, name: str) -> tuple[dict | None, web.Response | None]:
+    """Return (inspect_info, error_response). ``inspect_info`` is a dict with
+    ``image``, ``labels``, ``mounts`` (list of mount-strings suitable for
+    ``ContainerSpec.mounts``). If this is a test (``_test_container_labels``
+    set), fall back to label data + image recorded in ``_test_container_create``
+    (where available). On docker failure, returns (None, error_response).
+    """
+    # Test-mode hook: reuse the labels lookup table populated by tests.
+    test_labels = request.app.get("_test_container_labels")
+    if test_labels is not None:
+        entry = test_labels.get(name) or {}
+        image = entry.get("image", "ubuntu:24.04")
+        labels = {k: v for k, v in entry.items() if k != "image"}
+        # workspace volume name follows the create-time default
+        mounts = entry.get("mounts") or [
+            f"source={name}-workspace,target=/workspace,type=volume",
+        ]
+        return (
+            {"image": image, "labels": labels, "mounts": mounts},
+            None,
+        )
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _DOCKER_CMD,
+            "inspect",
+            "--format",
+            "{{json .}}",
+            "--",
+            name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("container_rebuild: docker inspect failed for '{}': {}", name, exc)
+        return None, web.json_response(
+            {"error": "docker_inspect_failed", "container": name, "detail": str(exc)},
+            status=500,
+        )
+    if proc.returncode != 0:
+        err = stderr.decode().strip() if stderr else "docker inspect failed"
+        return None, web.json_response(
+            {"error": "docker_inspect_failed", "container": name, "detail": err},
+            status=500,
+        )
+    try:
+        raw = json.loads(stdout.decode())
+    except Exception as exc:  # noqa: BLE001
+        return None, web.json_response(
+            {"error": "docker_inspect_parse_failed", "container": name, "detail": str(exc)},
+            status=500,
+        )
+    cfg = raw.get("Config", {}) or {}
+    image = cfg.get("Image", "")
+    labels = cfg.get("Labels", {}) or {}
+    mounts: list[str] = []
+    for m in raw.get("Mounts", []) or []:
+        mtype = m.get("Type", "")
+        if mtype == "volume":
+            vol = m.get("Name", "")
+            target = m.get("Destination", "")
+            if vol and target:
+                mounts.append(f"source={vol},target={target},type=volume")
+        elif mtype == "bind":
+            src = m.get("Source", "")
+            target = m.get("Destination", "")
+            if src and target:
+                mounts.append(f"source={src},target={target},type=bind")
+    return {"image": image, "labels": labels, "mounts": mounts}, None
+
+
+async def container_rebuild_handler(request: web.Request) -> web.Response:
+    """Rebuild a canvas-claude-owned container: stop + docker rm + recreate.
+
+    ABSOLUTE INVARIANT: only containers with ``created_by=canvas-claude`` may be
+    rebuilt through this endpoint. The guard is enforced unconditionally (not
+    gated on the Canvas-Claude origin signal) because ``docker rm`` is a
+    destructive operation that must never touch human-owned containers.
+
+    The workspace volume is preserved — ``docker rm`` is called WITHOUT the
+    ``-v`` flag, so named volumes survive and are re-attached to the new
+    container via the reconstructed ``ContainerSpec``.
+    """
+    name = request.match_info["name"]
+
+    # Hard guard: rebuild is unconditionally gated on created_by=canvas-claude.
+    # We force the origin signal on so `_require_canvas_claude_owned` runs
+    # regardless of how the request was made.
+    test_labels = request.app.get("_test_container_labels")
+    if test_labels is not None:
+        label = test_labels.get(name, {}).get("created_by")
+        if label != "canvas-claude":
+            return web.json_response(
+                {"error": "not_canvas_claude_owned", "container": name},
+                status=403,
+            )
+    else:
+        # Real-Docker path: run the same inspect used by the stop guard.
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                _DOCKER_CMD,
+                "inspect",
+                "--format",
+                '{{index .Config.Labels "created_by"}}',
+                "--",
+                name,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response(
+                {"error": "docker_inspect_failed", "container": name, "detail": str(exc)},
+                status=500,
+            )
+        if proc.returncode != 0:
+            err = stderr.decode().strip() if stderr else "docker inspect failed"
+            return web.json_response(
+                {"error": "docker_inspect_failed", "container": name, "detail": err},
+                status=500,
+            )
+        label = stdout.decode().strip()
+        if label != "canvas-claude":
+            return web.json_response(
+                {"error": "not_canvas_claude_owned", "container": name},
+                status=403,
+            )
+
+    # Read the container's spec (image, labels, mounts) to reconstruct on recreate.
+    info, err_resp = await _inspect_container_for_rebuild(request, name)
+    if err_resp is not None:
+        return err_resp
+    assert info is not None
+
+    # Test-mode hook: flip mock state + record the rebuild call instead of
+    # calling Docker. Mirrors the _test_container_create convention so tests
+    # can assert on the reconstructed ContainerSpec.
+    test_create = request.app.get("_test_container_create")
+    test_containers = request.app.get("_test_containers")
+    if test_labels is not None or test_create is not None or test_containers is not None:
+        # Record the docker rm/stop invocations for assertions.
+        rebuild_log = request.app.setdefault("_test_rebuild_calls", [])
+        rebuild_log.append({"op": "stop", "name": name})
+        rebuild_log.append({"op": "rm", "name": name, "with_volumes": False})
+        # Rebuild the spec and hand to the create test-hook for recording.
+        spec = container_spec_mod.ContainerSpec(
+            image=info["image"] or "ubuntu:24.04",
+            name=name,
+            preset="devcontainer",
+            labels=dict(info["labels"]),
+            mounts=list(info["mounts"]),
+        )
+        if test_create is None:
+            test_create = {}
+            request.app["_test_container_create"] = test_create
+        test_create.setdefault("calls", []).append(
+            {
+                "image": spec.image,
+                "name": spec.name,
+                "preset": spec.preset,
+                "labels": dict(spec.labels),
+                "mounts": list(spec.mounts),
+                "devcontainer_json": spec.devcontainer_preset(),
+            }
+        )
+        if test_containers is not None:
+            for c in test_containers:
+                if c["name"] == name:
+                    c["state"] = "online"
+                    break
+        return web.json_response({"container_id": name, "name": name, "status": "rebuilt"})
+
+    # Real-Docker path: stop → rm → recreate.
+    stop_proc = await asyncio.create_subprocess_exec(
+        _DOCKER_CMD,
+        "stop",
+        "-t",
+        "10",
+        "--",
+        name,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await stop_proc.communicate()
+    # Note: stop failure is non-fatal — the container may already be stopped.
+
+    # `docker rm` WITHOUT -v so the named workspace volume is preserved.
+    rm_proc = await asyncio.create_subprocess_exec(
+        _DOCKER_CMD,
+        "rm",
+        "--",
+        name,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    rm_stdout, rm_stderr = await rm_proc.communicate()
+    if rm_proc.returncode != 0:
+        err = rm_stderr.decode().strip() if rm_stderr else "docker rm failed"
+        logger.warning("container_rebuild: docker rm failed for '{}': {}", name, err)
+        return web.json_response(
+            {"error": "rebuild_failed", "container": name, "detail": err},
+            status=500,
+        )
+
+    spec = container_spec_mod.ContainerSpec(
+        image=info["image"] or "ubuntu:24.04",
+        name=name,
+        preset="devcontainer",
+        labels=dict(info["labels"]),
+        mounts=list(info["mounts"]),
+    )
+    try:
+        await container_spec_mod.create(spec)
+    except RuntimeError as exc:
+        return web.json_response(
+            {
+                "error": "rebuild_failed",
+                "container": name,
+                "detail": str(exc),
+                "note": "container removed but recreation failed — volume preserved",
+            },
+            status=500,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("container_rebuild: unexpected failure during recreate")
+        return web.json_response(
+            {
+                "error": "rebuild_failed",
+                "container": name,
+                "detail": str(exc),
+                "note": "container removed but recreation failed — volume preserved",
+            },
+            status=500,
+        )
+
+    logger.info("container_rebuild: rebuilt '{}'", name)
+    return web.json_response({"container_id": name, "name": name, "status": "rebuilt"})
+
+
 async def exec_websocket_handler(request: web.Request) -> web.WebSocketResponse:
     """WebSocket handler that spawns a PTY for an arbitrary command."""
     cmd = request.query.get("cmd", "").strip()
@@ -1839,6 +2079,7 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_post("/api/containers/{name}/stop", container_stop_handler)
     app.router.add_put("/api/containers/favorites/{name}/actions", container_favorites_actions_put_handler)
     app.router.add_post("/api/containers/create", container_create_handler)
+    app.router.add_post("/api/containers/{name}/rebuild", container_rebuild_handler)
 
     app.router.add_get("/api/profiles", profiles_list_handler)
     app.router.add_get("/api/profiles/discover", profiles_discover_handler)

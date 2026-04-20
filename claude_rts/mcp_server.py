@@ -424,6 +424,24 @@ def tool_container_create(args):
     return f"Container created: {json.dumps(result)}"
 
 
+def tool_container_rebuild(args):
+    """Rebuild a canvas-claude-owned container via POST /api/containers/{name}/rebuild.
+
+    Destructive: ``docker rm`` + recreate with the same image + labels + mounts.
+    The workspace volume (named Docker volume) is preserved across the rebuild.
+    Guarded hard by the server: only containers stamped
+    ``created_by=canvas-claude`` may be rebuilt. Human-owned containers get
+    HTTP 403 ``not_canvas_claude_owned``.
+    """
+    name = args.get("name", "") or args.get("container", "")
+    if not name:
+        raise ValueError("name is required")
+    safe_name = urllib.parse.quote(name, safe="")
+    path = f"/api/containers/{safe_name}/rebuild?via=canvas-claude"
+    result = http_request("POST", path)
+    return f"Rebuilt {name}: {json.dumps(result)}"
+
+
 # ── Blueprint MCP tools ──────────────────────────────────────────────────
 
 
@@ -513,6 +531,7 @@ TOOL_HANDLERS = {
     "container_stop": tool_container_stop,
     "container_add_favorite": tool_container_add_favorite,
     "container_create": tool_container_create,
+    "container_rebuild": tool_container_rebuild,
     "blueprint_list": tool_blueprint_list,
     "blueprint_get": tool_blueprint_get,
     "blueprint_save": tool_blueprint_save,
@@ -1077,6 +1096,34 @@ TOOL_SCHEMAS = [
                 },
             },
             "required": ["image"],
+        },
+    },
+    {
+        "name": "container_rebuild",
+        "description": (
+            "DESTRUCTIVE: Rebuild a canvas-claude-owned Docker container. Stops the "
+            "container, removes it via `docker rm` (WITHOUT -v so named volumes are "
+            "preserved), then recreates it with the same image, labels, and mounts. "
+            "The workspace volume survives the rebuild, so any state stored under "
+            "/workspace (the named volume) persists. "
+            "Only containers stamped with the Docker label created_by=canvas-claude "
+            "may be rebuilt; any other container returns HTTP 403 not_canvas_claude_owned. "
+            "WARNING: if recreation fails after `docker rm` succeeds, the container is "
+            "gone but its workspace volume remains. Only call this when you can tolerate "
+            "that failure mode."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Name of the canvas-claude-owned container to rebuild. "
+                        "Must carry the created_by=canvas-claude Docker label."
+                    ),
+                },
+            },
+            "required": ["name"],
         },
     },
     {
