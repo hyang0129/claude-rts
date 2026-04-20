@@ -22,7 +22,7 @@ def test_default_port():
         mock_web.run_app.assert_called_once()
         call_kwargs = mock_web.run_app.call_args
         assert call_kwargs.kwargs["port"] == 3000
-        assert call_kwargs.kwargs["host"] == "localhost"
+        assert call_kwargs.kwargs["host"] == "127.0.0.1"
 
 
 def test_custom_port():
