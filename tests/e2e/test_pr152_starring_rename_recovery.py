@@ -240,7 +240,10 @@ class TestStarToggle:
     """Star button rendering and toggle behavior on terminal cards."""
 
     def test_star_button_renders_on_terminal_cards(self, page):
-        """Every terminal card has a star button showing a filled gold star."""
+        """Every terminal card has a star button that renders a valid star
+        glyph (★ filled / ☆ unfilled) with the matching gold/gray color.
+        Issue #194 flipped the default to unstarred, so this test just
+        verifies the button exists and is in a coherent state."""
         star_buttons = page.locator("[data-star]")
         count = star_buttons.count()
         assert count > 0, "Expected at least one star button on terminal cards"
@@ -248,9 +251,12 @@ class TestStarToggle:
         for i in range(count):
             btn = star_buttons.nth(i)
             text = btn.text_content()
-            assert text == "\u2605", f"Star button {i} should show filled star, got '{text}'"
+            assert text in ("\u2605", "\u2606"), f"Star button {i} should show a star glyph, got '{text}'"
             color = btn.evaluate("el => getComputedStyle(el).color")
-            assert "249" in color or "f9e2af" in color, f"Star button {i} should be gold, got '{color}'"
+            if text == "\u2605":
+                assert "249" in color or "f9e2af" in color, f"Filled star {i} should be gold, got '{color}'"
+            else:
+                assert "88" in color or "585b70" in color, f"Unfilled star {i} should be gray, got '{color}'"
 
     def test_toggle_star_off(self, page):
         """Clicking a star toggles it to unfilled gray."""

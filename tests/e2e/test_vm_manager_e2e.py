@@ -1051,6 +1051,20 @@ class TestVmPersistence:
         vm_search = page.locator("[data-vm-search]")
         assert vm_search.count() > 0, "VM Manager card should exist before save"
 
+        # Issue #194 flipped the card default to unstarred, and saveLayout()
+        # now excludes unstarred cards.  Star the VM Manager card explicitly
+        # so it persists across reload.
+        page.evaluate(
+            """() => {
+            const vmCard = cards.find(c => c.el && c.el.querySelector('[data-vm-search]'));
+            if (!vmCard) throw new Error('VM Manager card not found in cards[]');
+            if (!vmCard.starred) {
+                const btn = vmCard.el.querySelector(`[data-star="${vmCard.id}"]`);
+                if (btn) btn.click(); else vmCard.starred = true;
+            }
+        }"""
+        )
+
         # Save layout and await completion of the /api/canvases/* PUT.
         page.evaluate(
             """async () => {
