@@ -447,15 +447,11 @@ class TestSpawnFromSerializedMixedCanvas:
 
         # Clear canvas and switch to the saved layout
         clear_canvas(page)
-        page.evaluate("() => switchCanvas('mixed-restore')")
-
-        # Wait for spawn to complete — exactly 3 cards should restore (the
-        # unknown-hub entry is silently skipped).  Condition-based: polls
-        # cards.length instead of sleeping for a fixed duration.
-        page.wait_for_function(
-            "() => typeof cards !== 'undefined' && cards.length === 3",
-            timeout=5000,
-        )
+        # Await switchCanvas directly — it awaits each spawnFromSerialized, which
+        # pushes to cards[] synchronously via _mount before resolving.  By the
+        # time the await returns, cards.length reflects the final count.  This
+        # replaces a wait_for_function race that could time out under CI load.
+        page.evaluate("async () => { await switchCanvas('mixed-restore'); }")
 
         total_cards = get_card_count(page)
         assert total_cards == 3, f"Expected exactly 3 cards (unknown hub skipped); got {total_cards}"

@@ -62,7 +62,7 @@ def _read_main_creds() -> str:
     return r.stdout
 
 
-def _clear_main_slot(backend_port: int | None = None) -> None:
+def _clear_main_slot(backend_port: int | None = None, page=None) -> None:
     """Remove /profiles/main from the util container and reset active_main_source in config.
 
     The docker rm clears the on-disk credentials.  The config API call clears
@@ -70,6 +70,10 @@ def _clear_main_slot(backend_port: int | None = None) -> None:
     "Set as in-use" button (with ``data-set-main``) instead of the disabled
     "In Use ✓" indicator.  Without this, subsequent tests that query
     ``[data-set-main="test-profile"]`` time out because the button is missing.
+
+    When ``page`` is supplied, the Profile Manager widget is force-refreshed
+    synchronously so the DOM reflects the cleared state immediately — otherwise
+    tests race the widget's 30 s auto-refresh interval.
 
     ``backend_port`` is optional for call-sites that do not have the port
     available (e.g. the stale-state guard in test_no_main_credentials_shows_warning).
@@ -86,6 +90,11 @@ def _clear_main_slot(backend_port: int | None = None) -> None:
         config.pop("active_main_source", None)
         put_resp = requests.put(f"http://localhost:{backend_port}/api/config", json=config, timeout=10)
         put_resp.raise_for_status()
+    if page is not None:
+        page.evaluate("""async () => {
+            const card = cards.find(c => c.widgetType === 'profiles');
+            if (card && typeof card.render === 'function') await card.render();
+        }""")
 
 
 # ── Override the preset to start-claude ────────────────────────────────────────
@@ -536,7 +545,7 @@ class TestSetAsInUse:
     def test_credentials_file_created_in_main(self, page, backend_port):
         """After clicking 'Set as in-use', the main slot credential file is non-empty."""
         _ensure_util_profile("test-profile")
-        _clear_main_slot(backend_port)
+        _clear_main_slot(backend_port, page=page)
 
         page.wait_for_selector('[data-set-main="test-profile"]', timeout=15000)
         with page.expect_response("**/api/profiles/main"):
@@ -550,7 +559,7 @@ class TestSetAsInUse:
         """The credentials file content must match what was seeded for the source profile."""
         known_creds = '{"token":"known-secret-abc"}'
         _ensure_util_profile("test-profile", known_creds)
-        _clear_main_slot(backend_port)
+        _clear_main_slot(backend_port, page=page)
 
         page.wait_for_selector('[data-set-main="test-profile"]', timeout=15000)
         with page.expect_response("**/api/profiles/main"):
