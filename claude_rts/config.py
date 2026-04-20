@@ -70,6 +70,15 @@ DEFAULT_CONFIG = {
             "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
             "mcr.microsoft.com/devcontainers/python:3.12",
         ],
+        # Resource caps applied at creation time (#204). Human-tunable.
+        # ``disk_limit`` is advisory in v1 — Docker named volumes have no
+        # native size cap on overlay2/ext4; observe via Child 7 stats widget.
+        "defaults": {
+            "cpu_limit": 2.0,
+            "memory_limit": "8g",
+            "disk_limit": "10g",
+            "pids_limit": 1024,
+        },
     },
 }
 
