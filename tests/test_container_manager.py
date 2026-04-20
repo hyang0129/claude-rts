@@ -671,6 +671,135 @@ async def test_container_rebuild_route_registered(client):
     assert "/api/containers/{name}/rebuild" in all_paths
 
 
+# ── 4-container global cap (#205) ────────────────────────────────────────
+
+
+async def test_container_create_allowed_under_cap(app, client):
+    """Count only canvas-claude-owned containers; 3 existing → 4th succeeds."""
+    app["_test_container_create"] = {}
+    app["_test_container_labels"] = {
+        "cc-1": {"created_by": "canvas-claude"},
+        "cc-2": {"created_by": "canvas-claude"},
+        "cc-3": {"created_by": "canvas-claude"},
+    }
+    resp = await client.post(
+        "/api/containers/create",
+        json={"image": "ubuntu:24.04", "name": "cc-4"},
+    )
+    assert resp.status == 200, await resp.text()
+    data = await resp.json()
+    assert data["status"] == "created"
+    assert data["name"] == "cc-4"
+
+
+async def test_container_create_rejects_fifth_with_429(app, client):
+    """At-cap (4 existing) → 5th creation returns 429 container_cap_reached."""
+    app["_test_container_create"] = {}
+    app["_test_container_labels"] = {
+        "cc-1": {"created_by": "canvas-claude"},
+        "cc-2": {"created_by": "canvas-claude"},
+        "cc-3": {"created_by": "canvas-claude"},
+        "cc-4": {"created_by": "canvas-claude"},
+    }
+    resp = await client.post(
+        "/api/containers/create",
+        json={"image": "ubuntu:24.04", "name": "cc-5"},
+    )
+    assert resp.status == 429
+    data = await resp.json()
+    assert data["error"] == "container_cap_reached"
+    # Response must list the existing container names so the caller can act.
+    assert sorted(data["existing_container_ids"]) == ["cc-1", "cc-2", "cc-3", "cc-4"]
+    # No spec was recorded — the create was refused before the hook ran.
+    assert app["_test_container_create"].get("calls", []) == []
+
+
+async def test_container_create_excludes_human_containers_from_cap(app, client):
+    """Human-created containers (no created_by label or a different value) do
+    NOT count toward the 4-container cap.
+    """
+    app["_test_container_create"] = {}
+    app["_test_container_labels"] = {
+        "cc-1": {"created_by": "canvas-claude"},
+        "cc-2": {"created_by": "canvas-claude"},
+        "cc-3": {"created_by": "canvas-claude"},
+        # Humans — both shapes (missing label + different owner) must be ignored.
+        "human-a": {},
+        "human-b": {"created_by": "someone-else"},
+    }
+    resp = await client.post(
+        "/api/containers/create",
+        json={"image": "ubuntu:24.04", "name": "cc-4"},
+    )
+    assert resp.status == 200, await resp.text()
+
+
+async def test_container_create_cap_is_atomic_under_concurrency(app, client):
+    """Fire 6 concurrent creates at an empty state; exactly 4 must succeed and
+    2 must receive 429 container_cap_reached. The lock+set pattern prevents a
+    TOCTOU race where all 6 observe count=0 before any mutation lands.
+    """
+    import asyncio as _asyncio
+
+    app["_test_container_create"] = {}
+    app["_test_container_labels"] = {}
+
+    async def _spawn(i):
+        return await client.post(
+            "/api/containers/create",
+            json={"image": "ubuntu:24.04", "name": f"cc-conc-{i}"},
+        )
+
+    responses = await _asyncio.gather(*[_spawn(i) for i in range(6)])
+    statuses = [r.status for r in responses]
+    assert statuses.count(200) == 4, f"expected 4 successes, got statuses={statuses}"
+    assert statuses.count(429) == 2, f"expected 2 rejections, got statuses={statuses}"
+
+    # All 429s must carry the structured error shape.
+    for r in responses:
+        if r.status == 429:
+            data = await r.json()
+            assert data["error"] == "container_cap_reached"
+            assert isinstance(data.get("existing_container_ids"), list)
+            assert len(data["existing_container_ids"]) == 4
+
+
+async def test_container_create_cap_uses_label_filter_not_total_count(app, client, monkeypatch):
+    """Cap check must invoke `docker ps -a --filter label=created_by=canvas-claude`
+    rather than counting every container on the host. Verified by asserting the
+    argv passed to asyncio.create_subprocess_exec includes the filter.
+    """
+    # Clear the test-labels shortcut so the real subprocess path runs.
+    app.pop("_test_container_labels", None)
+    app["_test_container_create"] = {}
+
+    recorded_argv: list[list[str]] = []
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"", b"")
+
+    async def fake_exec(*argv, **kw):
+        recorded_argv.append(list(argv))
+        return FakeProc()
+
+    monkeypatch.setattr("claude_rts.server.asyncio.create_subprocess_exec", fake_exec)
+
+    resp = await client.post(
+        "/api/containers/create",
+        json={"image": "ubuntu:24.04", "name": "cc-filter-check"},
+    )
+    assert resp.status == 200
+
+    # The cap-count subprocess call must carry the label filter.
+    cap_count_calls = [a for a in recorded_argv if "ps" in a and "--filter" in a]
+    assert cap_count_calls, f"no docker-ps cap-count call observed; argvs={recorded_argv}"
+    for argv in cap_count_calls:
+        assert "label=created_by=canvas-claude" in argv
+
+
 async def test_container_create_uses_asyncio_subprocess(monkeypatch):
     """Invariant: devcontainer up runs via asyncio.create_subprocess_exec
     (never blocking sync subprocess.run). Test mocks the async call directly.
