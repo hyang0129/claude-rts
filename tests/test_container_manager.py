@@ -532,6 +532,100 @@ async def test_container_create_surfaces_failure_as_500(app, client):
     assert "permission denied" in data["detail"]
 
 
+# ── container_rebuild ────────────────────────────────────────────────────
+
+
+async def test_container_rebuild_rejects_non_owned_container(app, client):
+    """Rebuild against a container lacking created_by=canvas-claude must 403."""
+    app["_test_container_labels"] = {"human-owned": {}}  # no created_by
+    resp = await client.post("/api/containers/human-owned/rebuild")
+    assert resp.status == 403
+    data = await resp.json()
+    assert data["error"] == "not_canvas_claude_owned"
+    assert data["container"] == "human-owned"
+    # No rebuild should have been recorded.
+    assert app.get("_test_rebuild_calls", []) == []
+
+
+async def test_container_rebuild_succeeds_on_canvas_claude_owned(app, client):
+    """Owned container: stop → rm (WITHOUT -v) → recreate with same image+labels+mounts."""
+    app["_test_containers"] = [{"name": "cc-owned", "state": "online"}]
+    app["_test_container_labels"] = {
+        "cc-owned": {
+            "created_by": "canvas-claude",
+            "supreme-claudemander.managed": "true",
+            "image": "ubuntu:24.04",
+            "mounts": ["source=cc-owned-workspace,target=/workspace,type=volume"],
+        }
+    }
+    resp = await client.post("/api/containers/cc-owned/rebuild")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["status"] == "rebuilt"
+    assert data["container_id"] == "cc-owned"
+    assert data["name"] == "cc-owned"
+
+    # Stop + rm were called, and rm was WITHOUT -v (volume preserved).
+    log = app["_test_rebuild_calls"]
+    ops = [(e["op"], e["name"]) for e in log]
+    assert ("stop", "cc-owned") in ops
+    assert ("rm", "cc-owned") in ops
+    rm_entry = next(e for e in log if e["op"] == "rm")
+    assert rm_entry["with_volumes"] is False
+
+    # Recreate recorded with the same image + canvas-claude label + workspace volume.
+    calls = app["_test_container_create"]["calls"]
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["name"] == "cc-owned"
+    assert call["image"] == "ubuntu:24.04"
+    assert call["labels"]["created_by"] == "canvas-claude"
+    assert any("cc-owned-workspace" in m and "type=volume" in m for m in call["mounts"])
+
+
+async def test_container_rebuild_preserves_workspace_volume(app, client):
+    """Docker rm must not carry -v — the named workspace volume must survive."""
+    app["_test_container_labels"] = {
+        "cc-preserve": {
+            "created_by": "canvas-claude",
+            "image": "ubuntu:24.04",
+            "mounts": ["source=cc-preserve-workspace,target=/workspace,type=volume"],
+        }
+    }
+    resp = await client.post("/api/containers/cc-preserve/rebuild")
+    assert resp.status == 200
+
+    log = app["_test_rebuild_calls"]
+    rm_entries = [e for e in log if e["op"] == "rm"]
+    assert len(rm_entries) == 1
+    # Invariant: docker rm -v would destroy the workspace. Must not happen.
+    assert rm_entries[0]["with_volumes"] is False
+
+    # And the reconstructed spec carries the same named-volume mount.
+    calls = app["_test_container_create"]["calls"]
+    assert len(calls) == 1
+    mounts = calls[0]["mounts"]
+    assert any("cc-preserve-workspace" in m for m in mounts)
+
+
+async def test_container_rebuild_missing_container_returns_error(client):
+    """With no test hooks set, the real-docker path is invoked. Mock inspect failure."""
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 1
+    mock_proc.communicate = AsyncMock(return_value=(b"", b"No such container: ghost"))
+    with patch("claude_rts.server.asyncio.create_subprocess_exec", return_value=mock_proc):
+        resp = await client.post("/api/containers/ghost/rebuild")
+    assert resp.status == 500
+    data = await resp.json()
+    assert data["error"] == "docker_inspect_failed"
+
+
+async def test_container_rebuild_route_registered(client):
+    """Smoke: route /api/containers/{name}/rebuild exists."""
+    all_paths = {r.canonical for r in client.app.router.resources()}
+    assert "/api/containers/{name}/rebuild" in all_paths
+
+
 async def test_container_create_uses_asyncio_subprocess(monkeypatch):
     """Invariant: devcontainer up runs via asyncio.create_subprocess_exec
     (never blocking sync subprocess.run). Test mocks the async call directly.
