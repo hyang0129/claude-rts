@@ -289,6 +289,107 @@ async def test_vm_stop_invalid_timeout(client):
     assert "timeout" in body["error"]
 
 
+# ── created_by=canvas-claude guard (issue #200) ────────────────────────────
+
+
+async def test_vm_stop_guard_allows_when_label_matches(client):
+    """MCP-origin stop (via=canvas-claude) succeeds when container carries
+    created_by=canvas-claude label."""
+    app = client.app
+    app["_test_vm_containers"] = [
+        {"name": "cc-owned", "state": "online", "image": "ubuntu:24.04", "status": "Up 1m"},
+    ]
+    app["_test_vm_labels"] = {"cc-owned": {"created_by": "canvas-claude"}}
+
+    resp = await client.post("/api/vms/cc-owned/stop?via=canvas-claude")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["state"] == "offline"
+
+
+async def test_vm_stop_guard_rejects_when_label_missing(client):
+    """MCP-origin stop returns 403 not_canvas_claude_owned when the container
+    has no created_by label."""
+    app = client.app
+    app["_test_vm_containers"] = [
+        {"name": "human-owned", "state": "online", "image": "ubuntu:24.04", "status": "Up 1h"},
+    ]
+    app["_test_vm_labels"] = {"human-owned": {}}  # no created_by
+
+    resp = await client.post("/api/vms/human-owned/stop?via=canvas-claude")
+    assert resp.status == 403
+    data = await resp.json()
+    assert data["error"] == "not_canvas_claude_owned"
+    assert data["container"] == "human-owned"
+
+    # Guard must NOT have flipped state
+    assert app["_test_vm_containers"][0]["state"] == "online"
+
+
+async def test_vm_stop_guard_rejects_when_label_mismatched(client):
+    """MCP-origin stop is rejected when created_by is set to a different value."""
+    app = client.app
+    app["_test_vm_containers"] = [
+        {"name": "other", "state": "online", "image": "x", "status": "Up"},
+    ]
+    app["_test_vm_labels"] = {"other": {"created_by": "someone-else"}}
+
+    resp = await client.post("/api/vms/other/stop?via=canvas-claude")
+    assert resp.status == 403
+    data = await resp.json()
+    assert data["error"] == "not_canvas_claude_owned"
+
+
+async def test_vm_stop_human_ui_path_bypasses_guard(client):
+    """UI requests (no via/header) are not guarded — humans may stop any
+    container they own, including ones without the canvas-claude label."""
+    app = client.app
+    app["_test_vm_containers"] = [
+        {"name": "human-owned", "state": "online", "image": "x", "status": "Up"},
+    ]
+    app["_test_vm_labels"] = {"human-owned": {}}  # no label
+
+    resp = await client.post("/api/vms/human-owned/stop")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["state"] == "offline"
+
+
+async def test_vm_stop_guard_via_spawner_header(client):
+    """The X-Canvas-Claude-Spawner header is an alternate origin signal
+    equivalent to ?via=canvas-claude."""
+    app = client.app
+    app["_test_vm_containers"] = [
+        {"name": "human-owned", "state": "online", "image": "x", "status": "Up"},
+    ]
+    app["_test_vm_labels"] = {"human-owned": {}}
+
+    resp = await client.post(
+        "/api/vms/human-owned/stop",
+        headers={"X-Canvas-Claude-Spawner": "card-abc123"},
+    )
+    assert resp.status == 403
+    data = await resp.json()
+    assert data["error"] == "not_canvas_claude_owned"
+
+
+async def test_vm_stop_guard_docker_inspect_failure_maps_to_500(client):
+    """When docker inspect itself fails, guard returns 500 with a stable error
+    key (docker_inspect_failed) rather than silently allowing or rejecting."""
+    # Not setting _test_vm_labels → real docker inspect path. Mock subprocess
+    # to simulate docker inspect returning non-zero.
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 1
+    mock_proc.communicate = AsyncMock(return_value=(b"", b"No such object: ghost"))
+    with patch("claude_rts.server.asyncio.create_subprocess_exec", return_value=mock_proc):
+        resp = await client.post("/api/vms/ghost/stop?via=canvas-claude")
+
+    assert resp.status == 500
+    data = await resp.json()
+    assert data["error"] == "docker_inspect_failed"
+    assert data["container"] == "ghost"
+
+
 # ── Per-container actions endpoint ──────────────────────────────────────────
 
 

@@ -200,7 +200,7 @@ Each `CanvasClaudeCard` enforces a hard cap of 10 live terminals across both `op
 | `vm_append_container_action` | `GET` + `PUT` (atomic) | Append one blueprint-action without dropping existing entries |
 | `vm_add_favorite` | `GET` + `PUT /api/vms/favorites` | Add a container to favorites (default: empty actions) |
 | `vm_start_container` | `POST /api/vms/{name}/start` | Start a stopped container |
-| `vm_stop_container` | `POST /api/vms/{name}/stop` | Stop a running container (optional `timeout`) |
+| `vm_stop_container` | `POST /api/vms/{name}/stop?via=canvas-claude` | Stop a running container (optional `timeout`). Guarded: server rejects with HTTP 403 `not_canvas_claude_owned` unless the container carries the Docker label `created_by=canvas-claude`. Human UI calls omit `via=canvas-claude` and are unguarded. |
 | `blueprint_list` | `GET /api/blueprints` | List all saved blueprint names |
 | `blueprint_get` | `GET /api/blueprints/{name}` | Get a single blueprint definition |
 | `blueprint_save` | `PUT /api/blueprints/{name}` (upsert) | Save or update a blueprint definition |

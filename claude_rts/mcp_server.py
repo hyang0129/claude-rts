@@ -352,15 +352,23 @@ def tool_vm_start_container(args):
 
 
 def tool_vm_stop_container(args):
-    """Stop a running Docker container via POST /api/vms/{name}/stop."""
+    """Stop a running Docker container via POST /api/vms/{name}/stop.
+
+    Carries the ``via=canvas-claude`` origin signal so the server enforces the
+    ``created_by=canvas-claude`` Docker-label guard. Containers that were not
+    created by Canvas Claude cannot be stopped through this tool (HTTP 403
+    ``not_canvas_claude_owned``). Humans stopping containers via the UI bypass
+    the guard because the UI does not set this query param.
+    """
     name = args.get("name", "") or args.get("container", "")
     if not name:
         raise ValueError("name is required")
     safe_name = urllib.parse.quote(name, safe="")
-    path = f"/api/vms/{safe_name}/stop"
+    params = ["via=canvas-claude"]
     timeout = args.get("timeout")
     if timeout is not None:
-        path += f"?timeout={int(timeout)}"
+        params.append(f"timeout={int(timeout)}")
+    path = f"/api/vms/{safe_name}/stop?{'&'.join(params)}"
     result = http_request("POST", path)
     return f"Stopped {name}: {json.dumps(result)}"
 
