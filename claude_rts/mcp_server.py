@@ -269,8 +269,8 @@ def tool_get_recovery_script(args):
     return result.get("recovery_script", "")
 
 
-def tool_vm_discover_containers(args):  # noqa: ARG001
-    result = http_request("GET", "/api/vms/discover")
+def tool_container_discover(args):  # noqa: ARG001
+    result = http_request("GET", "/api/containers/discover")
     if not isinstance(result, list):
         return f"Error discovering containers: {result}"
     if not result:
@@ -283,12 +283,12 @@ def tool_vm_discover_containers(args):  # noqa: ARG001
     return "\n".join(lines)
 
 
-def tool_vm_get_favorites(args):  # noqa: ARG001
-    result = http_request("GET", "/api/vms/favorites")
+def tool_container_get_favorites(args):  # noqa: ARG001
+    result = http_request("GET", "/api/containers/favorites")
     return json.dumps(result, indent=2)
 
 
-def tool_vm_set_container_actions(args):
+def tool_container_set_actions(args):
     container = args.get("container", "")
     if not container:
         raise ValueError("container is required")
@@ -296,25 +296,25 @@ def tool_vm_set_container_actions(args):
     safe_name = urllib.parse.quote(container, safe="")
     result = http_request(
         "PUT",
-        f"/api/vms/favorites/{safe_name}/actions",
+        f"/api/containers/favorites/{safe_name}/actions",
         body=json.dumps(actions),
     )
     return f"Actions updated for {container}: {json.dumps(result)}"
 
 
-def tool_vm_get_container_actions(args):
+def tool_container_get_actions(args):
     """Return just one favorite's actions array; error if not found."""
     container = args.get("container", "") or args.get("name", "")
     if not container:
         raise ValueError("container is required")
-    favorites = http_request("GET", "/api/vms/favorites")
+    favorites = http_request("GET", "/api/containers/favorites")
     for fav in favorites:
         if fav.get("name") == container:
             return json.dumps(fav.get("actions", []), indent=2)
     raise ValueError(f"Favorite not found: {container}")
 
 
-def tool_vm_append_container_action(args):
+def tool_container_append_action(args):
     """Atomically append one action to a favorite's actions array."""
     container = args.get("container", "") or args.get("name", "")
     if not container:
@@ -322,7 +322,7 @@ def tool_vm_append_container_action(args):
     action = args.get("action")
     if not isinstance(action, dict):
         raise ValueError("action (object) is required")
-    favorites = http_request("GET", "/api/vms/favorites")
+    favorites = http_request("GET", "/api/containers/favorites")
     target = None
     for fav in favorites:
         if fav.get("name") == container:
@@ -335,24 +335,24 @@ def tool_vm_append_container_action(args):
     safe_name = urllib.parse.quote(container, safe="")
     result = http_request(
         "PUT",
-        f"/api/vms/favorites/{safe_name}/actions",
+        f"/api/containers/favorites/{safe_name}/actions",
         body=json.dumps(existing),
     )
     return f"Appended action to {container}: {json.dumps(result)}"
 
 
-def tool_vm_start_container(args):
-    """Start a stopped Docker container via POST /api/vms/{name}/start."""
+def tool_container_start(args):
+    """Start a stopped Docker container via POST /api/containers/{name}/start."""
     name = args.get("name", "") or args.get("container", "")
     if not name:
         raise ValueError("name is required")
     safe_name = urllib.parse.quote(name, safe="")
-    result = http_request("POST", f"/api/vms/{safe_name}/start")
+    result = http_request("POST", f"/api/containers/{safe_name}/start")
     return f"Started {name}: {json.dumps(result)}"
 
 
-def tool_vm_stop_container(args):
-    """Stop a running Docker container via POST /api/vms/{name}/stop.
+def tool_container_stop(args):
+    """Stop a running Docker container via POST /api/containers/{name}/stop.
 
     Carries the ``via=canvas-claude`` origin signal so the server enforces the
     ``created_by=canvas-claude`` Docker-label guard. Containers that were not
@@ -368,24 +368,24 @@ def tool_vm_stop_container(args):
     timeout = args.get("timeout")
     if timeout is not None:
         params.append(f"timeout={int(timeout)}")
-    path = f"/api/vms/{safe_name}/stop?{'&'.join(params)}"
+    path = f"/api/containers/{safe_name}/stop?{'&'.join(params)}"
     result = http_request("POST", path)
     return f"Stopped {name}: {json.dumps(result)}"
 
 
-def tool_vm_add_favorite(args):
+def tool_container_add_favorite(args):
     name = args.get("name", "")
     if not name:
         raise ValueError("name is required")
     actions = args.get("actions", [])
     # GET current favorites, append, PUT back
-    favorites = http_request("GET", "/api/vms/favorites")
+    favorites = http_request("GET", "/api/containers/favorites")
     # Check if already exists
     for fav in favorites:
         if fav.get("name") == name:
             return f"Container {name} is already a favorite"
     favorites.append({"name": name, "type": "docker", "actions": actions})
-    http_request("PUT", "/api/vms/favorites", body=json.dumps(favorites))
+    http_request("PUT", "/api/containers/favorites", body=json.dumps(favorites))
     return f"Added {name} to favorites with {len(actions)} action(s)"
 
 
@@ -469,14 +469,14 @@ TOOL_HANDLERS = {
     "rename_terminal": tool_rename_terminal,
     "set_recovery_script": tool_set_recovery_script,
     "get_recovery_script": tool_get_recovery_script,
-    "vm_discover_containers": tool_vm_discover_containers,
-    "vm_get_favorites": tool_vm_get_favorites,
-    "vm_set_container_actions": tool_vm_set_container_actions,
-    "vm_get_container_actions": tool_vm_get_container_actions,
-    "vm_append_container_action": tool_vm_append_container_action,
-    "vm_start_container": tool_vm_start_container,
-    "vm_stop_container": tool_vm_stop_container,
-    "vm_add_favorite": tool_vm_add_favorite,
+    "container_discover": tool_container_discover,
+    "container_get_favorites": tool_container_get_favorites,
+    "container_set_actions": tool_container_set_actions,
+    "container_get_actions": tool_container_get_actions,
+    "container_append_action": tool_container_append_action,
+    "container_start": tool_container_start,
+    "container_stop": tool_container_stop,
+    "container_add_favorite": tool_container_add_favorite,
     "blueprint_list": tool_blueprint_list,
     "blueprint_get": tool_blueprint_get,
     "blueprint_save": tool_blueprint_save,
@@ -529,9 +529,9 @@ TOOL_SCHEMAS = [
                     "type": "string",
                     "description": (
                         "Exact Docker container name to connect to. When set, cmd runs inside "
-                        "this container via docker exec. Use vm_discover_containers to find "
+                        "this container via docker exec. Use container_discover to find "
                         "available container names (e.g. 'supreme-claudemander-util'). "
-                        "The container must be running — use vm_start_container first if needed."
+                        "The container must be running — use container_start first if needed."
                     ),
                 },
                 "x": {
@@ -612,7 +612,7 @@ TOOL_SCHEMAS = [
                     "description": (
                         "Exact Docker container name to run the command in (optional). "
                         "When set, cmd runs inside this container via docker exec. "
-                        "Use vm_discover_containers to find available container names."
+                        "Use container_discover to find available container names."
                     ),
                 },
                 "hub": {
@@ -779,12 +779,12 @@ TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "vm_discover_containers",
+        "name": "container_discover",
         "description": (
             "List all Docker containers on the host (both running and stopped). "
             "Returns each container's name, state (online/offline), image, and status. "
             "Use the container names from this list as the 'container' or 'name' parameter "
-            "in other tools (open_terminal, vm_start_container, vm_add_favorite, etc.)."
+            "in other tools (open_terminal, container_start, container_add_favorite, etc.)."
         ),
         "inputSchema": {
             "type": "object",
@@ -792,9 +792,9 @@ TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "vm_get_favorites",
+        "name": "container_get_favorites",
         "description": (
-            "Get the VM Manager favorites list — containers the user has bookmarked "
+            "Get the Container Manager favorites list — containers the user has bookmarked "
             "for quick access. Each favorite has: name (string), type ('docker'), "
             "actions (array of blueprint-action objects). Actions define buttons in the UI "
             "that spawn blueprints scoped to the container. "
@@ -808,11 +808,11 @@ TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "vm_set_container_actions",
+        "name": "container_set_actions",
         "description": (
             "REPLACE the entire actions array for a favorite container. WARNING: this "
             "overwrites all existing actions — if you only want to add one action without "
-            "losing the others, use vm_append_container_action instead. "
+            "losing the others, use container_append_action instead. "
             "Action schema: {label: string, blueprint: string (name of a saved blueprint), "
             "context?: object (extra variables merged with auto-injected container name)}. "
             "The container name is always injected automatically when the action is executed."
@@ -824,7 +824,7 @@ TOOL_SCHEMAS = [
                     "type": "string",
                     "description": (
                         "Name of the favorite container to update. "
-                        "Must already be in the favorites list (use vm_add_favorite first if needed)."
+                        "Must already be in the favorites list (use container_add_favorite first if needed)."
                     ),
                 },
                 "actions": {
@@ -848,7 +848,7 @@ TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "vm_get_container_actions",
+        "name": "container_get_actions",
         "description": (
             "Get the actions array for a single favorite container. Returns a JSON array "
             "of blueprint-action objects ({label, blueprint, context?}). Errors if the "
@@ -871,12 +871,12 @@ TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "vm_append_container_action",
+        "name": "container_append_action",
         "description": (
             "Add one action to a favorite container WITHOUT removing existing actions. "
             "This is an atomic read-modify-write: it fetches the current actions, appends "
             "the new one, and saves the updated list in a single operation. Prefer this over "
-            "vm_set_container_actions when you only need to add an action — it is safer "
+            "container_set_actions when you only need to add an action — it is safer "
             "because it never drops existing entries. Accepts either 'container' or 'name' "
             "as the parameter key. "
             "Action schema: {label: string, blueprint: string (name of a saved blueprint), "
@@ -912,9 +912,9 @@ TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "vm_start_container",
+        "name": "container_start",
         "description": (
-            "Start a stopped Docker container. Use vm_discover_containers first to check "
+            "Start a stopped Docker container. Use container_discover first to check "
             "the container's current state. After starting, you can open a terminal in it "
             "with open_terminal. Accepts either 'name' or 'container' as the parameter key."
         ),
@@ -925,7 +925,7 @@ TOOL_SCHEMAS = [
                     "type": "string",
                     "description": (
                         "Name of the Docker container to start (also accepted as 'container'). "
-                        "Use the exact name from vm_discover_containers."
+                        "Use the exact name from container_discover."
                     ),
                 },
             },
@@ -933,9 +933,9 @@ TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "vm_stop_container",
+        "name": "container_stop",
         "description": (
-            "Stop a running Docker container. Use vm_discover_containers first to confirm "
+            "Stop a running Docker container. Use container_discover first to confirm "
             "it is running. Optionally set a timeout (seconds) before the container is "
             "force-killed. Accepts either 'name' or 'container' as the parameter key."
         ),
@@ -946,7 +946,7 @@ TOOL_SCHEMAS = [
                     "type": "string",
                     "description": (
                         "Name of the Docker container to stop (also accepted as 'container'). "
-                        "Use the exact name from vm_discover_containers."
+                        "Use the exact name from container_discover."
                     ),
                 },
                 "timeout": {
@@ -962,13 +962,13 @@ TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "vm_add_favorite",
+        "name": "container_add_favorite",
         "description": (
-            "Add a Docker container to the VM Manager favorites list so it appears in "
+            "Add a Docker container to the Container Manager favorites list so it appears in "
             "the sidebar for quick access. If the container is already a favorite, returns "
             "a message and does nothing. Optionally provide custom blueprint-actions; "
             "default is an empty actions array (no actions configured). Use "
-            "vm_append_container_action or vm_set_container_actions to add actions after."
+            "container_append_action or container_set_actions to add actions after."
         ),
         "inputSchema": {
             "type": "object",
@@ -976,8 +976,7 @@ TOOL_SCHEMAS = [
                 "name": {
                     "type": "string",
                     "description": (
-                        "Name of the Docker container to add to favorites. "
-                        "Use the exact name from vm_discover_containers."
+                        "Name of the Docker container to add to favorites. Use the exact name from container_discover."
                     ),
                 },
                 "actions": {

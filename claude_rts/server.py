@@ -144,13 +144,13 @@ async def widget_system_info_handler(request: web.Request) -> web.Response:
 _DOCKER_CMD = "docker"
 
 
-# ── VM Manager API ───────────────────────────────────────────────────────────
+# ── Container Manager API ────────────────────────────────────────────────────
 
 
-async def vm_discover_handler(request: web.Request) -> web.Response:
+async def container_discover_handler(request: web.Request) -> web.Response:
     """Discover all Docker containers (running + stopped) with status."""
     # In test mode, return injected mock data if available
-    test_containers = request.app.get("_test_vm_containers")
+    test_containers = request.app.get("_test_containers")
     if test_containers is not None:
         return web.json_response(sorted(test_containers, key=lambda c: c["name"]))
 
@@ -167,7 +167,7 @@ async def vm_discover_handler(request: web.Request) -> web.Response:
 
     if proc.returncode != 0:
         err = stderr.decode().strip() if stderr else "docker ps failed"
-        logger.warning("vm_discover: docker ps failed: {}", err)
+        logger.warning("container_discover: docker ps failed: {}", err)
         return web.json_response({"error": err}, status=500)
 
     containers = []
@@ -199,39 +199,39 @@ async def vm_discover_handler(request: web.Request) -> web.Response:
     return web.json_response(containers)
 
 
-async def vm_favorites_get_handler(request: web.Request) -> web.Response:
-    """Read the VM Manager favorites list from config."""
+async def container_favorites_get_handler(request: web.Request) -> web.Response:
+    """Read the Container Manager favorites list from config."""
     app_config: AppConfig = request.app["app_config"]
     config = read_config(app_config)
-    vm_config = config.get("vm_manager", {})
-    favorites = vm_config.get("favorites", [])
+    cm_config = config.get("container_manager", {})
+    favorites = cm_config.get("favorites", [])
     return web.json_response(favorites)
 
 
-async def vm_favorites_put_handler(request: web.Request) -> web.Response:
-    """Write the VM Manager favorites list to config."""
+async def container_favorites_put_handler(request: web.Request) -> web.Response:
+    """Write the Container Manager favorites list to config."""
     app_config: AppConfig = request.app["app_config"]
     body = await request.json()
     favorites = body if isinstance(body, list) else body.get("favorites", [])
     config = read_config(app_config)
-    if "vm_manager" not in config:
-        config["vm_manager"] = {}
-    config["vm_manager"]["favorites"] = favorites
+    if "container_manager" not in config:
+        config["container_manager"] = {}
+    config["container_manager"]["favorites"] = favorites
     write_config(app_config, config)
     return web.json_response(favorites)
 
 
-async def vm_start_handler(request: web.Request) -> web.Response:
+async def container_start_handler(request: web.Request) -> web.Response:
     """Start a stopped Docker container by name."""
     name = request.match_info["name"]
 
     # In test mode, flip mock container state instead of calling Docker
-    test_containers = request.app.get("_test_vm_containers")
+    test_containers = request.app.get("_test_containers")
     if test_containers is not None:
         for c in test_containers:
             if c["name"] == name:
                 c["state"] = "online"
-                logger.info("vm_start (test): flipped '{}' to online", name)
+                logger.info("container_start (test): flipped '{}' to online", name)
                 return web.json_response({"name": name, "state": "online"})
         return web.json_response({"error": f"No such container: {name}"}, status=500)
 
@@ -247,10 +247,10 @@ async def vm_start_handler(request: web.Request) -> web.Response:
 
     if proc.returncode != 0:
         err = stderr.decode().strip() if stderr else "docker start failed"
-        logger.warning("vm_start: failed to start container '{}': {}", name, err)
+        logger.warning("container_start: failed to start container '{}': {}", name, err)
         return web.json_response({"error": err}, status=500)
 
-    logger.info("vm_start: started container '{}'", name)
+    logger.info("container_start: started container '{}'", name)
     return web.json_response({"name": name, "state": "online"})
 
 
@@ -270,7 +270,7 @@ async def _require_canvas_claude_owned(request: web.Request, name: str) -> web.R
         return None
 
     # Test-mode hook: label lookup table keyed by container name
-    test_labels = request.app.get("_test_vm_labels")
+    test_labels = request.app.get("_test_container_labels")
     if test_labels is not None:
         label = test_labels.get(name, {}).get("created_by")
         if label != "canvas-claude":
@@ -322,7 +322,7 @@ async def _require_canvas_claude_owned(request: web.Request, name: str) -> web.R
     return None
 
 
-async def vm_stop_handler(request: web.Request) -> web.Response:
+async def container_stop_handler(request: web.Request) -> web.Response:
     """Stop a running Docker container by name."""
     name = request.match_info["name"]
 
@@ -334,12 +334,12 @@ async def vm_stop_handler(request: web.Request) -> web.Response:
         return guard_resp
 
     # In test mode, flip mock container state instead of calling Docker
-    test_containers = request.app.get("_test_vm_containers")
+    test_containers = request.app.get("_test_containers")
     if test_containers is not None:
         for c in test_containers:
             if c["name"] == name:
                 c["state"] = "offline"
-                logger.info("vm_stop (test): flipped '{}' to offline", name)
+                logger.info("container_stop (test): flipped '{}' to offline", name)
                 return web.json_response({"name": name, "state": "offline"})
         return web.json_response({"error": f"No such container: {name}"}, status=500)
 
@@ -363,20 +363,20 @@ async def vm_stop_handler(request: web.Request) -> web.Response:
 
     if proc.returncode != 0:
         err = stderr.decode().strip() if stderr else "docker stop failed"
-        logger.warning("vm_stop: failed to stop container '{}': {}", name, err)
+        logger.warning("container_stop: failed to stop container '{}': {}", name, err)
         return web.json_response({"error": err}, status=500)
 
-    logger.info("vm_stop: stopped container '{}'", name)
+    logger.info("container_stop: stopped container '{}'", name)
     return web.json_response({"name": name, "state": "offline"})
 
 
-async def vm_favorites_actions_put_handler(request: web.Request) -> web.Response:
+async def container_favorites_actions_put_handler(request: web.Request) -> web.Response:
     """Update actions for a specific favorite container by name."""
     name = request.match_info["name"]
     app_config: AppConfig = request.app["app_config"]
     cfg = read_config(app_config)
-    vm_config = cfg.get("vm_manager", {})
-    favorites = vm_config.get("favorites", [])
+    cm_config = cfg.get("container_manager", {})
+    favorites = cm_config.get("favorites", [])
 
     # Find the target favorite
     target = None
@@ -397,9 +397,9 @@ async def vm_favorites_actions_put_handler(request: web.Request) -> web.Response
     target["actions"] = actions
 
     # Persist
-    if "vm_manager" not in cfg:
-        cfg["vm_manager"] = {}
-    cfg["vm_manager"]["favorites"] = favorites
+    if "container_manager" not in cfg:
+        cfg["container_manager"] = {}
+    cfg["container_manager"]["favorites"] = favorites
     write_config(app_config, cfg)
 
     return web.json_response(actions)
@@ -675,17 +675,17 @@ async def test_sessions_list(request: web.Request) -> web.Response:
     return web.json_response(mgr.list_sessions())
 
 
-async def test_vm_containers_put(request: web.Request) -> web.Response:
-    """PUT /api/test/vm-containers — inject fake container list for E2E tests."""
+async def test_containers_put(request: web.Request) -> web.Response:
+    """PUT /api/test/containers — inject fake container list for E2E tests."""
     data = await request.json()
     containers = data if isinstance(data, list) else data.get("containers", [])
-    request.app["_test_vm_containers"] = containers
+    request.app["_test_containers"] = containers
     return web.json_response(containers)
 
 
-async def test_vm_containers_get(request: web.Request) -> web.Response:
-    """GET /api/test/vm-containers — read back fake container list."""
-    containers = request.app.get("_test_vm_containers", [])
+async def test_containers_get(request: web.Request) -> web.Response:
+    """GET /api/test/containers — read back fake container list."""
+    containers = request.app.get("_test_containers", [])
     return web.json_response(containers)
 
 
@@ -1736,13 +1736,13 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
     app.router.add_get("/api/widgets/system-info", widget_system_info_handler)
 
-    # VM Manager API
-    app.router.add_get("/api/vms/discover", vm_discover_handler)
-    app.router.add_get("/api/vms/favorites", vm_favorites_get_handler)
-    app.router.add_put("/api/vms/favorites", vm_favorites_put_handler)
-    app.router.add_post("/api/vms/{name}/start", vm_start_handler)
-    app.router.add_post("/api/vms/{name}/stop", vm_stop_handler)
-    app.router.add_put("/api/vms/favorites/{name}/actions", vm_favorites_actions_put_handler)
+    # Container Manager API
+    app.router.add_get("/api/containers/discover", container_discover_handler)
+    app.router.add_get("/api/containers/favorites", container_favorites_get_handler)
+    app.router.add_put("/api/containers/favorites", container_favorites_put_handler)
+    app.router.add_post("/api/containers/{name}/start", container_start_handler)
+    app.router.add_post("/api/containers/{name}/stop", container_stop_handler)
+    app.router.add_put("/api/containers/favorites/{name}/actions", container_favorites_actions_put_handler)
 
     app.router.add_get("/api/profiles", profiles_list_handler)
     app.router.add_get("/api/profiles/discover", profiles_discover_handler)
@@ -1791,8 +1791,8 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
         app.router.add_get("/api/test/session/{id}/status", test_session_status)
         app.router.add_delete("/api/test/session/{id}", test_session_delete)
         app.router.add_get("/api/test/sessions", test_sessions_list)
-        app.router.add_put("/api/test/vm-containers", test_vm_containers_put)
-        app.router.add_get("/api/test/vm-containers", test_vm_containers_get)
+        app.router.add_put("/api/test/containers", test_containers_put)
+        app.router.add_get("/api/test/containers", test_containers_get)
 
     # Lifecycle hooks
     async def on_startup(app: web.Application) -> None:

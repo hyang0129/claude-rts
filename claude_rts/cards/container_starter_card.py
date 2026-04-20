@@ -13,7 +13,7 @@ class ContainerStarterCard(BaseCard):
     """Transient service card that starts a Docker container and probes exec-readiness.
 
     Lifecycle:
-    1. Calls POST /api/vms/{name}/start (via the app reference)
+    1. Calls POST /api/containers/{name}/start (via the app reference)
     2. Probes exec-readiness: ``docker exec <name> true`` with exponential backoff
     3. On success: emits ``container:ready:{name}`` with result payload; self-closes
     4. On timeout/failure: emits ``container:failed:{name}`` with error; self-closes
@@ -106,7 +106,7 @@ class ContainerStarterCard(BaseCard):
         """Start the container via docker start."""
         # In test mode, check for mock containers
         if self._app is not None:
-            test_containers = self._app.get("_test_vm_containers")
+            test_containers = self._app.get("_test_containers")
             if test_containers is not None:
                 for c in test_containers:
                     if c["name"] == name:
@@ -132,7 +132,7 @@ class ContainerStarterCard(BaseCard):
         """Probe exec-readiness with exponential backoff until success or timeout."""
         # In test mode with mock containers, skip the real docker exec probe
         if self._app is not None:
-            test_containers = self._app.get("_test_vm_containers")
+            test_containers = self._app.get("_test_containers")
             if test_containers is not None:
                 # Mock mode: container is already "started", consider it ready
                 return

@@ -63,7 +63,7 @@ DEFAULT_CONFIG = {
         "scrollback_size": 65536,
         "tmux_persistence": True,
     },
-    "vm_manager": {
+    "container_manager": {
         "favorites": [],
     },
 }

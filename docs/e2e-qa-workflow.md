@@ -233,7 +233,7 @@ Round 3: Agent 4 (Runner) — final, report only, no more fixes
 - The feature exercises a subprocess (`docker ps`, `docker start`) — run the real command
 - The external system has multiple outcomes that matter (success, failure, timeout, partial response)
 
-**Example:** VM Manager calls `docker start <name>`. The test should start a real stopped container and verify it transitions to running. It should also test starting a non-existent container and verify the error is surfaced to the user.
+**Example:** Container Manager calls `docker start <name>`. The test should start a real stopped container and verify it transitions to running. It should also test starting a non-existent container and verify the error is surfaced to the user.
 
 ### Use mock when
 

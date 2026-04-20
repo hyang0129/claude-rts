@@ -11,8 +11,8 @@ across e2e test files:
 
 - ``clear_canvas``          — destroy all cards + clear canvas DOM, condition-based
 - ``open_context_menu``     — right-click viewport and wait for menu
-- ``refresh_vm_card``       — re-render VM Manager widgets, condition-based
-- ``cleanup_non_vm_cards``  — remove non-VM cards, condition-based
+- ``refresh_container_card``       — re-render Container Manager widgets, condition-based
+- ``cleanup_non_container_cards``  — remove non-VM cards, condition-based
 
 Test files should import these helpers from conftest rather than
 redefining them locally (see issue #165).
@@ -253,15 +253,15 @@ def open_context_menu(page, x=500, y=500):
     ).first.wait_for(state="visible", timeout=5000)
 
 
-def refresh_vm_card(page):
-    """Force re-render of all VM Manager widget cards; wait until the DOM
-    reflects the current ``/api/vms/favorites`` response.
+def refresh_container_card(page):
+    """Force re-render of all Container Manager widget cards; wait until the DOM
+    reflects the current ``/api/containers/favorites`` response.
 
-    The VM Manager ``render()`` method is async (fetches favorites +
+    The Container Manager ``render()`` method is async (fetches favorites +
     discover + config before writing ``body.innerHTML``).  We read the
     expected favorite names from the API and poll until every favorite has
-    a ``[data-vm-remove="<name>"]`` button in the DOM (or favorites is
-    empty and ``[data-vm-search]`` is present).  This replaces fixed
+    a ``[data-container-remove="<name>"]`` button in the DOM (or favorites is
+    empty and ``[data-container-search]`` is present).  This replaces fixed
     ``wait_for_timeout`` delays that were 1.5 s in mock tests and 3 s in
     real-Docker tests — both readily slower than the slowest observed
     render and prone to flakes on busy CI.
@@ -270,7 +270,7 @@ def refresh_vm_card(page):
         """() => {
         if (typeof cards !== 'undefined') {
             for (const card of cards) {
-                if (card.widgetType === 'vm-manager' && typeof card.render === 'function') {
+                if (card.widgetType === 'container-manager' && typeof card.render === 'function') {
                     card.render();
                 }
             }
@@ -278,24 +278,24 @@ def refresh_vm_card(page):
     }"""
     )
     # Fetch expected favorite names, then wait for them to appear.  Using
-    # data-vm-remove (one per favorite, regardless of state) is the most
+    # data-container-remove (one per favorite, regardless of state) is the most
     # reliable observable for render completion.
     page.wait_for_function(
         """async () => {
-            const r = await fetch('/api/vms/favorites');
+            const r = await fetch('/api/containers/favorites');
             if (!r.ok) return false;
             const favs = await r.json();
-            // The VM Manager card must be present in the DOM.
-            const searchInputs = document.querySelectorAll('[data-vm-search]');
+            // The Container Manager card must be present in the DOM.
+            const searchInputs = document.querySelectorAll('[data-container-search]');
             if (searchInputs.length === 0) return false;
             if (favs.length === 0) {
                 // Empty favorites: confirm no remove buttons exist (clean render) and search input present
-                const removeBtns = document.querySelectorAll('[data-vm-remove]');
+                const removeBtns = document.querySelectorAll('[data-container-remove]');
                 return removeBtns.length === 0 && searchInputs.length > 0;
             }
             for (const fav of favs) {
                 const btn = document.querySelector(
-                    `[data-vm-remove="${CSS.escape(fav.name)}"]`
+                    `[data-container-remove="${CSS.escape(fav.name)}"]`
                 );
                 if (!btn) return false;
             }
@@ -305,20 +305,20 @@ def refresh_vm_card(page):
     )
 
 
-def cleanup_non_vm_cards(page):
-    """Remove all cards except VM Manager widgets.
+def cleanup_non_container_cards(page):
+    """Remove all cards except Container Manager widgets.
 
     Terminal cards spawned by earlier tests can intercept pointer events
-    on the VM Manager card.  This helper destroys them and waits until
-    every remaining ``[data-card-id]`` contains a ``[data-vm-search]``
-    descendant (i.e. only VM Manager cards remain) — no fixed sleep.
+    on the Container Manager card.  This helper destroys them and waits until
+    every remaining ``[data-card-id]`` contains a ``[data-container-search]``
+    descendant (i.e. only Container Manager cards remain) — no fixed sleep.
     """
     page.evaluate(
         """() => {
         if (typeof cards === 'undefined') return;
         const toRemove = [];
         for (let i = cards.length - 1; i >= 0; i--) {
-            if (cards[i].widgetType !== 'vm-manager') {
+            if (cards[i].widgetType !== 'container-manager') {
                 if (typeof cards[i].destroy === 'function') cards[i].destroy();
                 toRemove.push(i);
             }
@@ -330,7 +330,7 @@ def cleanup_non_vm_cards(page):
         """() => {
             const all = document.querySelectorAll('[data-card-id]');
             return Array.from(all).every(
-                c => c.querySelector('[data-vm-search]') !== null
+                c => c.querySelector('[data-container-search]') !== null
             );
         }""",
         timeout=3000,

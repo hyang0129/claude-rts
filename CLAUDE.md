@@ -26,7 +26,7 @@ Verify the port is free before starting. Running multiple instances causes port 
 - **Session persistence**: SessionManager decouples PTY lifetime from WebSocket. PTYs run in server memory with a 64KB scrollback ring buffer. Orphan reaper cleans up after 5 min.
 - **Single HTML file**: All JS/CSS is inline in `index.html`. External libs (xterm.js) load from CDN. No npm, no bundler.
 - **Card class hierarchy**: `Card` base → `TerminalCard`, `WidgetCard`, `LoaderCard`. Enables mixed dashboards.
-- **Limited container lifecycle (start/stop only)**: supreme-claudemander can start and stop Docker containers via the VM Manager card. Creating, removing, and image management remain out of scope.
+- **Limited container lifecycle (start/stop only)**: supreme-claudemander can start and stop Docker containers via the Container Manager card. Creating, removing, and image management remain out of scope.
 - **Plain `docker` binary**: Always use `docker` (no `.exe`). The runtime is Linux/macOS-native. Windows is community-supported best-effort.
 
 ## Dev Config Presets
@@ -101,7 +101,7 @@ The devcontainer is configured to run the full E2E suite including Docker-gated 
 | `test_terminal_card.py` | 18 | TerminalCard lifecycle, CardRegistry, server integration, display_name, recovery_script |
 | `test_claude_api.py` | 38 | Claude terminal control API (CRUD, send/read, strip_ansi, /ws/control, full lifecycle, cmd pass-through, rename, recovery-script, card_updated broadcast) |
 | `test_event_bus.py` | 14 | EventBus core (subscribe, emit, unsubscribe, wildcard, async, errors, clear) + integration (ServiceCard bus emit, CardRegistry events) |
-| `test_vm_manager.py` | 18 | VM Manager API (discover containers, favorites CRUD, start/stop container, per-container actions, route registration) |
+| `test_container_manager.py` | 18 | Container Manager API (discover containers, favorites CRUD, start/stop container, per-container actions, route registration) |
 | `test_mcp_server.py` | 64 | MCP server tool functions (terminal CRUD/rename/recovery + VM discover/favorites/actions/start/stop/append/get + blueprint list/get/save/delete/spawn) and JSON-RPC dispatch |
 | `e2e/test_smoke.py` | 7 | Playwright Electron smoke tests — launch, spawn, drag, resize, widgets, pan/zoom, save/reload |
 
@@ -120,11 +120,11 @@ Tests use `MockPty` to avoid needing Docker. E2E tests require Playwright and El
 | GET | `/api/widgets/system-info` | System info widget data |
 | GET | `/api/profiles` | Probe profiles with usage data, sorted by burn rate |
 | GET/PUT | `/api/profiles/main` | Read the main profile slot name / promote a tracked profile (credential copy) |
-| GET | `/api/vms/discover` | Discover all Docker containers (running + stopped) with status |
-| GET/PUT | `/api/vms/favorites` | Read/write VM Manager favorites list |
-| POST | `/api/vms/{name}/start` | Start a stopped Docker container |
-| POST | `/api/vms/{name}/stop` | Stop a running Docker container (optional `?timeout=N`) |
-| PUT | `/api/vms/favorites/{name}/actions` | Update actions for a specific favorite container |
+| GET | `/api/containers/discover` | Discover all Docker containers (running + stopped) with status |
+| GET/PUT | `/api/containers/favorites` | Read/write Container Manager favorites list |
+| POST | `/api/containers/{name}/start` | Start a stopped Docker container |
+| POST | `/api/containers/{name}/stop` | Stop a running Docker container (optional `?timeout=N`) |
+| PUT | `/api/containers/favorites/{name}/actions` | Update actions for a specific favorite container |
 | POST | `/api/claude/terminal/create` | Create a TerminalCard + PTY session (params: cmd, hub, container, cols, rows, x, y, w, h). Optional: `ephemeral=true` (no card registered, auto-closes on PTY EOF or timeout), `spawner_id=<card_id>` (attributes the spawn to a CanvasClaudeCard for cap enforcement), `timeout=<seconds>` (ephemeral only; default 60, max 120; values outside `[1, 120]` return HTTP 400 `ephemeral_timeout_too_long`). When `spawner_id` is set and the spawner already has 10 live sessions, returns HTTP 429 `terminal_cap_reached` with `live_session_ids`. |
 | POST | `/api/claude/terminal/{id}/send` | Write text to a terminal PTY |
 | GET | `/api/claude/terminal/{id}/read` | Read scrollback (optional: strip_ansi, last_n) |
@@ -158,7 +158,7 @@ Stored in `~/.supreme-claudemander/config.json`:
 
 Canvas layouts stored in `~/.supreme-claudemander/canvases/{name}.json`.
 
-## VM Manager Action Schema
+## Container Manager Action Schema
 
 Each favorite container has an `actions` array of blueprint-action objects. Actions spawn blueprints scoped to the container:
 
@@ -193,14 +193,14 @@ Each `CanvasClaudeCard` enforces a hard cap of 10 live terminals across both `op
 | `rename_terminal` | `PUT /api/claude/terminal/{id}/rename` | Set a display name on a terminal card |
 | `set_recovery_script` | `PUT /api/claude/terminal/{id}/recovery-script` | Set recovery script on a terminal card |
 | `get_recovery_script` | `GET /api/claude/terminal/{id}/recovery-script` | Get recovery script for a terminal card |
-| `vm_discover_containers` | `GET /api/vms/discover` | List all Docker containers (running + stopped) |
-| `vm_get_favorites` | `GET /api/vms/favorites` | Read the VM Manager favorites list with blueprint-actions |
-| `vm_get_container_actions` | `GET /api/vms/favorites` (filtered) | Return one favorite's `actions` array; errors on unknown container |
-| `vm_set_container_actions` | `PUT /api/vms/favorites/{name}/actions` | Replace the full actions array for a favorite |
-| `vm_append_container_action` | `GET` + `PUT` (atomic) | Append one blueprint-action without dropping existing entries |
-| `vm_add_favorite` | `GET` + `PUT /api/vms/favorites` | Add a container to favorites (default: empty actions) |
-| `vm_start_container` | `POST /api/vms/{name}/start` | Start a stopped container |
-| `vm_stop_container` | `POST /api/vms/{name}/stop?via=canvas-claude` | Stop a running container (optional `timeout`). Guarded: server rejects with HTTP 403 `not_canvas_claude_owned` unless the container carries the Docker label `created_by=canvas-claude`. Human UI calls omit `via=canvas-claude` and are unguarded. |
+| `container_discover` | `GET /api/containers/discover` | List all Docker containers (running + stopped) |
+| `container_get_favorites` | `GET /api/containers/favorites` | Read the Container Manager favorites list with blueprint-actions |
+| `container_get_actions` | `GET /api/containers/favorites` (filtered) | Return one favorite's `actions` array; errors on unknown container |
+| `container_set_actions` | `PUT /api/containers/favorites/{name}/actions` | Replace the full actions array for a favorite |
+| `container_append_action` | `GET` + `PUT` (atomic) | Append one blueprint-action without dropping existing entries |
+| `container_add_favorite` | `GET` + `PUT /api/containers/favorites` | Add a container to favorites (default: empty actions) |
+| `container_start` | `POST /api/containers/{name}/start` | Start a stopped container |
+| `container_stop` | `POST /api/containers/{name}/stop?via=canvas-claude` | Stop a running container (optional `timeout`). Guarded: server rejects with HTTP 403 `not_canvas_claude_owned` unless the container carries the Docker label `created_by=canvas-claude`. Human UI calls omit `via=canvas-claude` and are unguarded. |
 | `blueprint_list` | `GET /api/blueprints` | List all saved blueprint names |
 | `blueprint_get` | `GET /api/blueprints/{name}` | Get a single blueprint definition |
 | `blueprint_save` | `PUT /api/blueprints/{name}` (upsert) | Save or update a blueprint definition |
