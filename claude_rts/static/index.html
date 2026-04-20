@@ -1627,7 +1627,7 @@ class TerminalCard extends Card {
       this.starred = true;
       // Update star button
       const starBtn = this.el.querySelector(`[data-star="${this.id}"]`);
-      if (starBtn) { starBtn.textContent = '\u2605'; starBtn.style.color = '#f9e2af'; starBtn.title = 'Starred — will resume on reload'; }
+      if (starBtn) { starBtn.textContent = '\u2605'; starBtn.style.color = '#f9e2af'; starBtn.title = 'Starred — will persist across reload'; }
       // Clear dormant body and init live terminal
       body.innerHTML = '';
       body.style.cssText = '';
@@ -3000,6 +3000,10 @@ async function spawnFromSerialized(s) {
       widgetType: s.widgetType,
       x: s.x, y: s.y, w: s.w, h: s.h,
       refreshInterval: s.refreshInterval,
+      // Issue #194: reload path must default to starred=true so cards saved
+      // before the "unstarred by default" flip are not filtered out by the
+      // next saveLayout(). Matches the terminal branch above.
+      starred: s.starred != null ? s.starred : true,
     });
   }
   if (typeName === 'canvas_claude') {
@@ -3008,11 +3012,18 @@ async function spawnFromSerialized(s) {
       sessionId: s.session_id,
       profile: s.profile,
       canvasName: s.canvasName,
+      starred: s.starred != null ? s.starred : true,
     });
   }
   // Unknown type: fall back to the registry so any future card type that
-  // registers itself is handled automatically.
-  return CARD_TYPE_REGISTRY.spawn(typeName, { ...s, sessionId: s.session_id });
+  // registers itself is handled automatically. Default starred=true on the
+  // reload path (issue #194) so cards saved before the default-flip are
+  // not filtered out by the next saveLayout().
+  return CARD_TYPE_REGISTRY.spawn(typeName, {
+    ...s,
+    sessionId: s.session_id,
+    starred: s.starred != null ? s.starred : true,
+  });
 }
 
 // ════════════════════════════════════════════
