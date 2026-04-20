@@ -84,6 +84,52 @@ async def test_create_raises_on_nonzero_return(monkeypatch):
         await cs.create(spec)
 
 
+# ── Resource caps (#204) ────────────────────────────────────────────
+
+
+def test_container_spec_has_default_resource_caps():
+    """#204 STRONG invariant: every spec carries v1 resource caps by default."""
+    spec = cs.ContainerSpec(image="ubuntu:24.04", name="foo")
+    assert spec.cpu_limit == 2.0
+    assert spec.memory_limit == "8g"
+    assert spec.disk_limit == "10g"
+    assert spec.pids_limit == 1024
+
+
+def test_devcontainer_preset_emits_resource_cap_runargs():
+    """#204 acceptance: --cpus / --memory / --pids-limit present in runArgs."""
+    spec = cs.ContainerSpec(image="ubuntu:24.04", name="foo")
+    dc = spec.devcontainer_preset()
+    assert "--cpus=2.0" in dc["runArgs"]
+    assert "--memory=8g" in dc["runArgs"]
+    assert "--pids-limit=1024" in dc["runArgs"]
+
+
+def test_devcontainer_preset_respects_custom_resource_caps():
+    """Overrides flow through to Docker flags verbatim."""
+    spec = cs.ContainerSpec(
+        image="ubuntu:24.04",
+        name="foo",
+        cpu_limit=4.0,
+        memory_limit="16g",
+        pids_limit=2048,
+    )
+    dc = spec.devcontainer_preset()
+    assert "--cpus=4.0" in dc["runArgs"]
+    assert "--memory=16g" in dc["runArgs"]
+    assert "--pids-limit=2048" in dc["runArgs"]
+
+
+def test_resource_caps_preserved_alongside_labels():
+    """Labels and resource caps coexist in runArgs without collision."""
+    spec = cs.ContainerSpec(image="ubuntu:24.04", name="foo")
+    args = spec.devcontainer_preset()["runArgs"]
+    label_pairs = [args[i + 1] for i, v in enumerate(args) if v == "--label"]
+    assert "created_by=canvas-claude" in label_pairs
+    assert any(a.startswith("--cpus=") for a in args)
+    assert any(a.startswith("--memory=") for a in args)
+
+
 def test_create_does_not_shell_out_synchronously():
     """Regression guard: ensure container_spec does not import subprocess.run."""
     import inspect

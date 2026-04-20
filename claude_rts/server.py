@@ -442,10 +442,25 @@ async def container_create_handler(request: web.Request) -> web.Response:
     name = (body.get("name") or "").strip() or None
     preset = body.get("preset") or "devcontainer"
 
+    # Resource caps (#204): merge config-level defaults onto the spec so a
+    # human can tune without code changes. Missing keys fall back to the
+    # ContainerSpec class defaults (v1 targets from epic #199 intent §8).
+    cap_defaults = cfg.get("container_manager", {}).get("defaults", {}) or {}
+    cap_kwargs: dict = {}
+    if "cpu_limit" in cap_defaults:
+        cap_kwargs["cpu_limit"] = float(cap_defaults["cpu_limit"])
+    if "memory_limit" in cap_defaults:
+        cap_kwargs["memory_limit"] = str(cap_defaults["memory_limit"])
+    if "disk_limit" in cap_defaults:
+        cap_kwargs["disk_limit"] = str(cap_defaults["disk_limit"])
+    if "pids_limit" in cap_defaults:
+        cap_kwargs["pids_limit"] = int(cap_defaults["pids_limit"])
+
     spec = container_spec_mod.ContainerSpec(
         image=image,
         name=name,
         preset=preset,
+        **cap_kwargs,
     )
 
     # Test-mode hook: bypass the real subprocess call.

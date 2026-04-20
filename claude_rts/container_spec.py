@@ -36,6 +36,13 @@ def generate_container_name() -> str:
     return f"cc-{ts}-{rand}"
 
 
+#: v1 target per epic #199 intent §8 — 2 vCPU / 8 GB RAM / 10 GB workspace.
+DEFAULT_CPU_LIMIT: float = 2.0
+DEFAULT_MEMORY_LIMIT: str = "8g"
+DEFAULT_DISK_LIMIT: str = "10g"
+DEFAULT_PIDS_LIMIT: int = 1024
+
+
 @dataclass
 class ContainerSpec:
     """Generic container specification.
@@ -43,6 +50,11 @@ class ContainerSpec:
     v1 only implements the ``devcontainer`` preset. The dataclass is kept
     intentionally thin — richer preset-specific fields belong on subclasses or
     preset-specific helpers so the abstraction can grow without breaking v1.
+
+    Resource caps (#204) are STRONG invariants: every container gets
+    ``--cpus``/``--memory``/``--pids-limit`` stamped into runArgs at creation
+    time. ``disk_limit`` is advisory for v1 — Docker named volumes have no
+    native size cap on overlay2/ext4. Visibility is Child 7's stats widget.
     """
 
     image: str
@@ -52,6 +64,12 @@ class ContainerSpec:
     mounts: list[str] = field(default_factory=list)
     workspace_volume: str | None = None
     workspace_hint: str | None = None
+    # Resource caps (#204). Defaults are the v1 targets; humans can override
+    # via ``container_manager.defaults`` in config.
+    cpu_limit: float = DEFAULT_CPU_LIMIT
+    memory_limit: str = DEFAULT_MEMORY_LIMIT
+    disk_limit: str = DEFAULT_DISK_LIMIT
+    pids_limit: int = DEFAULT_PIDS_LIMIT
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -74,6 +92,12 @@ class ContainerSpec:
         run_args: list[str] = []
         for k, v in self.labels.items():
             run_args.extend(["--label", f"{k}={v}"])
+
+        # Resource caps (#204) — appended to runArgs as Docker flags. The
+        # devcontainer CLI forwards runArgs verbatim to ``docker run``.
+        run_args.append(f"--cpus={self.cpu_limit}")
+        run_args.append(f"--memory={self.memory_limit}")
+        run_args.append(f"--pids-limit={self.pids_limit}")
 
         mounts = list(self.mounts) or [
             f"source={self.workspace_volume},target=/workspace,type=volume",

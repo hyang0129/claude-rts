@@ -490,6 +490,51 @@ async def test_container_create_success_with_whitelisted_image(app, client):
     assert any(m.startswith("source=") and "type=volume" in m for m in dc["mounts"])
 
 
+async def test_container_create_applies_default_resource_caps(app, client):
+    """#204: with no config overrides, every created container inherits v1 caps."""
+    app["_test_container_create"] = {}
+    resp = await client.post(
+        "/api/containers/create",
+        json={"image": "ubuntu:24.04", "name": "caps-default"},
+    )
+    assert resp.status == 200
+    dc = app["_test_container_create"]["calls"][0]["devcontainer_json"]
+    run_args = dc["runArgs"]
+    assert "--cpus=2.0" in run_args
+    assert "--memory=8g" in run_args
+    assert "--pids-limit=1024" in run_args
+
+
+async def test_container_create_applies_configured_resource_caps(app, client, tmp_path):
+    """#204: config-level defaults override ContainerSpec class defaults."""
+    app_config = app["app_config"]
+    config.write_config(
+        app_config,
+        {
+            "container_manager": {
+                "image_whitelist": ["ubuntu:24.04"],
+                "defaults": {
+                    "cpu_limit": 4,
+                    "memory_limit": "16g",
+                    "pids_limit": 2048,
+                    "disk_limit": "20g",
+                },
+            },
+        },
+    )
+    app["_test_container_create"] = {}
+    resp = await client.post(
+        "/api/containers/create",
+        json={"image": "ubuntu:24.04", "name": "caps-custom"},
+    )
+    assert resp.status == 200
+    dc = app["_test_container_create"]["calls"][0]["devcontainer_json"]
+    run_args = dc["runArgs"]
+    assert "--cpus=4.0" in run_args
+    assert "--memory=16g" in run_args
+    assert "--pids-limit=2048" in run_args
+
+
 async def test_container_create_generates_name_when_omitted(app, client):
     app["_test_container_create"] = {}
     resp = await client.post("/api/containers/create", json={"image": "ubuntu:24.04"})
