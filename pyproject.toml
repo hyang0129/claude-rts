@@ -65,6 +65,7 @@ claude_rts = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+addopts = "-m 'not real_docker'"
 markers = [
     "requires_pty: marks tests as requiring a real PTY (deselect with -m 'not requires_pty')",
     "real_docker: marks tests as requiring real Docker containers (not run in CI)",
