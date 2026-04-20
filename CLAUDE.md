@@ -180,7 +180,7 @@ The Canvas Claude card (`claude_rts/mcp_server.py`) exposes a JSON-RPC stdio MCP
 
 ### Canvas Claude 10-terminal cap
 
-Each `CanvasClaudeCard` enforces a hard cap of 10 live terminals across both `open_terminal` and `run_task` spawns originating from that card. The 11th spawn returns HTTP 429 with `{"error": "terminal_cap_reached", "live_session_ids": [...]}`. The cap decrements on explicit `delete_terminal`, PTY EOF, and `run_task` timeout expiry. On card unregister, all sessions attributed to that spawner are cleaned up automatically. Terminals spawned directly by a user (no `spawner_id`) are not subject to this cap.
+Each `CanvasClaudeCard` enforces a hard cap of 10 live terminals across both `open_terminal` and `run_task` spawns originating from that card. The 11th spawn returns HTTP 429 with `{"error": "terminal_cap_reached", "live_session_ids": [...]}`. The cap decrements on explicit `delete_terminal`, PTY EOF, and `run_task` timeout expiry. On card unregister, all sessions attributed to that spawner are cleaned up automatically. Terminals spawned directly by a user (no `spawner_id`) are not subject to this cap. **The cap applies to any spawn that carries `spawner_id`, regardless of `ephemeral` — a normal `open_terminal` from Canvas Claude also consumes a slot.**
 
 | Tool | Wraps | Purpose |
 |---|---|---|

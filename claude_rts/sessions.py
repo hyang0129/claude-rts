@@ -315,6 +315,10 @@ class SessionManager:
         finally:
             session.alive = False
             logger.info("Session {}: read loop ended", session.session_id)
+            # Trigger on_destroy callbacks (prune spawner cap, cancel timeout timer).
+            # destroy_session is idempotent: _sessions.pop(..., None) handles the case
+            # where an explicit DELETE or timeout watcher already removed the session.
+            self.destroy_session(session.session_id)
 
     def start_orphan_reaper(self) -> None:
         """Start background task to clean up orphaned sessions."""

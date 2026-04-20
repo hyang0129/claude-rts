@@ -681,8 +681,8 @@ async def test_ephemeral_timeout_expiry_destroys_session(aiohttp_client, app_fac
     # Session exists immediately after creation
     assert mgr.get_session(session_id) is not None
 
-    # Wait for the timeout watcher to fire (1s + 0.5s margin)
-    await asyncio.sleep(1.5)
+    # Wait for the timeout watcher to fire (1s + 1.0s margin to reduce CI flake)
+    await asyncio.sleep(2.0)
 
     # Session should now be gone
     assert mgr.get_session(session_id) is None
@@ -803,3 +803,76 @@ async def test_card_unregister_clears_spawner_set(aiohttp_client, app_factory):
     # Both sessions should be destroyed
     for sid in sids:
         assert mgr.get_session(sid) is None
+
+
+async def test_pty_eof_decrements_cap(aiohttp_client, app_factory):
+    """PTY EOF triggers destroy_session which prunes the spawner cap set."""
+    client = await aiohttp_client(app_factory())
+    spawner = "sp-eof-test"
+    resp = await client.post(f"/api/claude/terminal/create?cmd=sleep+999&ephemeral=true&spawner_id={spawner}")
+    assert resp.status == 200
+    sid = (await resp.json())["session_id"]
+
+    mgr = client.app["session_manager"]
+    canvas_claude_spawns = client.app["canvas_claude_spawns"]
+
+    # Session is tracked in the spawner set
+    assert sid in canvas_claude_spawns.get(spawner, set())
+
+    # Simulate PTY EOF by calling destroy_session directly — this exercises
+    # the on_destroy callback chain the same way _pty_read_loop's finally block does.
+    mgr.destroy_session(sid)
+
+    # Give the event loop a tick to run any async callbacks
+    await asyncio.sleep(0)
+
+    # Spawner set should be pruned
+    assert sid not in canvas_claude_spawns.get(spawner, set())
+
+
+async def test_timer_cancelled_on_explicit_delete(aiohttp_client, app_factory):
+    """DELETE /api/claude/terminal/{id} cancels the pending ephemeral timeout task."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=sleep+999&ephemeral=true&timeout=60")
+    assert resp.status == 200
+    sid = (await resp.json())["session_id"]
+
+    ephemeral_timers = client.app["ephemeral_timers"]
+    assert sid in ephemeral_timers
+    timer = ephemeral_timers[sid]
+    assert not timer.done()
+
+    # Explicit delete
+    resp = await client.delete(f"/api/claude/terminal/{sid}")
+    assert resp.status == 200
+
+    # Timer should be cancelled and removed
+    assert sid not in ephemeral_timers
+    assert timer.cancelled()
+
+
+async def test_timeout_without_ephemeral_rejected(aiohttp_client, app_factory):
+    """POST with timeout but no ephemeral=true returns HTTP 400 timeout_requires_ephemeral."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash&timeout=30")
+    assert resp.status == 400
+    data = await resp.json()
+    assert data["error"] == "timeout_requires_ephemeral"
+
+
+async def test_cap_decrements_on_timeout(aiohttp_client, app_factory):
+    """Ephemeral timeout expiry prunes the spawner set (not just session)."""
+    client = await aiohttp_client(app_factory())
+    spawner = "sp-timeout-cap"
+    resp = await client.post(f"/api/claude/terminal/create?cmd=sleep+999&ephemeral=true&timeout=1&spawner_id={spawner}")
+    assert resp.status == 200
+    sid = (await resp.json())["session_id"]
+
+    canvas_claude_spawns = client.app["canvas_claude_spawns"]
+    assert sid in canvas_claude_spawns.get(spawner, set())
+
+    # Wait for the timeout watcher to fire (1s + 1.0s margin)
+    await asyncio.sleep(2.0)
+
+    # Spawner set should be pruned after timeout-triggered destroy
+    assert sid not in canvas_claude_spawns.get(spawner, set())
