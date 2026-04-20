@@ -619,6 +619,14 @@ async def container_create_handler(request: web.Request) -> web.Response:
     if "pids_limit" in cap_defaults:
         cap_kwargs["pids_limit"] = int(cap_defaults["pids_limit"])
 
+    # Profiles volume mount (#207). Volume name is configurable via the same
+    # ``util_container.mounts.profiles`` config key used by the util container
+    # so both point at the same named volume by default (``claude-profiles``).
+    profiles_volume = (
+        cfg.get("util_container", {}).get("mounts", {}).get("profiles") or container_spec_mod.DEFAULT_PROFILES_VOLUME
+    )
+    cap_kwargs["profiles_volume"] = profiles_volume
+
     spec = container_spec_mod.ContainerSpec(
         image=image,
         name=name,
