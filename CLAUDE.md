@@ -26,8 +26,8 @@ Verify the port is free before starting. Running multiple instances causes port 
 - **Session persistence**: SessionManager decouples PTY lifetime from WebSocket. PTYs run in server memory with a 64KB scrollback ring buffer. Orphan reaper cleans up after 5 min.
 - **Single HTML file**: All JS/CSS is inline in `index.html`. External libs (xterm.js) load from CDN. No npm, no bundler.
 - **Card class hierarchy**: `Card` base → `TerminalCard`, `WidgetCard`, `LoaderCard`. Enables mixed dashboards.
-- **Limited container lifecycle (start/stop only)**: supreme-claudemander can start and stop Docker containers via the Container Manager card. Creating, removing, and image management remain out of scope.
-- **Plain `docker` binary**: Always use `docker` (no `.exe`). The runtime is Linux/macOS-native. Windows is community-supported best-effort.
+- **Container lifecycle (create/start/stop/rebuild via Canvas Claude; remove is human-only)**: supreme-claudemander manages container creation, start, stop, and rebuild through the Container Manager card and the `container_*` MCP tools. Removal (`docker rm`), pruning, and image management remain human-only operations. Creation is guarded by a global 4-container cap, a config-level image whitelist, and per-container resource caps (CPU/RAM/PIDs). All destructive operations invoked through the Canvas-Claude path enforce the `created_by=canvas-claude` Docker-label check (HTTP 403 `not_canvas_claude_owned` otherwise).
+- **Plain `docker` binary**: Always use `docker` (no `.exe`). The runtime is Linux/macOS-native. Windows is community-supported best-effort. Container creation additionally shells out to the `devcontainer` CLI so managed containers are built from a devcontainer preset (image + runArgs) rather than a bare `docker run`.
 
 ## Dev Config Presets
 
@@ -101,8 +101,10 @@ The devcontainer is configured to run the full E2E suite including Docker-gated 
 | `test_terminal_card.py` | 18 | TerminalCard lifecycle, CardRegistry, server integration, display_name, recovery_script |
 | `test_claude_api.py` | 38 | Claude terminal control API (CRUD, send/read, strip_ansi, /ws/control, full lifecycle, cmd pass-through, rename, recovery-script, card_updated broadcast) |
 | `test_event_bus.py` | 14 | EventBus core (subscribe, emit, unsubscribe, wildcard, async, errors, clear) + integration (ServiceCard bus emit, CardRegistry events) |
-| `test_container_manager.py` | 18 | Container Manager API (discover containers, favorites CRUD, start/stop container, per-container actions, route registration) |
-| `test_mcp_server.py` | 64 | MCP server tool functions (terminal CRUD/rename/recovery + VM discover/favorites/actions/start/stop/append/get + blueprint list/get/save/delete/spawn) and JSON-RPC dispatch |
+| `test_container_manager.py` | 47 | Container Manager API (discover, favorites CRUD, start/stop + `created_by` guard, per-container actions, create/rebuild, image whitelist, 4-container cap atomicity, stats, route registration) |
+| `test_container_spec.py` | — | `ContainerSpec` dataclass — runArgs composition, resource-cap defaults, profiles volume mount |
+| `test_container_starter_card.py` | — | Container Starter card lifecycle and UI plumbing |
+| `test_mcp_server.py` | 87 | MCP server tool functions (terminal CRUD/rename/recovery + `container_*` discover/favorites/actions/start/stop/append/get/create/rebuild/stats + blueprint list/get/save/delete/spawn) and JSON-RPC dispatch |
 | `e2e/test_smoke.py` | 7 | Playwright Electron smoke tests — launch, spawn, drag, resize, widgets, pan/zoom, save/reload |
 
 Tests use `MockPty` to avoid needing Docker. E2E tests require Playwright and Electron (`pip install -e ".[e2e]" && python -m playwright install chromium`).
@@ -118,6 +120,7 @@ Tests use `MockPty` to avoid needing Docker. E2E tests require Playwright and El
 | GET/PUT/DELETE | `/api/canvases/{name}` | Canvas layout CRUD |
 | GET | `/api/sessions` | List active sessions |
 | GET | `/api/widgets/system-info` | System info widget data |
+| GET | `/api/widgets/container-stats` | Container stats widget — live CPU/MEM for all canvas-claude containers |
 | GET | `/api/profiles` | Probe profiles with usage data, sorted by burn rate |
 | GET/PUT | `/api/profiles/main` | Read the main profile slot name / promote a tracked profile (credential copy) |
 | GET | `/api/containers/discover` | Discover all Docker containers (running + stopped) with status |
@@ -125,6 +128,9 @@ Tests use `MockPty` to avoid needing Docker. E2E tests require Playwright and El
 | POST | `/api/containers/{name}/start` | Start a stopped Docker container |
 | POST | `/api/containers/{name}/stop` | Stop a running Docker container (optional `?timeout=N`) |
 | PUT | `/api/containers/favorites/{name}/actions` | Update actions for a specific favorite container |
+| POST | `/api/containers/create` | Create a new container from a whitelisted image. Server stamps `created_by=canvas-claude`, applies resource caps, mounts the profiles volume, and auto-registers the container as a favorite. Rejects non-whitelisted images with HTTP 400 `image_not_whitelisted`; rejects over-cap requests with HTTP 429 `container_cap_reached`. |
+| POST | `/api/containers/{name}/rebuild` | `docker rm` + recreate the container with identical image, labels, and mounts (workspace volume preserved). Canvas-Claude-owned only — requires `via=canvas-claude` origin signal AND `created_by=canvas-claude` label, else HTTP 403 `not_canvas_claude_owned`. |
+| GET | `/api/containers/{name}/stats` | Live CPU/MEM stats for a single container (one-shot `docker stats --no-stream` read). |
 | POST | `/api/claude/terminal/create` | Create a TerminalCard + PTY session (params: cmd, hub, container, cols, rows, x, y, w, h). Optional: `ephemeral=true` (no card registered, auto-closes on PTY EOF or timeout), `spawner_id=<card_id>` (attributes the spawn to a CanvasClaudeCard for cap enforcement), `timeout=<seconds>` (ephemeral only; default 60, max 120; values outside `[1, 120]` return HTTP 400 `ephemeral_timeout_too_long`). When `spawner_id` is set and the spawner already has 10 live sessions, returns HTTP 429 `terminal_cap_reached` with `live_session_ids`. |
 | POST | `/api/claude/terminal/{id}/send` | Write text to a terminal PTY |
 | GET | `/api/claude/terminal/{id}/read` | Read scrollback (optional: strip_ansi, last_n) |
@@ -201,13 +207,54 @@ Each `CanvasClaudeCard` enforces a hard cap of 10 live terminals across both `op
 | `container_add_favorite` | `GET` + `PUT /api/containers/favorites` | Add a container to favorites (default: empty actions) |
 | `container_start` | `POST /api/containers/{name}/start` | Start a stopped container |
 | `container_stop` | `POST /api/containers/{name}/stop?via=canvas-claude` | Stop a running container (optional `timeout`). Guarded: server rejects with HTTP 403 `not_canvas_claude_owned` unless the container carries the Docker label `created_by=canvas-claude`. Human UI calls omit `via=canvas-claude` and are unguarded. |
+| `container_create` | `POST /api/containers/create` | Spin up a new container from a whitelisted image. Server stamps `created_by=canvas-claude`, applies CPU/RAM/PIDs caps, mounts the profiles volume, and auto-registers it as a favorite. Rejects non-whitelisted images (`image_not_whitelisted`) and over-cap requests (`container_cap_reached`). |
+| `container_rebuild` | `POST /api/containers/{name}/rebuild?via=canvas-claude` | `docker rm` + recreate with identical image/labels/mounts. Canvas-Claude-owned only; rejects with HTTP 403 `not_canvas_claude_owned` otherwise. Workspace + profiles named volumes preserved across the rebuild. |
+| `container_stats` | `GET /api/containers/{name}/stats` | Live CPU/MEM stats for a single container (one-shot read; non-destructive, ungated). |
 | `blueprint_list` | `GET /api/blueprints` | List all saved blueprint names |
 | `blueprint_get` | `GET /api/blueprints/{name}` | Get a single blueprint definition |
 | `blueprint_save` | `PUT /api/blueprints/{name}` (upsert) | Save or update a blueprint definition |
 | `blueprint_delete` | `DELETE /api/blueprints/{name}` | Delete a saved blueprint |
 | `blueprint_spawn` | `POST /api/blueprints/spawn` | Spawn a BlueprintCard from a saved blueprint with context |
 
-Removing favorites and creating/removing/pulling containers remain human-only operations (see "Limited container lifecycle" above).
+Removing favorites, removing containers (`docker rm`), pruning, and image management remain human-only operations (see "Container lifecycle" above).
+
+### Canvas Claude 4-container cap
+
+Container creation is capped at 4 live containers stamped `created_by=canvas-claude` across the entire server (not per-card). The count filter matches on the Docker label, so human-created containers are excluded. The 5th creation returns HTTP 429 with `{"error": "container_cap_reached"}`. The cap is enforced atomically: a per-app `asyncio.Lock` is held across the count-check + `docker run`, mirroring the 10-terminal cap pattern so concurrent requests cannot race past the limit.
+
+### `created_by` authorization model
+
+Destructive Docker operations invoked through the Canvas-Claude code path are gated by the Docker label `created_by=canvas-claude`:
+
+| Tool | Origin signal | Guard |
+|---|---|---|
+| `container_stop` | `?via=canvas-claude` OR `X-Canvas-Claude-Spawner` header | 403 `not_canvas_claude_owned` if label ≠ `canvas-claude` |
+| `container_rebuild` | `?via=canvas-claude` | 403 `not_canvas_claude_owned` if label ≠ `canvas-claude` |
+
+Human UI calls omit the origin signal, so the guard is skipped and the UI can stop any container the user chose to register as a favorite. The authorization boundary exists specifically to stop Canvas Claude — under context-window confusion — from destroying a container the human created by hand.
+
+### Container Manager config
+
+```json
+{
+  "container_manager": {
+    "image_whitelist": ["ubuntu:24.04"],
+    "max_containers": 4,
+    "defaults": {
+      "cpu_limit": 2,
+      "memory_limit": "8g",
+      "pids_limit": 1024,
+      "disk_limit": "10g"
+    },
+    "favorites": []
+  }
+}
+```
+
+- `image_whitelist`: images `container_create` may spawn. Non-whitelisted images get HTTP 400 `image_not_whitelisted`. Default: `["ubuntu:24.04"]`.
+- `max_containers`: global cap on canvas-claude-owned containers. Default: `4`.
+- `defaults`: resource caps applied to every managed container via `docker run --cpus=<N> --memory=<M> --pids-limit=<P>`. Values here override the `ContainerSpec` class defaults (CPU 2, RAM 8g, PIDs 1024, disk 10g advisory).
+- Every managed container mounts the `claude-profiles` named Docker volume at `/profiles` so the in-use credential is visible inside the container. The volume name is read from `util_container.mounts.profiles` so the util container and all managed containers share one profile store.
 
 ## Adding a New Widget
 
