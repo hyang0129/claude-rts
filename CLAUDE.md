@@ -125,7 +125,7 @@ Tests use `MockPty` to avoid needing Docker. E2E tests require Playwright and El
 | POST | `/api/vms/{name}/start` | Start a stopped Docker container |
 | POST | `/api/vms/{name}/stop` | Stop a running Docker container (optional `?timeout=N`) |
 | PUT | `/api/vms/favorites/{name}/actions` | Update actions for a specific favorite container |
-| POST | `/api/claude/terminal/create` | Create a TerminalCard + PTY session (params: cmd, hub, container, cols, rows, x, y, w, h) |
+| POST | `/api/claude/terminal/create` | Create a TerminalCard + PTY session (params: cmd, hub, container, cols, rows, x, y, w, h). Optional: `ephemeral=true` (no card registered, auto-closes on PTY EOF or timeout), `spawner_id=<card_id>` (attributes the spawn to a CanvasClaudeCard for cap enforcement), `timeout=<seconds>` (ephemeral only; default 60, max 120; values outside `[1, 120]` return HTTP 400 `ephemeral_timeout_too_long`). When `spawner_id` is set and the spawner already has 10 live sessions, returns HTTP 429 `terminal_cap_reached` with `live_session_ids`. |
 | POST | `/api/claude/terminal/{id}/send` | Write text to a terminal PTY |
 | GET | `/api/claude/terminal/{id}/read` | Read scrollback (optional: strip_ansi, last_n) |
 | GET | `/api/claude/terminal/{id}/status` | Session metadata (alive, age, idle, cmd) |
@@ -178,9 +178,14 @@ When an action button is clicked, the frontend calls `POST /api/blueprints/spawn
 
 The Canvas Claude card (`claude_rts/mcp_server.py`) exposes a JSON-RPC stdio MCP server so Claude Code, running inside the card, can drive the canvas programmatically. Each tool is a thin wrapper around a REST endpoint.
 
+### Canvas Claude 10-terminal cap
+
+Each `CanvasClaudeCard` enforces a hard cap of 10 live terminals across both `open_terminal` and `run_task` spawns originating from that card. The 11th spawn returns HTTP 429 with `{"error": "terminal_cap_reached", "live_session_ids": [...]}`. The cap decrements on explicit `delete_terminal`, PTY EOF, and `run_task` timeout expiry. On card unregister, all sessions attributed to that spawner are cleaned up automatically. Terminals spawned directly by a user (no `spawner_id`) are not subject to this cap.
+
 | Tool | Wraps | Purpose |
 |---|---|---|
 | `open_terminal` | `POST /api/claude/terminal/create` | Spawn a new terminal card (supports `x, y, w, h, container, hub`). `cmd` is passed through verbatim; reference `/profiles/<main_profile_name>` directly to use the in-use credential (resolve the slot name via `GET /api/profiles/main`; defaults to `main`). |
+| `run_task` | `POST /api/claude/terminal/create` (ephemeral=true) | Run a short-running command in an ephemeral PTY (no visible card, auto-closes on PTY EOF or timeout). Default timeout 60s; max 120s — longer operations must use `open_terminal`. Counts toward the 10-terminal cap. Rejects `timeout > 120` with structured error `ephemeral_timeout_too_long`. Use for: `ls`, `git pull`, probes, one-shot checks. |
 | `read_terminal` | `GET /api/claude/terminal/{id}/read` | Read scrollback (default: strip ANSI) |
 | `write_terminal` | `POST /api/claude/terminal/{id}/send` | Write keystrokes to a terminal |
 | `list_terminals` | `GET /api/claude/terminals` | List active terminal cards |
