@@ -23,6 +23,7 @@ from .cards import ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegis
 from .event_bus import EventBus  # noqa: E402
 from .ansi_strip import strip_ansi  # noqa: E402
 from . import blueprint as blueprint_mod  # noqa: E402
+from . import container_spec as container_spec_mod  # noqa: E402
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
@@ -403,6 +404,100 @@ async def container_favorites_actions_put_handler(request: web.Request) -> web.R
     write_config(app_config, cfg)
 
     return web.json_response(actions)
+
+
+async def container_create_handler(request: web.Request) -> web.Response:
+    """Create a new container via the devcontainer CLI.
+
+    Body (JSON): ``{"image": str, "name"?: str, "preset"?: str}``.
+    - Validates ``image`` against ``container_manager.image_whitelist`` config.
+    - Generates a temp devcontainer.json, invokes ``devcontainer up`` async,
+      stamps ``created_by=canvas-claude`` via runArgs.
+    - On success, auto-registers the container as a favorite and returns
+      ``{"container_id": name, "name": name, "status": "created"}``.
+    """
+    app_config: AppConfig = request.app["app_config"]
+    cfg = read_config(app_config)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Request body must be valid JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "Request body must be a JSON object"}, status=400)
+
+    image = (body.get("image") or "").strip()
+    if not image:
+        return web.json_response({"error": "image is required"}, status=400)
+
+    whitelist = cfg.get("container_manager", {}).get(
+        "image_whitelist",
+        ["ubuntu:24.04"],
+    )
+    if image not in whitelist:
+        return web.json_response(
+            {"error": "image_not_whitelisted", "allowed": whitelist},
+            status=400,
+        )
+
+    name = (body.get("name") or "").strip() or None
+    preset = body.get("preset") or "devcontainer"
+
+    spec = container_spec_mod.ContainerSpec(
+        image=image,
+        name=name,
+        preset=preset,
+    )
+
+    # Test-mode hook: bypass the real subprocess call.
+    test_create = request.app.get("_test_container_create")
+    if test_create is not None:
+        # Record the spec for assertions.
+        test_create.setdefault("calls", []).append(
+            {
+                "image": spec.image,
+                "name": spec.name,
+                "preset": spec.preset,
+                "labels": dict(spec.labels),
+                "devcontainer_json": spec.devcontainer_preset(),
+            }
+        )
+        if test_create.get("should_fail"):
+            return web.json_response(
+                {"error": "creation_failed", "detail": test_create.get("error", "mock failure")},
+                status=500,
+            )
+    else:
+        try:
+            await container_spec_mod.create(spec)
+        except RuntimeError as exc:
+            return web.json_response(
+                {"error": "creation_failed", "detail": str(exc)},
+                status=500,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("container_create: unexpected failure")
+            return web.json_response(
+                {"error": "creation_failed", "detail": str(exc)},
+                status=500,
+            )
+
+    # Auto-register as favorite (idempotent — skip if already present).
+    if "container_manager" not in cfg:
+        cfg["container_manager"] = {}
+    favorites = cfg["container_manager"].get("favorites", [])
+    if not any(f.get("name") == spec.name for f in favorites):
+        favorites.append({"name": spec.name, "type": "docker", "actions": []})
+        cfg["container_manager"]["favorites"] = favorites
+        write_config(app_config, cfg)
+
+    return web.json_response(
+        {
+            "container_id": spec.name,
+            "name": spec.name,
+            "image": spec.image,
+            "status": "created",
+        }
+    )
 
 
 async def exec_websocket_handler(request: web.Request) -> web.WebSocketResponse:
@@ -1743,6 +1838,7 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_post("/api/containers/{name}/start", container_start_handler)
     app.router.add_post("/api/containers/{name}/stop", container_stop_handler)
     app.router.add_put("/api/containers/favorites/{name}/actions", container_favorites_actions_put_handler)
+    app.router.add_post("/api/containers/create", container_create_handler)
 
     app.router.add_get("/api/profiles", profiles_list_handler)
     app.router.add_get("/api/profiles/discover", profiles_discover_handler)

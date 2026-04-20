@@ -440,3 +440,125 @@ async def test_container_routes_registered(app):
     assert "/api/containers/{name}/start" in routes
     assert "/api/containers/{name}/stop" in routes
     assert "/api/containers/favorites/{name}/actions" in routes
+    assert "/api/containers/create" in routes
+
+
+# ── container_create ─────────────────────────────────────────────────────
+
+
+async def test_container_create_rejects_non_whitelisted_image(client):
+    resp = await client.post("/api/containers/create", json={"image": "evil/image:latest"})
+    assert resp.status == 400
+    data = await resp.json()
+    assert data["error"] == "image_not_whitelisted"
+    assert "ubuntu:24.04" in data["allowed"]
+
+
+async def test_container_create_requires_image(client):
+    resp = await client.post("/api/containers/create", json={})
+    assert resp.status == 400
+    data = await resp.json()
+    assert "image" in data["error"]
+
+
+async def test_container_create_success_with_whitelisted_image(app, client):
+    # Install test-mode hook so no real devcontainer CLI is called.
+    app["_test_container_create"] = {}
+    resp = await client.post(
+        "/api/containers/create",
+        json={"image": "ubuntu:24.04", "name": "my-dev-123"},
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["status"] == "created"
+    assert data["container_id"] == "my-dev-123"
+    assert data["name"] == "my-dev-123"
+
+    # Verify the spec is correctly stamped with the canvas-claude label.
+    calls = app["_test_container_create"]["calls"]
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["labels"]["created_by"] == "canvas-claude"
+    # Generated devcontainer.json must carry the label via runArgs and use a named volume.
+    dc = call["devcontainer_json"]
+    assert dc["image"] == "ubuntu:24.04"
+    assert "--label" in dc["runArgs"]
+    label_pairs = [
+        dc["runArgs"][i + 1] for i, v in enumerate(dc["runArgs"]) if v == "--label" and i + 1 < len(dc["runArgs"])
+    ]
+    assert "created_by=canvas-claude" in label_pairs
+    assert any(m.startswith("source=") and "type=volume" in m for m in dc["mounts"])
+
+
+async def test_container_create_generates_name_when_omitted(app, client):
+    app["_test_container_create"] = {}
+    resp = await client.post("/api/containers/create", json={"image": "ubuntu:24.04"})
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["container_id"].startswith("cc-")
+    assert data["name"] == data["container_id"]
+
+
+async def test_container_create_auto_registers_favorite(app, client):
+    app["_test_container_create"] = {}
+    resp = await client.post(
+        "/api/containers/create",
+        json={"image": "ubuntu:24.04", "name": "auto-fav-1"},
+    )
+    assert resp.status == 200
+
+    # Favorite should now exist with an empty actions array.
+    resp_favs = await client.get("/api/containers/favorites")
+    favs = await resp_favs.json()
+    names = [f["name"] for f in favs]
+    assert "auto-fav-1" in names
+    fav = next(f for f in favs if f["name"] == "auto-fav-1")
+    assert fav["type"] == "docker"
+    assert fav["actions"] == []
+
+
+async def test_container_create_surfaces_failure_as_500(app, client):
+    app["_test_container_create"] = {
+        "should_fail": True,
+        "error": "devcontainer up failed: permission denied",
+    }
+    resp = await client.post(
+        "/api/containers/create",
+        json={"image": "ubuntu:24.04", "name": "fail-dev"},
+    )
+    assert resp.status == 500
+    data = await resp.json()
+    assert data["error"] == "creation_failed"
+    assert "permission denied" in data["detail"]
+
+
+async def test_container_create_uses_asyncio_subprocess(monkeypatch):
+    """Invariant: devcontainer up runs via asyncio.create_subprocess_exec
+    (never blocking sync subprocess.run). Test mocks the async call directly.
+    """
+    from claude_rts import container_spec as cs
+
+    recorded = {}
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"ok", b"")
+
+    async def fake_create(*argv, **kw):
+        recorded["argv"] = list(argv)
+        return FakeProc()
+
+    monkeypatch.setattr(cs.asyncio, "create_subprocess_exec", fake_create)
+
+    spec = cs.ContainerSpec(image="ubuntu:24.04", name="inv-test")
+    result = await cs.create(spec)
+    assert result["name"] == "inv-test"
+    assert "created_by" in result["labels"]
+    # The id-label stamp is present so devcontainer up can target the container.
+    argv_str = " ".join(recorded["argv"])
+    assert "devcontainer" in argv_str
+    assert "up" in recorded["argv"]
+    assert "--override-config" in recorded["argv"]
+    assert "--id-label" in recorded["argv"]

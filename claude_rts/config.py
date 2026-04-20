@@ -65,6 +65,11 @@ DEFAULT_CONFIG = {
     },
     "container_manager": {
         "favorites": [],
+        "image_whitelist": [
+            "ubuntu:24.04",
+            "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+            "mcr.microsoft.com/devcontainers/python:3.12",
+        ],
     },
 }
 

@@ -30,6 +30,7 @@ from claude_rts.mcp_server import (
     tool_container_append_action,
     tool_container_start,
     tool_container_stop,
+    tool_container_create,
     tool_blueprint_list,
     tool_blueprint_get,
     tool_blueprint_save,
@@ -206,6 +207,7 @@ def test_handle_request_tools_list():
         "container_start",
         "container_stop",
         "container_add_favorite",
+        "container_create",
         "blueprint_list",
         "blueprint_get",
         "blueprint_save",
@@ -420,7 +422,8 @@ def test_tools_list_includes_container_and_blueprint_tools():
     assert "set_recovery_script" in names
     assert "get_recovery_script" in names
     assert "run_task" in names
-    assert len(names) == 22
+    assert "container_create" in names
+    assert len(names) == 23
 
 
 # ── container_get_actions ──────────────────────────────────────────────
@@ -595,6 +598,57 @@ def test_container_stop_missing_name():
     """container_stop raises ValueError when name is missing."""
     with pytest.raises(ValueError, match="name is required"):
         tool_container_stop({})
+
+
+# ── container_create ─────────────────────────────────────────────────────
+
+
+def test_container_create_calls_rest():
+    """container_create POSTs to /api/containers/create with the JSON body."""
+    mock_resp = make_mock_response({"container_id": "cc-123-abc", "name": "cc-123-abc", "status": "created"})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_container_create({"image": "ubuntu:24.04"})
+    assert "cc-123-abc" in result
+    req = mock_open.call_args[0][0]
+    assert req.method == "POST"
+    assert "/api/containers/create" in req.full_url
+    sent = json.loads(req.data.decode())
+    assert sent == {"image": "ubuntu:24.04"}
+
+
+def test_container_create_passes_name_and_preset():
+    """container_create forwards optional name and preset fields."""
+    mock_resp = make_mock_response({"container_id": "my-dev", "status": "created"})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        tool_container_create({"image": "ubuntu:24.04", "name": "my-dev", "preset": "devcontainer"})
+    req = mock_open.call_args[0][0]
+    sent = json.loads(req.data.decode())
+    assert sent["name"] == "my-dev"
+    assert sent["preset"] == "devcontainer"
+
+
+def test_container_create_missing_image_raises():
+    """container_create raises ValueError when image is missing."""
+    with pytest.raises(ValueError, match="image is required"):
+        tool_container_create({})
+
+
+def test_container_create_surfaces_whitelist_error():
+    """A 400 image_not_whitelisted response surfaces a readable error string."""
+    import urllib.error
+
+    err = urllib.error.HTTPError(
+        url="http://localhost/api/containers/create",
+        code=400,
+        msg="Bad Request",
+        hdrs=None,
+        fp=None,
+    )
+    err.read = lambda: json.dumps({"error": "image_not_whitelisted", "allowed": ["ubuntu:24.04"]}).encode()
+    with patch("urllib.request.urlopen", side_effect=err):
+        result = tool_container_create({"image": "evil/image:latest"})
+    assert "not whitelisted" in result
+    assert "ubuntu:24.04" in result
 
 
 # ── Blueprint MCP tool tests ─────────────────────────────────────────────

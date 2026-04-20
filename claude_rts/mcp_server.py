@@ -389,6 +389,41 @@ def tool_container_add_favorite(args):
     return f"Added {name} to favorites with {len(actions)} action(s)"
 
 
+def tool_container_create(args):
+    """Create a new container via POST /api/containers/create.
+
+    Validates against the server-side image whitelist; non-whitelisted images
+    are rejected 400 with a structured error. The server stamps the
+    ``created_by=canvas-claude`` Docker label so destructive tools recognise
+    the container as Canvas-Claude-owned.
+    """
+    image = (args.get("image") or "").strip()
+    if not image:
+        raise ValueError("image is required")
+    body = {"image": image}
+    name = (args.get("name") or "").strip()
+    if name:
+        body["name"] = name
+    preset = args.get("preset")
+    if preset:
+        body["preset"] = preset
+    try:
+        result = http_request("POST", "/api/containers/create", body=json.dumps(body))
+    except RuntimeError as e:
+        err_str = str(e)
+        if "image_not_whitelisted" in err_str:
+            try:
+                body_start = err_str.find("{")
+                if body_start != -1:
+                    err_body = json.loads(err_str[body_start:])
+                    allowed = err_body.get("allowed", [])
+                    return f"Error: image '{image}' is not whitelisted. Allowed images: {', '.join(allowed)}."
+            except Exception:  # noqa: BLE001
+                pass
+        raise
+    return f"Container created: {json.dumps(result)}"
+
+
 # ── Blueprint MCP tools ──────────────────────────────────────────────────
 
 
@@ -477,6 +512,7 @@ TOOL_HANDLERS = {
     "container_start": tool_container_start,
     "container_stop": tool_container_stop,
     "container_add_favorite": tool_container_add_favorite,
+    "container_create": tool_container_create,
     "blueprint_list": tool_blueprint_list,
     "blueprint_get": tool_blueprint_get,
     "blueprint_save": tool_blueprint_save,
@@ -999,6 +1035,48 @@ TOOL_SCHEMAS = [
                 },
             },
             "required": ["name"],
+        },
+    },
+    {
+        "name": "container_create",
+        "description": (
+            "Create a new Docker container via the devcontainer CLI. The image must be "
+            "in the server-side whitelist (container_manager.image_whitelist in config); "
+            "non-whitelisted images are rejected with a structured error. "
+            "The new container is stamped with the Docker label created_by=canvas-claude "
+            "so other Canvas Claude tools (e.g. container_stop) recognise it as "
+            "Canvas-Claude-owned and can operate on it. After creation the container is "
+            "auto-registered as a Container Manager favorite. If 'name' is omitted, the "
+            "server generates a unique name like cc-<timestamp>-<rand>."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "image": {
+                    "type": "string",
+                    "description": (
+                        "Docker image reference (e.g. 'ubuntu:24.04'). Must appear in "
+                        "container_manager.image_whitelist. Unknown images return "
+                        "image_not_whitelisted with the allowed list."
+                    ),
+                },
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Optional container name. If omitted, the server generates a unique name (cc-<ts>-<rand>)."
+                    ),
+                },
+                "preset": {
+                    "type": "string",
+                    "description": (
+                        "Container-spec preset. Defaults to 'devcontainer' (runs "
+                        "`devcontainer up` with a generated devcontainer.json backed by "
+                        "a named Docker volume for /workspace). v1 only supports "
+                        "'devcontainer'."
+                    ),
+                },
+            },
+            "required": ["image"],
         },
     },
     {
