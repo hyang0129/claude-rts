@@ -535,6 +535,44 @@ async def test_container_create_applies_configured_resource_caps(app, client, tm
     assert "--pids-limit=2048" in run_args
 
 
+async def test_container_create_mounts_profiles_volume_by_default(app, client):
+    """#207: default creation mounts claude-profiles at /profiles."""
+    app["_test_container_create"] = {}
+    resp = await client.post(
+        "/api/containers/create",
+        json={"image": "ubuntu:24.04", "name": "profiles-default"},
+    )
+    assert resp.status == 200
+    dc = app["_test_container_create"]["calls"][0]["devcontainer_json"]
+    mounts = dc["mounts"]
+    assert any("source=claude-profiles" in m and "target=/profiles" in m and "type=volume" in m for m in mounts), (
+        f"profiles mount missing: {mounts}"
+    )
+    # Workspace mount still present alongside profiles mount.
+    assert any("target=/workspace" in m for m in mounts)
+
+
+async def test_container_create_profiles_volume_name_configurable(app, client):
+    """#207: volume name honours ``util_container.mounts.profiles`` config."""
+    app_config = app["app_config"]
+    config.write_config(
+        app_config,
+        {
+            "container_manager": {"image_whitelist": ["ubuntu:24.04"]},
+            "util_container": {"mounts": {"profiles": "team-creds"}},
+        },
+    )
+    app["_test_container_create"] = {}
+    resp = await client.post(
+        "/api/containers/create",
+        json={"image": "ubuntu:24.04", "name": "profiles-custom"},
+    )
+    assert resp.status == 200
+    mounts = app["_test_container_create"]["calls"][0]["devcontainer_json"]["mounts"]
+    assert any("source=team-creds" in m and "target=/profiles" in m for m in mounts)
+    assert not any("source=claude-profiles" in m for m in mounts)
+
+
 async def test_container_create_generates_name_when_omitted(app, client):
     app["_test_container_create"] = {}
     resp = await client.post("/api/containers/create", json={"image": "ubuntu:24.04"})

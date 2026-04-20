@@ -130,6 +130,58 @@ def test_resource_caps_preserved_alongside_labels():
     assert any(a.startswith("--memory=") for a in args)
 
 
+# ── Profiles volume mount (#207) ─────────────────────────────────────
+
+
+def test_devcontainer_preset_mounts_profiles_volume_by_default():
+    """#207 acceptance: default spec mounts claude-profiles at /profiles."""
+    spec = cs.ContainerSpec(image="ubuntu:24.04", name="foo")
+    dc = spec.devcontainer_preset()
+    assert any(
+        "source=claude-profiles" in m and "target=/profiles" in m and "type=volume" in m for m in dc["mounts"]
+    ), f"profiles mount missing: {dc['mounts']}"
+
+
+def test_devcontainer_preset_keeps_workspace_mount_alongside_profiles():
+    """Workspace mount and profiles mount coexist in the default mount list."""
+    spec = cs.ContainerSpec(image="ubuntu:24.04", name="foo")
+    dc = spec.devcontainer_preset()
+    assert any("source=foo-workspace" in m and "target=/workspace" in m for m in dc["mounts"])
+    assert any("source=claude-profiles" in m and "target=/profiles" in m for m in dc["mounts"])
+
+
+def test_devcontainer_preset_profiles_volume_name_is_configurable():
+    """Volume name flows through from the ``profiles_volume`` field."""
+    spec = cs.ContainerSpec(
+        image="ubuntu:24.04",
+        name="foo",
+        profiles_volume="my-creds-vol",
+    )
+    dc = spec.devcontainer_preset()
+    assert any("source=my-creds-vol" in m and "target=/profiles" in m for m in dc["mounts"])
+    assert not any("source=claude-profiles" in m for m in dc["mounts"])
+
+
+def test_devcontainer_preset_opt_out_of_profiles_mount():
+    """``mount_profiles=False`` drops the /profiles mount entirely."""
+    spec = cs.ContainerSpec(image="ubuntu:24.04", name="foo", mount_profiles=False)
+    dc = spec.devcontainer_preset()
+    assert not any("target=/profiles" in m for m in dc["mounts"])
+    # Workspace mount still there.
+    assert any("target=/workspace" in m for m in dc["mounts"])
+
+
+def test_custom_mounts_skip_auto_profiles_injection():
+    """Explicit ``mounts=[...]`` respected verbatim — no auto-injection."""
+    spec = cs.ContainerSpec(
+        image="ubuntu:24.04",
+        name="foo",
+        mounts=["source=my-vol,target=/data,type=volume"],
+    )
+    dc = spec.devcontainer_preset()
+    assert dc["mounts"] == ["source=my-vol,target=/data,type=volume"]
+
+
 def test_create_does_not_shell_out_synchronously():
     """Regression guard: ensure container_spec does not import subprocess.run."""
     import inspect

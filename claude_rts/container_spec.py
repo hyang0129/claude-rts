@@ -42,6 +42,12 @@ DEFAULT_MEMORY_LIMIT: str = "8g"
 DEFAULT_DISK_LIMIT: str = "10g"
 DEFAULT_PIDS_LIMIT: int = 1024
 
+#: Name of the named Docker volume holding Claude credentials. Same volume
+#: used by the util container and the ``start-claude`` dev preset so managed
+#: containers see the same ``/profiles/<profile>/.credentials.json`` layout.
+#: Auto-created by Docker on first use if it does not already exist.
+DEFAULT_PROFILES_VOLUME: str = "claude-profiles"
+
 
 @dataclass
 class ContainerSpec:
@@ -70,6 +76,13 @@ class ContainerSpec:
     memory_limit: str = DEFAULT_MEMORY_LIMIT
     disk_limit: str = DEFAULT_DISK_LIMIT
     pids_limit: int = DEFAULT_PIDS_LIMIT
+    # Profiles volume mount (#207). Default on — managed containers need
+    # access to ``/profiles/<profile>/.credentials.json`` so Canvas Claude can
+    # start Claude sessions inside them using the same credentials the util
+    # container and ``start-claude`` preset already use. Opt-out via
+    # ``mount_profiles=False`` for future flexibility.
+    mount_profiles: bool = True
+    profiles_volume: str = DEFAULT_PROFILES_VOLUME
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -102,6 +115,16 @@ class ContainerSpec:
         mounts = list(self.mounts) or [
             f"source={self.workspace_volume},target=/workspace,type=volume",
         ]
+        # Profiles volume mount (#207). Always appended to the default mount
+        # list so managed containers see ``/profiles`` with the same layout as
+        # the util container. Custom ``mounts=[...]`` callers are respected
+        # verbatim (they can add the profiles mount themselves or set
+        # ``mount_profiles=False`` explicitly); we only auto-append when the
+        # caller did not supply custom mounts AND opted in.
+        if self.mount_profiles and not self.mounts:
+            profiles_mount = f"source={self.profiles_volume},target=/profiles,type=volume"
+            if profiles_mount not in mounts:
+                mounts.append(profiles_mount)
 
         return {
             "image": self.image,
