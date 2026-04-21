@@ -462,7 +462,8 @@ async def test_container_create_requires_image(client):
 
 
 async def test_container_create_success_with_whitelisted_image(app, client):
-    # Install test-mode hook so no real devcontainer CLI is called.
+    # Install test-mode hooks so no real Docker calls are made.
+    app["_test_container_labels"] = {}
     app["_test_container_create"] = {}
     resp = await client.post(
         "/api/containers/create",
@@ -492,6 +493,7 @@ async def test_container_create_success_with_whitelisted_image(app, client):
 
 async def test_container_create_applies_default_resource_caps(app, client):
     """#204: with no config overrides, every created container inherits v1 caps."""
+    app["_test_container_labels"] = {}
     app["_test_container_create"] = {}
     resp = await client.post(
         "/api/containers/create",
@@ -522,6 +524,7 @@ async def test_container_create_applies_configured_resource_caps(app, client, tm
             },
         },
     )
+    app["_test_container_labels"] = {}
     app["_test_container_create"] = {}
     resp = await client.post(
         "/api/containers/create",
@@ -537,6 +540,7 @@ async def test_container_create_applies_configured_resource_caps(app, client, tm
 
 async def test_container_create_mounts_profiles_volume_by_default(app, client):
     """#207: default creation mounts claude-profiles at /profiles."""
+    app["_test_container_labels"] = {}
     app["_test_container_create"] = {}
     resp = await client.post(
         "/api/containers/create",
@@ -562,6 +566,7 @@ async def test_container_create_profiles_volume_name_configurable(app, client):
             "util_container": {"mounts": {"profiles": "team-creds"}},
         },
     )
+    app["_test_container_labels"] = {}
     app["_test_container_create"] = {}
     resp = await client.post(
         "/api/containers/create",
@@ -574,6 +579,7 @@ async def test_container_create_profiles_volume_name_configurable(app, client):
 
 
 async def test_container_create_generates_name_when_omitted(app, client):
+    app["_test_container_labels"] = {}
     app["_test_container_create"] = {}
     resp = await client.post("/api/containers/create", json={"image": "ubuntu:24.04"})
     assert resp.status == 200
@@ -583,6 +589,7 @@ async def test_container_create_generates_name_when_omitted(app, client):
 
 
 async def test_container_create_auto_registers_favorite(app, client):
+    app["_test_container_labels"] = {}
     app["_test_container_create"] = {}
     resp = await client.post(
         "/api/containers/create",
@@ -601,6 +608,7 @@ async def test_container_create_auto_registers_favorite(app, client):
 
 
 async def test_container_create_surfaces_failure_as_500(app, client):
+    app["_test_container_labels"] = {}
     app["_test_container_create"] = {
         "should_fail": True,
         "error": "devcontainer up failed: permission denied",
