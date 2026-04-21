@@ -43,6 +43,42 @@ def test_custom_port():
         assert call_kwargs.kwargs["port"] == 4000
 
 
+def test_custom_host():
+    """Verify --host 0.0.0.0 is passed through to web.run_app."""
+    with (
+        patch("sys.argv", ["supreme-claudemander", "--host", "0.0.0.0", "--no-browser"]),
+        patch("claude_rts.__main__.web") as mock_web,
+        patch("claude_rts.__main__.create_app") as mock_create,
+        patch("claude_rts.__main__.config") as mock_config,
+    ):
+        mock_config.load.return_value = MagicMock()
+        mock_create.return_value = MagicMock()
+        try:
+            main()
+        except SystemExit:
+            pass
+        call_kwargs = mock_web.run_app.call_args
+        assert call_kwargs.kwargs["host"] == "0.0.0.0"
+
+
+def test_custom_host_tailscale_ip():
+    """Verify --host accepts a Tailscale-range IP and passes it through verbatim."""
+    with (
+        patch("sys.argv", ["supreme-claudemander", "--host", "100.64.0.1", "--no-browser"]),
+        patch("claude_rts.__main__.web") as mock_web,
+        patch("claude_rts.__main__.create_app") as mock_create,
+        patch("claude_rts.__main__.config") as mock_config,
+    ):
+        mock_config.load.return_value = MagicMock()
+        mock_create.return_value = MagicMock()
+        try:
+            main()
+        except SystemExit:
+            pass
+        call_kwargs = mock_web.run_app.call_args
+        assert call_kwargs.kwargs["host"] == "100.64.0.1"
+
+
 def test_no_browser_flag():
     """Verify --no-browser skips browser open."""
     with (
