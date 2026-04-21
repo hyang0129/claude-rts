@@ -1,6 +1,6 @@
-"""Playwright E2E tests for the VM Manager card using REAL Docker containers.
+"""Playwright E2E tests for the Container Manager card using REAL Docker containers.
 
-These tests launch the real backend with --dev-config vm-manager and exercise
+These tests launch the real backend with --dev-config container-manager and exercise
 the actual docker code paths (no test puppeting API, no mock container
 data). Real containers are created/destroyed per test or per module.
 
@@ -10,10 +10,10 @@ is not available.
 Run:
     pip install pytest-playwright playwright
     python -m playwright install chromium
-    python -m pytest tests/e2e/real/test_vm_manager_real_e2e.py -v
+    python -m pytest tests/e2e/real/test_container_manager_real_e2e.py -v
 
 Headed mode (shows the browser window):
-    HEADED=1 python -m pytest tests/e2e/real/test_vm_manager_real_e2e.py -v
+    HEADED=1 python -m pytest tests/e2e/real/test_container_manager_real_e2e.py -v
 """
 
 import subprocess
@@ -25,7 +25,7 @@ import pytest
 pw = pytest.importorskip("playwright")
 
 # Shared helpers live in conftest (single source of truth — see issue #165).
-from tests.e2e.conftest import cleanup_non_vm_cards, refresh_vm_card  # noqa: E402
+from tests.e2e.conftest import cleanup_non_container_cards, refresh_container_card  # noqa: E402
 
 
 # ── Markers & skip logic ─────────────────────────────────────────────────────
@@ -55,8 +55,8 @@ if not _docker_available():
 
 @pytest.fixture(scope="module")
 def dev_config_preset():
-    """Use the vm-manager dev-config preset."""
-    return "vm-manager"
+    """Use the container-manager dev-config preset."""
+    return "container-manager"
 
 
 @pytest.fixture(scope="module")
@@ -155,7 +155,7 @@ def set_favorites(page, port, favorites):
     """PUT favorites to the API."""
     page.evaluate(
         """async ([port, favorites]) => {
-        await fetch(`http://localhost:${port}/api/vms/favorites`, {
+        await fetch(`http://localhost:${port}/api/containers/favorites`, {
             method: 'PUT',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(favorites),
@@ -169,29 +169,29 @@ def get_favorites(page, port):
     """GET favorites from the API."""
     return page.evaluate(
         """async (port) => {
-        const r = await fetch(`http://localhost:${port}/api/vms/favorites`);
+        const r = await fetch(`http://localhost:${port}/api/containers/favorites`);
         return r.json();
     }""",
         port,
     )
 
 
-def ensure_vm_card_exists(page):
-    """Ensure at least one VM Manager card exists; spawn one if needed.
+def ensure_container_card_exists(page):
+    """Ensure at least one Container Manager card exists; spawn one if needed.
 
     Condition-based: after spawning, waits for the observable
-    ``[data-vm-search]`` input to appear in the DOM rather than a fixed
+    ``[data-container-search]`` input to appear in the DOM rather than a fixed
     sleep.  Removes a flaky 2-second ``wait_for_timeout`` from the critical
     path of every test in this module (see issue #167).
     """
-    vm_cards = page.locator("[data-card-id]").filter(has=page.locator("[data-vm-search]"))
-    if vm_cards.count() > 0:
+    container_cards = page.locator("[data-card-id]").filter(has=page.locator("[data-container-search]"))
+    if container_cards.count() > 0:
         return
     # Spawn via JS directly
-    page.evaluate("() => CARD_TYPE_REGISTRY.spawn('widget', {widgetType: 'vm-manager', x: 100, y: 100})")
-    # Wait for the VM Manager card's search input — the first observable
+    page.evaluate("() => CARD_TYPE_REGISTRY.spawn('widget', {widgetType: 'container-manager', x: 100, y: 100})")
+    # Wait for the Container Manager card's search input — the first observable
     # DOM element written by its async render() — instead of sleeping.
-    page.wait_for_selector("[data-vm-search]", timeout=5000)
+    page.wait_for_selector("[data-container-search]", timeout=5000)
 
 
 def docker_inspect_state(name: str) -> str:
@@ -230,9 +230,9 @@ class TestRealDiscovery:
             ],
         )
 
-        cleanup_non_vm_cards(page)
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        cleanup_non_container_cards(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Verify running container has Online indicator
         running_online = page.evaluate(
@@ -265,11 +265,11 @@ class TestRealDiscovery:
         assert stopped_offline, "Stopped container should have an Offline indicator"
 
         # Running container should NOT have a Start button
-        start_btn_running = page.locator(f'[data-vm-start="{running_container}"]')
+        start_btn_running = page.locator(f'[data-container-start="{running_container}"]')
         assert start_btn_running.count() == 0, "Running container should not have a Start button"
 
         # Stopped container SHOULD have a Start button
-        start_btn_stopped = page.locator(f'[data-vm-start="{stopped_container}"]')
+        start_btn_stopped = page.locator(f'[data-container-start="{stopped_container}"]')
         assert start_btn_stopped.count() > 0, "Stopped container should have a Start button"
 
 
@@ -294,12 +294,12 @@ class TestRealStartContainer:
             ],
         )
 
-        cleanup_non_vm_cards(page)
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        cleanup_non_container_cards(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Verify Start button exists
-        start_btn = page.locator(f'[data-vm-start="{startable_container}"]')
+        start_btn = page.locator(f'[data-container-start="{startable_container}"]')
         assert start_btn.count() > 0, "Start button should exist for exited container"
 
         # Click Start
@@ -309,7 +309,7 @@ class TestRealStartContainer:
         # once the frontend re-renders after the successful start response.  This
         # replaces a flat 4-second sleep with a condition-based wait (issue #172).
         page.wait_for_function(
-            f"() => document.querySelectorAll('[data-vm-start=\"{startable_container}\"]').length === 0",
+            f"() => document.querySelectorAll('[data-container-start=\"{startable_container}\"]').length === 0",
             timeout=10000,
         )
 
@@ -319,7 +319,7 @@ class TestRealStartContainer:
         assert state == "running", f"Container should be running after start, got: {state}"
 
         # Verify Start button is gone after re-render (already waited above)
-        start_btn_after = page.locator(f'[data-vm-start="{startable_container}"]')
+        start_btn_after = page.locator(f'[data-container-start="{startable_container}"]')
         assert start_btn_after.count() == 0, "Start button should disappear after container starts"
 
         # Verify Online indicator appeared
@@ -367,23 +367,23 @@ class TestRealStartNonExistent:
             ],
         )
 
-        cleanup_non_vm_cards(page)
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        cleanup_non_container_cards(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # The bogus container is not in Docker's list — UI renders it as "missing"
         # with a "not found" label, NOT a Start button.
-        start_btn = page.locator(f'[data-vm-start="{bogus_name}"]')
+        start_btn = page.locator(f'[data-container-start="{bogus_name}"]')
         assert start_btn.count() == 0, "Start button should NOT exist for a container Docker has never seen"
 
         # Remove button must still be present so the user can clean up the stale entry
-        remove_btn = page.locator(f'[data-vm-remove="{bogus_name}"]')
+        remove_btn = page.locator(f'[data-container-remove="{bogus_name}"]')
         assert remove_btn.count() > 0, "Remove button should exist for unknown favorite"
 
         # The row should display "not found" to distinguish it from a stopped container
         parent_text = page.evaluate(
             """(name) => {
-                const btn = document.querySelector(`[data-vm-remove="${name}"]`);
+                const btn = document.querySelector(`[data-container-remove="${name}"]`);
                 return btn ? btn.closest('div').innerText : '';
             }""",
             bogus_name,
@@ -404,12 +404,12 @@ class TestRealSearch:
         # Start with empty favorites
         set_favorites(page, backend_port, [])
 
-        cleanup_non_vm_cards(page)
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        cleanup_non_container_cards(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Type a substring of the running container's name in search
-        search_input = page.locator("[data-vm-search]").first
+        search_input = page.locator("[data-container-search]").first
         search_input.click()
         # Use the e2e-vm-running prefix to find our container
         search_input.fill("e2e-vm-running")
@@ -417,14 +417,14 @@ class TestRealSearch:
         # Wait for the search results container to become visible and the Add
         # button for our target container to render (condition-based in place of
         # a 1-second sleep — issue #172).
-        page.locator("[data-vm-search-results]").first.wait_for(state="visible", timeout=5000)
-        page.locator(f'[data-vm-add="{running_container}"]').first.wait_for(state="visible", timeout=5000)
+        page.locator("[data-container-search-results]").first.wait_for(state="visible", timeout=5000)
+        page.locator(f'[data-container-add="{running_container}"]').first.wait_for(state="visible", timeout=5000)
 
-        results = page.locator("[data-vm-search-results]").first
+        results = page.locator("[data-container-search-results]").first
         assert results.is_visible(), "Search results should be visible"
 
         # Verify our running container appears in results with an Add button
-        add_btn = page.locator(f'[data-vm-add="{running_container}"]')
+        add_btn = page.locator(f'[data-container-add="{running_container}"]')
         assert add_btn.count() > 0, f"Container {running_container} should appear in search results"
 
         # Click add
@@ -435,7 +435,7 @@ class TestRealSearch:
         # then re-renders — we wait on the server-side source of truth.
         page.wait_for_function(
             f"""async () => {{
-                const r = await fetch('http://localhost:{backend_port}/api/vms/favorites');
+                const r = await fetch('http://localhost:{backend_port}/api/containers/favorites');
                 const favs = await r.json();
                 return favs.some(f => f.name === {running_container!r});
             }}""",
@@ -484,15 +484,15 @@ class TestRealTerminalAction:
             ],
         )
 
-        cleanup_non_vm_cards(page)
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        cleanup_non_container_cards(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Count existing cards
         initial_count = page.locator("[data-card-id]").count()
 
         # Click Terminal action button
-        action_btn = page.locator(f'[data-vm-action="{bash_container}"][data-action-idx="0"]')
+        action_btn = page.locator(f'[data-container-action="{bash_container}"][data-action-idx="0"]')
         action_btn.wait_for(state="visible", timeout=5000)
         action_btn.click()
 
@@ -546,9 +546,9 @@ class TestRealStatusAccuracy:
                 ],
             )
 
-            cleanup_non_vm_cards(page)
-            ensure_vm_card_exists(page)
-            refresh_vm_card(page)
+            cleanup_non_container_cards(page)
+            ensure_container_card_exists(page)
+            refresh_container_card(page)
 
             # Verify initially Online
             online = page.evaluate(
@@ -566,7 +566,7 @@ class TestRealStatusAccuracy:
             assert online, "Container should initially show Online"
 
             # No Start button while running
-            start_btn = page.locator(f'[data-vm-start="{name}"]')
+            start_btn = page.locator(f'[data-container-start="{name}"]')
             assert start_btn.count() == 0, "No Start button while container is running"
 
             # Stop the container externally
@@ -578,7 +578,7 @@ class TestRealStatusAccuracy:
             )
 
             # Re-render to pick up the state change
-            refresh_vm_card(page)
+            refresh_container_card(page)
 
             # Verify now Offline
             offline = page.evaluate(
@@ -596,7 +596,7 @@ class TestRealStatusAccuracy:
             assert offline, "Container should show Offline after external stop"
 
             # Start button should now appear
-            start_btn_after = page.locator(f'[data-vm-start="{name}"]')
+            start_btn_after = page.locator(f'[data-container-start="{name}"]')
             assert start_btn_after.count() > 0, "Start button should appear after container is stopped"
 
         finally:

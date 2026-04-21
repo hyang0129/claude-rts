@@ -1,15 +1,15 @@
-"""Playwright E2E tests for the VM Manager card.
+"""Playwright E2E tests for the Container Manager card.
 
-These tests launch the real backend with --dev-config vm-manager and
-verify VM Manager widget interactions via Playwright in a browser.
+These tests launch the real backend with --dev-config container-manager and
+verify Container Manager widget interactions via Playwright in a browser.
 
 Run:
     pip install pytest-playwright playwright
     python -m playwright install chromium
-    python -m pytest tests/e2e/test_vm_manager_e2e.py -v
+    python -m pytest tests/e2e/test_container_manager_e2e.py -v
 
 Headed mode (shows the browser window):
-    HEADED=1 python -m pytest tests/e2e/test_vm_manager_e2e.py -v
+    HEADED=1 python -m pytest tests/e2e/test_container_manager_e2e.py -v
 """
 
 import json
@@ -20,7 +20,7 @@ import pytest
 pw = pytest.importorskip("playwright")
 
 # Shared helpers live in conftest (single source of truth — see issue #165).
-from tests.e2e.conftest import cleanup_non_vm_cards, refresh_vm_card  # noqa: E402
+from tests.e2e.conftest import cleanup_non_container_cards, refresh_container_card  # noqa: E402
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -28,8 +28,8 @@ from tests.e2e.conftest import cleanup_non_vm_cards, refresh_vm_card  # noqa: E4
 
 @pytest.fixture(scope="module")
 def dev_config_preset():
-    """Use the vm-manager dev-config preset."""
-    return "vm-manager"
+    """Use the container-manager dev-config preset."""
+    return "container-manager"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -39,7 +39,7 @@ def seed_containers(page, backend_port, containers):
     """PUT fake container data to the test puppeting API."""
     page.evaluate(
         """async ([port, containers]) => {
-        await fetch(`http://localhost:${port}/api/test/vm-containers`, {
+        await fetch(`http://localhost:${port}/api/test/containers`, {
             method: 'PUT',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(containers),
@@ -53,7 +53,7 @@ def set_favorites(page, backend_port, favorites):
     """PUT favorites to the API."""
     page.evaluate(
         """async ([port, favorites]) => {
-        await fetch(`http://localhost:${port}/api/vms/favorites`, {
+        await fetch(`http://localhost:${port}/api/containers/favorites`, {
             method: 'PUT',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(favorites),
@@ -67,18 +67,18 @@ def get_favorites(page, backend_port):
     """GET favorites from the API."""
     return page.evaluate(
         """async (port) => {
-        const r = await fetch(`http://localhost:${port}/api/vms/favorites`);
+        const r = await fetch(`http://localhost:${port}/api/containers/favorites`);
         return r.json();
     }""",
         backend_port,
     )
 
 
-def get_test_vm_containers(page, backend_port):
+def get_test_containers(page, backend_port):
     """GET test VM containers from the puppeting API."""
     return page.evaluate(
         """async (port) => {
-        const r = await fetch(`http://localhost:${port}/api/test/vm-containers`);
+        const r = await fetch(`http://localhost:${port}/api/test/containers`);
         return r.json();
     }""",
         backend_port,
@@ -99,45 +99,45 @@ def save_blueprint(page, backend_port, name, blueprint_def):
     )
 
 
-def ensure_vm_card_exists(page):
-    """Ensure at least one VM Manager card exists; spawn one if needed."""
-    vm_cards = page.locator("[data-card-id]").filter(has=page.locator("[data-vm-search]"))
-    if vm_cards.count() > 0:
+def ensure_container_card_exists(page):
+    """Ensure at least one Container Manager card exists; spawn one if needed."""
+    container_cards = page.locator("[data-card-id]").filter(has=page.locator("[data-container-search]"))
+    if container_cards.count() > 0:
         return
     # Spawn from context menu
     viewport = page.locator("#viewport")
     viewport.click(button="right", position={"x": 500, "y": 100})
     ctx_menu = page.locator("#context-menu")
     ctx_menu.wait_for(state="visible", timeout=3000)
-    widget_item = ctx_menu.locator('[data-widget="vm-manager"]')
+    widget_item = ctx_menu.locator('[data-widget="container-manager"]')
     if widget_item.count() > 0:
         widget_item.click()
-        # Wait for VM Manager card to appear in DOM (render complete => has search input).
+        # Wait for Container Manager card to appear in DOM (render complete => has search input).
         try:
             page.wait_for_function(
-                "() => document.querySelectorAll('[data-card-id] [data-vm-search]').length > 0",
+                "() => document.querySelectorAll('[data-card-id] [data-container-search]').length > 0",
                 timeout=5000,
             )
         except Exception:
             pass  # Fall through to JS-direct fallback below.
     # Fallback: if context menu approach didn't spawn a card, use JS directly
-    vm_cards_after = page.locator("[data-card-id]").filter(has=page.locator("[data-vm-search]"))
-    if vm_cards_after.count() == 0:
-        page.evaluate("() => CARD_TYPE_REGISTRY.spawn('widget', {widgetType: 'vm-manager', x: 100, y: 100})")
+    container_cards_after = page.locator("[data-card-id]").filter(has=page.locator("[data-container-search]"))
+    if container_cards_after.count() == 0:
+        page.evaluate("() => CARD_TYPE_REGISTRY.spawn('widget', {widgetType: 'container-manager', x: 100, y: 100})")
         page.wait_for_function(
-            "() => document.querySelectorAll('[data-card-id] [data-vm-search]').length > 0",
+            "() => document.querySelectorAll('[data-card-id] [data-container-search]').length > 0",
             timeout=5000,
         )
 
 
-# ── S1: VM Manager widget spawns from context menu ───────────────────────────
+# ── S1: Container Manager widget spawns from context menu ───────────────────────────
 
 
 class TestVmManagerSpawn:
-    """S1: VM Manager widget spawns from context menu."""
+    """S1: Container Manager widget spawns from context menu."""
 
-    def test_vm_manager_spawns_from_context_menu(self, page, backend_port):
-        """Right-click canvas, click vm-manager widget, verify card appears."""
+    def test_container_manager_spawns_from_context_menu(self, page, backend_port):
+        """Right-click canvas, click container-manager widget, verify card appears."""
         # Clear all cards first
         page.evaluate(
             """() => {
@@ -165,24 +165,24 @@ class TestVmManagerSpawn:
         ctx_menu = page.locator("#context-menu")
         ctx_menu.wait_for(state="visible", timeout=3000)
 
-        # Find and click vm-manager widget item
-        widget_item = ctx_menu.locator('[data-widget="vm-manager"]')
-        assert widget_item.count() > 0, "vm-manager should be in context menu"
+        # Find and click container-manager widget item
+        widget_item = ctx_menu.locator('[data-widget="container-manager"]')
+        assert widget_item.count() > 0, "container-manager should be in context menu"
         widget_item.click()
 
-        # Wait for the VM Manager card to be added and rendered (search input present).
+        # Wait for the Container Manager card to be added and rendered (search input present).
         page.wait_for_function(
-            "() => document.querySelectorAll('[data-card-id] [data-vm-search]').length > 0",
+            "() => document.querySelectorAll('[data-card-id] [data-container-search]').length > 0",
             timeout=5000,
         )
 
         # Verify card appeared
         new_cards = page.locator("[data-card-id]")
-        assert new_cards.count() > 0, "A card should appear after clicking vm-manager"
+        assert new_cards.count() > 0, "A card should appear after clicking container-manager"
 
         # Verify card contains the VM search input
-        search_input = page.locator("[data-vm-search]")
-        assert search_input.count() > 0, "Card should contain [data-vm-search]"
+        search_input = page.locator("[data-container-search]")
+        assert search_input.count() > 0, "Card should contain [data-container-search]"
 
 
 # ── S2: Favorites render with correct status indicators ──────────────────────
@@ -242,8 +242,8 @@ class TestVmFavoritesStatus:
             ],
         )
 
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Verify green dot for alpha (online)
         alpha_dot = page.evaluate(
@@ -260,17 +260,17 @@ class TestVmFavoritesStatus:
         assert alpha_dot is not None, "Alpha should have an Online indicator"
 
         # Verify beta has a Start button
-        start_btn = page.locator('[data-vm-start="beta"]')
+        start_btn = page.locator('[data-container-start="beta"]')
         assert start_btn.count() > 0, "Offline container beta should have Start button"
 
         # Verify alpha action buttons are NOT dimmed
-        alpha_action = page.locator('[data-vm-action="alpha"]').first
+        alpha_action = page.locator('[data-container-action="alpha"]').first
         if alpha_action.count() > 0:
             style = alpha_action.get_attribute("style") or ""
             assert "opacity:0.4" not in style, "Online container actions should not be dimmed"
 
         # Verify beta action buttons ARE dimmed
-        beta_action = page.locator('[data-vm-action="beta"]').first
+        beta_action = page.locator('[data-container-action="beta"]').first
         if beta_action.count() > 0:
             style = beta_action.get_attribute("style") or ""
             assert "opacity:0.4" in style or "pointer-events:none" in style, (
@@ -331,24 +331,24 @@ class TestVmSearch:
             ],
         )
 
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Click search input and type
-        search_input = page.locator("[data-vm-search]").first
+        search_input = page.locator("[data-container-search]").first
         search_input.click()
         search_input.fill("containerB")
 
         # Wait for search results to render the expected row.
         page.wait_for_function(
-            "() => document.querySelector('[data-vm-add=\"containerB\"]') !== null",
+            "() => document.querySelector('[data-container-add=\"containerB\"]') !== null",
             timeout=3000,
         )
-        results = page.locator("[data-vm-search-results]").first
+        results = page.locator("[data-container-search-results]").first
         assert results.is_visible(), "Search results should be visible"
 
         # Verify containerB appears in results
-        add_btn = page.locator('[data-vm-add="containerB"]')
+        add_btn = page.locator('[data-container-add="containerB"]')
         assert add_btn.count() > 0, "containerB should appear in search results"
 
         # Click add — readiness check first, then await DOM confirmation.
@@ -356,7 +356,7 @@ class TestVmSearch:
         add_btn.click()
         # Wait for the new favorite's remove button to appear (render complete).
         page.wait_for_function(
-            "() => document.querySelector('[data-vm-remove=\"containerB\"]') !== null",
+            "() => document.querySelector('[data-container-remove=\"containerB\"]') !== null",
             timeout=5000,
         )
 
@@ -411,17 +411,17 @@ class TestVmRemoveFavorite:
             ],
         )
 
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Click remove for web-app
-        remove_btn = page.locator('[data-vm-remove="web-app"]')
+        remove_btn = page.locator('[data-container-remove="web-app"]')
         assert remove_btn.count() > 0, "Remove button for web-app should exist"
         remove_btn.wait_for(state="visible", timeout=3000)
         remove_btn.click()
         # Wait for the row to leave the DOM (render reflects the removal).
         page.wait_for_function(
-            "() => document.querySelector('[data-vm-remove=\"web-app\"]') === null",
+            "() => document.querySelector('[data-container-remove=\"web-app\"]') === null",
             timeout=5000,
         )
 
@@ -432,7 +432,7 @@ class TestVmRemoveFavorite:
         assert "db-server" in fav_names, "db-server should remain"
 
         # Verify web-app row is gone from the card
-        remove_btn_after = page.locator('[data-vm-remove="web-app"]')
+        remove_btn_after = page.locator('[data-container-remove="web-app"]')
         assert remove_btn_after.count() == 0, "web-app row should be gone from card"
 
 
@@ -469,11 +469,11 @@ class TestVmStartContainer:
             ],
         )
 
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Verify Start button exists
-        start_btn = page.locator('[data-vm-start="my-db"]')
+        start_btn = page.locator('[data-container-start="my-db"]')
         assert start_btn.count() > 0, "Start button for my-db should exist"
 
         # Click Start
@@ -482,18 +482,18 @@ class TestVmStartContainer:
 
         # Wait for container state transition + VM card re-render (Start button gone).
         page.wait_for_function(
-            "() => document.querySelector('[data-vm-start=\"my-db\"]') === null",
+            "() => document.querySelector('[data-container-start=\"my-db\"]') === null",
             timeout=10000,
         )
 
         # Verify container is now online via API
-        containers = get_test_vm_containers(page, backend_port)
+        containers = get_test_containers(page, backend_port)
         my_db = next((c for c in containers if c["name"] == "my-db"), None)
         assert my_db is not None, "my-db should exist in test containers"
         assert my_db["state"] == "online", "my-db should be online after start"
 
         # Verify Start button is gone (online containers don't show it)
-        start_btn_after = page.locator('[data-vm-start="my-db"]')
+        start_btn_after = page.locator('[data-container-start="my-db"]')
         assert start_btn_after.count() == 0, "Start button should be gone for online container"
 
 
@@ -538,14 +538,14 @@ class TestVmTerminalAction:
             ],
         )
 
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Count existing cards
         initial_count = page.locator("[data-card-id]").count()
 
         # Click Terminal action
-        action_btn = page.locator('[data-vm-action="dev-web"][data-action-idx="0"]')
+        action_btn = page.locator('[data-container-action="dev-web"][data-action-idx="0"]')
         assert action_btn.count() > 0, "Terminal action button should exist"
         action_btn.click()
 
@@ -603,15 +603,15 @@ class TestVmBlueprintAction:
             ],
         )
 
-        cleanup_non_vm_cards(page)
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        cleanup_non_container_cards(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Count existing cards
         initial_count = page.locator("[data-card-id]").count()
 
         # Click second action (index 1)
-        action_btn = page.locator('[data-vm-action="claude-dev"][data-action-idx="1"]')
+        action_btn = page.locator('[data-container-action="claude-dev"][data-action-idx="1"]')
         assert action_btn.count() > 0, "Second blueprint action button should exist"
         action_btn.click()
 
@@ -665,11 +665,11 @@ class TestVmActionsDisabledOffline:
             ],
         )
 
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Verify action buttons are dimmed
-        action_btn = page.locator('[data-vm-action="stopped-svc"]').first
+        action_btn = page.locator('[data-container-action="stopped-svc"]').first
         assert action_btn.count() > 0, "Action button should exist for stopped-svc"
         style = action_btn.get_attribute("style") or ""
         assert "opacity:0.4" in style or "pointer-events:none" in style, (
@@ -725,12 +725,12 @@ class TestVmConfigureActions:
             ],
         )
 
-        cleanup_non_vm_cards(page)
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        cleanup_non_container_cards(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Click configure button
-        configure_btn = page.locator('[data-vm-configure="my-app"]')
+        configure_btn = page.locator('[data-container-configure="my-app"]')
         assert configure_btn.count() > 0, "Configure button should exist"
         configure_btn.wait_for(state="visible", timeout=3000)
         configure_btn.click()
@@ -817,12 +817,12 @@ class TestVmConfigureCancel:
             ],
         )
 
-        cleanup_non_vm_cards(page)
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        cleanup_non_container_cards(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Open configure dialog
-        configure_btn = page.locator('[data-vm-configure="cancel-test"]')
+        configure_btn = page.locator('[data-container-configure="cancel-test"]')
         configure_btn.wait_for(state="visible", timeout=3000)
         configure_btn.click()
         # Wait for the dialog overlay to appear.
@@ -886,12 +886,12 @@ class TestVmConfigureInvalidJson:
             ],
         )
 
-        cleanup_non_vm_cards(page)
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        cleanup_non_container_cards(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Open configure dialog
-        configure_btn = page.locator('[data-vm-configure="json-test"]')
+        configure_btn = page.locator('[data-container-configure="json-test"]')
         configure_btn.wait_for(state="visible", timeout=3000)
         configure_btn.click()
         # Wait for the dialog overlay to appear.
@@ -957,26 +957,26 @@ class TestVmSearchFilters:
             ],
         )
 
-        cleanup_non_vm_cards(page)
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        cleanup_non_container_cards(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Type search query
-        search_input = page.locator("[data-vm-search]").first
+        search_input = page.locator("[data-container-search]").first
         search_input.click()
         search_input.fill("aa")
         # Wait for the search results container to render with the expected rows
         # (aaa + aac; aab is filtered because it's a favorite).
         page.wait_for_function(
-            "() => document.querySelector('[data-vm-add=\"aaa\"]') !== null"
-            " && document.querySelector('[data-vm-add=\"aac\"]') !== null",
+            "() => document.querySelector('[data-container-add=\"aaa\"]') !== null"
+            " && document.querySelector('[data-container-add=\"aac\"]') !== null",
             timeout=3000,
         )
 
         # Verify search results
-        add_aaa = page.locator('[data-vm-add="aaa"]')
-        add_aab = page.locator('[data-vm-add="aab"]')
-        add_aac = page.locator('[data-vm-add="aac"]')
+        add_aaa = page.locator('[data-container-add="aaa"]')
+        add_aab = page.locator('[data-container-add="aab"]')
+        add_aac = page.locator('[data-container-add="aac"]')
 
         assert add_aaa.count() > 0, "aaa should be in search results"
         assert add_aab.count() == 0, "aab should NOT be in search results (already a favorite)"
@@ -994,15 +994,15 @@ class TestVmEmptyFavorites:
         seed_containers(page, backend_port, [])
         set_favorites(page, backend_port, [])
 
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Verify placeholder text
         body_text = page.evaluate(
             """() => {
             const cards = document.querySelectorAll('[data-card-id]');
             for (const card of cards) {
-                const search = card.querySelector('[data-vm-search]');
+                const search = card.querySelector('[data-container-search]');
                 if (search) return card.textContent;
             }
             return '';
@@ -1011,14 +1011,14 @@ class TestVmEmptyFavorites:
         assert "No favorites yet" in body_text, "Empty favorites should show placeholder message"
 
 
-# ── S14: VM Manager card persists across canvas save/reload ──────────────────
+# ── S14: Container Manager card persists across canvas save/reload ──────────────────
 
 
 class TestVmPersistence:
-    """S14: VM Manager card persists across canvas save/reload."""
+    """S14: Container Manager card persists across canvas save/reload."""
 
-    def test_vm_card_persists_reload(self, page, backend_port):
-        """Save canvas, reload, verify VM Manager card is still present."""
+    def test_container_card_persists_reload(self, page, backend_port):
+        """Save canvas, reload, verify Container Manager card is still present."""
         # Seed some data so the card has content
         seed_containers(
             page,
@@ -1044,20 +1044,20 @@ class TestVmPersistence:
             ],
         )
 
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
-        # Verify VM Manager card exists
-        vm_search = page.locator("[data-vm-search]")
-        assert vm_search.count() > 0, "VM Manager card should exist before save"
+        # Verify Container Manager card exists
+        container_search = page.locator("[data-container-search]")
+        assert container_search.count() > 0, "Container Manager card should exist before save"
 
         # Issue #194 flipped the card default to unstarred, and saveLayout()
-        # now excludes unstarred cards.  Star the VM Manager card explicitly
+        # now excludes unstarred cards.  Star the Container Manager card explicitly
         # so it persists across reload.
         page.evaluate(
             """() => {
-            const vmCard = cards.find(c => c.el && c.el.querySelector('[data-vm-search]'));
-            if (!vmCard) throw new Error('VM Manager card not found in cards[]');
+            const vmCard = cards.find(c => c.el && c.el.querySelector('[data-container-search]'));
+            if (!vmCard) throw new Error('Container Manager card not found in cards[]');
             if (!vmCard.starred) {
                 const btn = vmCard.el.querySelector(`[data-star="${vmCard.id}"]`);
                 if (btn) btn.click(); else vmCard.starred = true;
@@ -1076,20 +1076,20 @@ class TestVmPersistence:
         page.goto(f"http://localhost:{backend_port}")
         page.wait_for_load_state("networkidle")
         page.wait_for_selector("#canvas", timeout=10000)
-        # Wait for boot-complete signal and for the VM Manager card to be restored
+        # Wait for boot-complete signal and for the Container Manager card to be restored
         # (search input present), rather than a fixed 3-second sleep.
         page.wait_for_function(
             "() => window.__claudeRtsBootComplete === true",
             timeout=15000,
         )
         page.wait_for_function(
-            "() => document.querySelectorAll('[data-vm-search]').length > 0",
+            "() => document.querySelectorAll('[data-container-search]').length > 0",
             timeout=10000,
         )
 
-        # Verify VM Manager card is restored
-        vm_search_after = page.locator("[data-vm-search]")
-        assert vm_search_after.count() > 0, "VM Manager card should persist after reload"
+        # Verify Container Manager card is restored
+        container_search_after = page.locator("[data-container-search]")
+        assert container_search_after.count() > 0, "Container Manager card should persist after reload"
 
 
 # ── S15: Stop button stops running container ───────────────────────────────
@@ -1125,16 +1125,16 @@ class TestVmStopContainer:
             ],
         )
 
-        cleanup_non_vm_cards(page)
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        cleanup_non_container_cards(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Verify Stop button exists for running container
-        stop_btn = page.locator('[data-vm-stop="running-svc"]')
+        stop_btn = page.locator('[data-container-stop="running-svc"]')
         assert stop_btn.count() > 0, "Stop button for running-svc should exist"
 
         # Verify no Start button for running container
-        start_btn = page.locator('[data-vm-start="running-svc"]')
+        start_btn = page.locator('[data-container-start="running-svc"]')
         assert start_btn.count() == 0, "Start button should not exist for online container"
 
         # Click Stop
@@ -1144,22 +1144,22 @@ class TestVmStopContainer:
         # Wait for container state transition + VM card re-render: Stop button
         # should vanish and Start button should appear.
         page.wait_for_function(
-            "() => document.querySelector('[data-vm-stop=\"running-svc\"]') === null"
-            " && document.querySelector('[data-vm-start=\"running-svc\"]') !== null",
+            "() => document.querySelector('[data-container-stop=\"running-svc\"]') === null"
+            " && document.querySelector('[data-container-start=\"running-svc\"]') !== null",
             timeout=10000,
         )
 
         # Verify container is now offline via API
-        containers = get_test_vm_containers(page, backend_port)
+        containers = get_test_containers(page, backend_port)
         svc = next((c for c in containers if c["name"] == "running-svc"), None)
         assert svc is not None, "running-svc should exist in test containers"
         assert svc["state"] == "offline", "running-svc should be offline after stop"
 
         # Verify Stop button is gone and Start button appeared
-        stop_btn_after = page.locator('[data-vm-stop="running-svc"]')
+        stop_btn_after = page.locator('[data-container-stop="running-svc"]')
         assert stop_btn_after.count() == 0, "Stop button should be gone for offline container"
 
-        start_btn_after = page.locator('[data-vm-start="running-svc"]')
+        start_btn_after = page.locator('[data-container-start="running-svc"]')
         assert start_btn_after.count() > 0, "Start button should appear for offline container"
 
 
@@ -1199,34 +1199,34 @@ class TestVmSearchMetadata:
         # No favorites so all show in search
         set_favorites(page, backend_port, [])
 
-        ensure_vm_card_exists(page)
-        refresh_vm_card(page)
+        ensure_container_card_exists(page)
+        refresh_container_card(page)
 
         # Type search query
-        search_input = page.locator("[data-vm-search]").first
+        search_input = page.locator("[data-container-search]").first
         search_input.click()
         search_input.fill("svc-")
         # Wait for the search-results container to render all 3 expected rows.
         page.wait_for_function(
-            "() => document.querySelectorAll('[data-vm-search-results] [data-vm-add]').length === 3",
+            "() => document.querySelectorAll('[data-container-search-results] [data-container-add]').length === 3",
             timeout=3000,
         )
 
         # Get all search result rows
-        results = page.locator("[data-vm-search-results] [data-vm-add]")
+        results = page.locator("[data-container-search-results] [data-container-add]")
         count = results.count()
         assert count == 3, f"Should find 3 results, got {count}"
 
         # Verify online containers appear first (svc-beta and svc-gamma before svc-alpha)
-        first_name = results.nth(0).get_attribute("data-vm-add")
-        second_name = results.nth(1).get_attribute("data-vm-add")
-        third_name = results.nth(2).get_attribute("data-vm-add")
+        first_name = results.nth(0).get_attribute("data-container-add")
+        second_name = results.nth(1).get_attribute("data-container-add")
+        third_name = results.nth(2).get_attribute("data-container-add")
         assert first_name in ("svc-beta", "svc-gamma"), f"First result should be online, got {first_name}"
         assert second_name in ("svc-beta", "svc-gamma"), f"Second result should be online, got {second_name}"
         assert third_name == "svc-alpha", f"Third result should be offline svc-alpha, got {third_name}"
 
         # Verify search results contain image text
-        result_html = page.locator("[data-vm-search-results]").first.inner_html()
+        result_html = page.locator("[data-container-search-results]").first.inner_html()
         assert "node:18" in result_html, "Search results should show image name"
         assert "postgres:15" in result_html, "Search results should show image name"
 

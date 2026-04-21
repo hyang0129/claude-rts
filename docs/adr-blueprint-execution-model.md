@@ -6,21 +6,21 @@
 
 supreme-claudemander is an RTS-style terminal canvas where devcontainer shells appear as draggable, resizable cards on a 4K canvas. The system uses a Python/aiohttp backend (`server.py`), a single-file HTML frontend (`static/index.html`), WebSocket-based real-time PTY streaming, and an EventBus for cross-card pub/sub. Cards are Python objects managed server-side by `CardRegistry`. The frontend is a rendering layer that reacts to server-pushed events over `/ws/control`.
 
-Today, setting up a multi-card workspace is entirely manual. A user who wants three Claude Code terminals across two containers must: start each container, wait for it to come online, open terminals one at a time, and type the Claude startup commands into each. VM Manager actions partially automate per-container button clicks, but there is no way to orchestrate a full multi-card, multi-container workspace setup in a single operation.
+Today, setting up a multi-card workspace is entirely manual. A user who wants three Claude Code terminals across two containers must: start each container, wait for it to come online, open terminals one at a time, and type the Claude startup commands into each. Container Manager actions partially automate per-container button clicks, but there is no way to orchestrate a full multi-card, multi-container workspace setup in a single operation.
 
 The blueprint system solves this by providing a declarative, replayable artifact that can bring a canvas from empty to a fully populated workspace through a single trigger.
 
 ### What the current system can do
 
-- **Start/stop containers** via `POST /api/vms/{name}/start|stop`
-- **Discover containers** via `GET /api/vms/discover`
+- **Start/stop containers** via `POST /api/containers/{name}/start|stop`
+- **Discover containers** via `GET /api/containers/discover`
 - **Spawn terminal cards** via `POST /api/claude/terminal/create` with `cmd`, `hub`, `container`, layout params (cmd is passed through verbatim — no placeholder interpolation; reference `/profiles/<main_profile_name>` directly, resolve slot name via `GET /api/profiles/main`, defaults to `main`, see #163)
 - **Spawn Canvas Claude cards** via `POST /api/canvas-claude/create` with `profile`, `container`, layout params
 - **Read main profile slot** via `GET /api/profiles/main` (returns `{main_profile_name, exists}`; renamed from `/api/profiles/priority` in #163)
 - **EventBus** emits `card:registered` / `card:unregistered` events and fans out to `/ws/control` WebSocket clients
 - **CARD_TYPE_REGISTRY** on the frontend provides `spawn()`, `deserialize()`, and `_mount()` for typed card instantiation
 - **ServiceCard** base class supports cards that perform a job and emit results via EventBus
-- **MCP server** exposes `open_terminal`, `vm_start_container`, `vm_discover_containers`, etc. as JSON-RPC tools for Claude Code agents running inside the canvas
+- **MCP server** exposes `open_terminal`, `container_start`, `container_discover`, etc. as JSON-RPC tools for Claude Code agents running inside the canvas
 
 ### What the current system cannot do
 
@@ -95,7 +95,7 @@ This pattern:
 - Provides a visible card on canvas during the wait (user sees "starting hub3...")
 - Is extensible: any new waiting concern gets a new transient service card type
 
-**Readiness probe**: `docker exec <name> true` retried with exponential backoff. `state == "online"` from `GET /api/vms/discover` is not sufficient — it reflects Docker daemon state, not exec-readiness. The probe verifies exec-readiness directly.
+**Readiness probe**: `docker exec <name> true` retried with exponential backoff. `state == "online"` from `GET /api/containers/discover` is not sufficient — it reflects Docker daemon state, not exec-readiness. The probe verifies exec-readiness directly.
 
 ---
 
@@ -271,7 +271,7 @@ This keeps v1 minimal: the card does its job, logs what happened, and gets out o
 - Blueprint schema: `{ name, description, parameters: [{name, provenance, type, default?}], steps: [{action, ...}] }`
 - Execution trace (in-memory on BlueprintCard): `{ run_id, blueprint_name, started_at, steps: [{action, inputs, output, status, started_at, duration_ms}] }`
 
-### Existing VM Manager actions
+### Existing Container Manager actions
 - Unchanged and independent. Blueprints are a higher-level orchestration that may call the same underlying APIs.
 
 ### Tests

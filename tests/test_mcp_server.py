@@ -22,14 +22,17 @@ from claude_rts.mcp_server import (
     tool_rename_terminal,
     tool_set_recovery_script,
     tool_get_recovery_script,
-    tool_vm_discover_containers,
-    tool_vm_get_favorites,
-    tool_vm_set_container_actions,
-    tool_vm_add_favorite,
-    tool_vm_get_container_actions,
-    tool_vm_append_container_action,
-    tool_vm_start_container,
-    tool_vm_stop_container,
+    tool_container_discover,
+    tool_container_get_favorites,
+    tool_container_set_actions,
+    tool_container_add_favorite,
+    tool_container_get_actions,
+    tool_container_append_action,
+    tool_container_start,
+    tool_container_stop,
+    tool_container_stats,
+    tool_container_create,
+    tool_container_rebuild,
     tool_blueprint_list,
     tool_blueprint_get,
     tool_blueprint_save,
@@ -198,14 +201,17 @@ def test_handle_request_tools_list():
         "rename_terminal",
         "set_recovery_script",
         "get_recovery_script",
-        "vm_discover_containers",
-        "vm_get_favorites",
-        "vm_set_container_actions",
-        "vm_get_container_actions",
-        "vm_append_container_action",
-        "vm_start_container",
-        "vm_stop_container",
-        "vm_add_favorite",
+        "container_discover",
+        "container_get_favorites",
+        "container_set_actions",
+        "container_get_actions",
+        "container_append_action",
+        "container_start",
+        "container_stop",
+        "container_stats",
+        "container_add_favorite",
+        "container_create",
+        "container_rebuild",
         "blueprint_list",
         "blueprint_get",
         "blueprint_save",
@@ -295,70 +301,70 @@ def test_handle_request_unknown_method_notification():
     assert resp is None
 
 
-# ── VM Manager MCP tool tests ──────────────────────────────────────────────
+# ── Container Manager MCP tool tests ──────────────────────────────────────────────
 
 
-def test_vm_discover_containers():
-    """vm_discover_containers GETs /api/vms/discover and formats result."""
+def test_container_discover():
+    """container_discover GETs /api/containers/discover and formats result."""
     containers = [
         {"name": "web-app", "state": "online", "image": "node:18", "status": "Up 2 hours"},
         {"name": "db-server", "state": "offline", "image": "postgres:15", "status": "Exited 3h ago"},
     ]
     mock_resp = make_mock_response(containers)
     with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
-        result = tool_vm_discover_containers({})
+        result = tool_container_discover({})
     assert "web-app" in result
     assert "online" in result
     assert "db-server" in result
     assert "node:18" in result
     call_args = mock_open.call_args
     req = call_args[0][0]
-    assert "/api/vms/discover" in req.full_url
+    assert "/api/containers/discover" in req.full_url
 
 
-def test_vm_discover_containers_empty():
-    """vm_discover_containers returns message when no containers."""
+def test_container_discover_empty():
+    """container_discover returns message when no containers."""
     mock_resp = make_mock_response([])
     with patch("urllib.request.urlopen", return_value=mock_resp):
-        result = tool_vm_discover_containers({})
+        result = tool_container_discover({})
     assert "no" in result.lower() or result == ""
 
 
-def test_vm_get_favorites():
-    """vm_get_favorites GETs /api/vms/favorites and returns JSON."""
+def test_container_get_favorites():
+    """container_get_favorites GETs /api/containers/favorites and returns JSON."""
     favorites = [
         {"name": "web-app", "type": "docker", "actions": [{"label": "Dev Shell", "blueprint": "dev-shell"}]},
     ]
     mock_resp = make_mock_response(favorites)
     with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
-        result = tool_vm_get_favorites({})
+        result = tool_container_get_favorites({})
     parsed = json.loads(result)
     assert len(parsed) == 1
     assert parsed[0]["name"] == "web-app"
     req = mock_open.call_args[0][0]
-    assert "/api/vms/favorites" in req.full_url
+    assert "/api/containers/favorites" in req.full_url
 
 
-def test_vm_set_container_actions():
-    """vm_set_container_actions PUTs to /api/vms/favorites/{name}/actions."""
+def test_container_set_actions():
+    """container_set_actions PUTs to /api/containers/favorites/{name}/actions."""
     actions = [{"label": "Dev Shell", "blueprint": "dev-shell"}, {"label": "Claude", "blueprint": "claude-session"}]
     mock_resp = make_mock_response(actions)
     with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
-        result = tool_vm_set_container_actions({"container": "web-app", "actions": actions})
+        result = tool_container_set_actions({"container": "web-app", "actions": actions})
     assert "web-app" in result
     req = mock_open.call_args[0][0]
-    assert "/api/vms/favorites/web-app/actions" in req.full_url
+    assert "/api/containers/favorites/web-app/actions" in req.full_url
     assert req.method == "PUT"
 
 
-def test_vm_set_container_actions_missing_container():
-    """vm_set_container_actions raises ValueError when container is missing."""
+def test_container_set_actions_missing_container():
+    """container_set_actions raises ValueError when container is missing."""
     with pytest.raises(ValueError):
-        tool_vm_set_container_actions({})
+        tool_container_set_actions({})
 
 
-def test_vm_add_favorite():
-    """vm_add_favorite GETs favorites, appends, PUTs back with empty default actions."""
+def test_container_add_favorite():
+    """container_add_favorite GETs favorites, appends, PUTs back with empty default actions."""
     existing = [{"name": "old-container", "type": "docker", "actions": []}]
     get_resp = make_mock_response(existing)
     put_resp = make_mock_response(existing + [{"name": "new-container", "type": "docker", "actions": []}])
@@ -371,7 +377,7 @@ def test_vm_add_favorite():
         return resp
 
     with patch("urllib.request.urlopen", side_effect=mock_urlopen) as mock_open:
-        result = tool_vm_add_favorite({"name": "new-container"})
+        result = tool_container_add_favorite({"name": "new-container"})
     assert "new-container" in result
     assert "Added" in result
     # Verify PUT was called with the new container and empty actions
@@ -382,35 +388,36 @@ def test_vm_add_favorite():
     assert put_body[1]["actions"] == []
 
 
-def test_vm_add_favorite_already_exists():
-    """vm_add_favorite returns message when container already a favorite."""
+def test_container_add_favorite_already_exists():
+    """container_add_favorite returns message when container already a favorite."""
     existing = [{"name": "web-app", "type": "docker", "actions": []}]
     mock_resp = make_mock_response(existing)
     with patch("urllib.request.urlopen", return_value=mock_resp):
-        result = tool_vm_add_favorite({"name": "web-app"})
+        result = tool_container_add_favorite({"name": "web-app"})
     assert "already" in result.lower()
 
 
-def test_vm_add_favorite_missing_name():
-    """vm_add_favorite raises ValueError when name is missing."""
+def test_container_add_favorite_missing_name():
+    """container_add_favorite raises ValueError when name is missing."""
     with pytest.raises(ValueError):
-        tool_vm_add_favorite({})
+        tool_container_add_favorite({})
 
 
-def test_tools_list_includes_vm_and_blueprint_tools():
+def test_tools_list_includes_container_and_blueprint_tools():
     """tools/list response includes all tools (8 terminal + 8 VM + 5 blueprint)."""
     msg = {"jsonrpc": "2.0", "id": 10, "method": "tools/list", "params": {}}
     resp = handle_request(msg)
     tools = resp["result"]["tools"]
     names = {t["name"] for t in tools}
-    assert "vm_discover_containers" in names
-    assert "vm_get_favorites" in names
-    assert "vm_set_container_actions" in names
-    assert "vm_get_container_actions" in names
-    assert "vm_append_container_action" in names
-    assert "vm_start_container" in names
-    assert "vm_stop_container" in names
-    assert "vm_add_favorite" in names
+    assert "container_discover" in names
+    assert "container_get_favorites" in names
+    assert "container_set_actions" in names
+    assert "container_get_actions" in names
+    assert "container_append_action" in names
+    assert "container_start" in names
+    assert "container_stop" in names
+    assert "container_add_favorite" in names
+    assert "container_rebuild" in names
     assert "blueprint_list" in names
     assert "blueprint_get" in names
     assert "blueprint_save" in names
@@ -420,45 +427,47 @@ def test_tools_list_includes_vm_and_blueprint_tools():
     assert "set_recovery_script" in names
     assert "get_recovery_script" in names
     assert "run_task" in names
-    assert len(names) == 22
+    assert "container_create" in names
+    assert "container_stats" in names
+    assert len(names) == 25
 
 
-# ── vm_get_container_actions ──────────────────────────────────────────────
+# ── container_get_actions ──────────────────────────────────────────────
 
 
-def test_vm_get_container_actions_returns_one():
-    """vm_get_container_actions filters favorites to one container's actions."""
+def test_container_get_actions_returns_one():
+    """container_get_actions filters favorites to one container's actions."""
     favorites = [
         {"name": "web-app", "type": "docker", "actions": [{"label": "Dev Shell", "blueprint": "dev-shell"}]},
         {"name": "db", "type": "docker", "actions": [{"label": "DB Admin", "blueprint": "db-admin"}]},
     ]
     mock_resp = make_mock_response(favorites)
     with patch("urllib.request.urlopen", return_value=mock_resp):
-        result = tool_vm_get_container_actions({"container": "web-app"})
+        result = tool_container_get_actions({"container": "web-app"})
     parsed = json.loads(result)
     assert parsed == [{"label": "Dev Shell", "blueprint": "dev-shell"}]
 
 
-def test_vm_get_container_actions_unknown_raises():
-    """vm_get_container_actions raises ValueError with 'Favorite not found' for unknown container."""
+def test_container_get_actions_unknown_raises():
+    """container_get_actions raises ValueError with 'Favorite not found' for unknown container."""
     favorites = [{"name": "web-app", "type": "docker", "actions": []}]
     mock_resp = make_mock_response(favorites)
     with patch("urllib.request.urlopen", return_value=mock_resp):
         with pytest.raises(ValueError, match="Favorite not found: nonexistent-xyz"):
-            tool_vm_get_container_actions({"container": "nonexistent-xyz"})
+            tool_container_get_actions({"container": "nonexistent-xyz"})
 
 
-def test_vm_get_container_actions_missing_container():
-    """vm_get_container_actions raises ValueError when container is missing."""
+def test_container_get_actions_missing_container():
+    """container_get_actions raises ValueError when container is missing."""
     with pytest.raises(ValueError, match="container is required"):
-        tool_vm_get_container_actions({})
+        tool_container_get_actions({})
 
 
-# ── vm_append_container_action ────────────────────────────────────────────
+# ── container_append_action ────────────────────────────────────────────
 
 
-def test_vm_append_container_action_preserves_existing():
-    """vm_append_container_action GETs current actions, appends, PUTs atomically."""
+def test_container_append_action_preserves_existing():
+    """container_append_action GETs current actions, appends, PUTs atomically."""
     existing_favs = [
         {
             "name": "web-app",
@@ -481,14 +490,14 @@ def test_vm_append_container_action_preserves_existing():
 
     new_action = {"label": "Claude", "blueprint": "claude-session"}
     with patch("urllib.request.urlopen", side_effect=mock_urlopen):
-        result = tool_vm_append_container_action({"container": "web-app", "action": new_action})
+        result = tool_container_append_action({"container": "web-app", "action": new_action})
 
     assert "web-app" in result
     # Verify GET then PUT
     assert calls[0].method == "GET"
-    assert "/api/vms/favorites" in calls[0].full_url
+    assert "/api/containers/favorites" in calls[0].full_url
     assert calls[1].method == "PUT"
-    assert "/api/vms/favorites/web-app/actions" in calls[1].full_url
+    assert "/api/containers/favorites/web-app/actions" in calls[1].full_url
     put_body = json.loads(calls[1].data.decode("utf-8"))
     assert len(put_body) == 2
     assert put_body[0]["label"] == "Dev Shell"
@@ -496,74 +505,226 @@ def test_vm_append_container_action_preserves_existing():
     assert put_body[1]["blueprint"] == "claude-session"
 
 
-def test_vm_append_container_action_unknown_container():
-    """vm_append_container_action raises ValueError for unknown container."""
+def test_container_append_action_unknown_container():
+    """container_append_action raises ValueError for unknown container."""
     favorites = [{"name": "web-app", "type": "docker", "actions": []}]
     mock_resp = make_mock_response(favorites)
     with patch("urllib.request.urlopen", return_value=mock_resp):
         with pytest.raises(ValueError, match="Favorite not found: nonexistent-xyz"):
-            tool_vm_append_container_action(
+            tool_container_append_action(
                 {"container": "nonexistent-xyz", "action": {"label": "X", "blueprint": "test"}}
             )
 
 
-def test_vm_append_container_action_missing_action():
-    """vm_append_container_action raises ValueError when action is missing."""
+def test_container_append_action_missing_action():
+    """container_append_action raises ValueError when action is missing."""
     with pytest.raises(ValueError, match="action"):
-        tool_vm_append_container_action({"container": "web-app"})
+        tool_container_append_action({"container": "web-app"})
 
 
-def test_vm_append_container_action_missing_container():
-    """vm_append_container_action raises ValueError when container is missing."""
+def test_container_append_action_missing_container():
+    """container_append_action raises ValueError when container is missing."""
     with pytest.raises(ValueError, match="container is required"):
-        tool_vm_append_container_action({"action": {"label": "X", "blueprint": "test"}})
+        tool_container_append_action({"action": {"label": "X", "blueprint": "test"}})
 
 
-# ── vm_start_container / vm_stop_container ────────────────────────────────
+# ── container_start / container_stop ────────────────────────────────
 
 
-def test_vm_start_container_calls_rest():
-    """vm_start_container POSTs to /api/vms/{name}/start."""
+def test_container_start_calls_rest():
+    """container_start POSTs to /api/containers/{name}/start."""
     mock_resp = make_mock_response({"name": "foo-dev", "state": "online"})
     with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
-        result = tool_vm_start_container({"name": "foo-dev"})
+        result = tool_container_start({"name": "foo-dev"})
     assert "foo-dev" in result
     req = mock_open.call_args[0][0]
     assert req.method == "POST"
-    assert "/api/vms/foo-dev/start" in req.full_url
+    assert "/api/containers/foo-dev/start" in req.full_url
 
 
-def test_vm_start_container_missing_name():
-    """vm_start_container raises ValueError when name is missing."""
+def test_container_start_missing_name():
+    """container_start raises ValueError when name is missing."""
     with pytest.raises(ValueError, match="name is required"):
-        tool_vm_start_container({})
+        tool_container_start({})
 
 
-def test_vm_stop_container_calls_rest():
-    """vm_stop_container POSTs to /api/vms/{name}/stop."""
+def test_container_stop_calls_rest():
+    """container_stop POSTs to /api/containers/{name}/stop with via=canvas-claude."""
     mock_resp = make_mock_response({"name": "foo-dev", "state": "offline"})
     with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
-        result = tool_vm_stop_container({"name": "foo-dev"})
+        result = tool_container_stop({"name": "foo-dev"})
     assert "foo-dev" in result
     req = mock_open.call_args[0][0]
     assert req.method == "POST"
-    assert "/api/vms/foo-dev/stop" in req.full_url
-    assert "timeout=" not in req.full_url
+    assert "/api/containers/foo-dev/stop" in req.full_url
+    # Guard origin signal must be present so server enforces created_by label
+    assert "via=canvas-claude" in req.full_url
 
 
-def test_vm_stop_container_with_timeout():
-    """vm_stop_container passes timeout query param when provided."""
+def test_container_stop_with_timeout():
+    """container_stop passes timeout query param when provided."""
     mock_resp = make_mock_response({"name": "foo-dev", "state": "offline"})
     with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
-        tool_vm_stop_container({"name": "foo-dev", "timeout": 30})
+        tool_container_stop({"name": "foo-dev", "timeout": 30})
     req = mock_open.call_args[0][0]
     assert "timeout=30" in req.full_url
+    assert "via=canvas-claude" in req.full_url
 
 
-def test_vm_stop_container_missing_name():
-    """vm_stop_container raises ValueError when name is missing."""
+def test_container_stats_calls_rest():
+    """container_stats GETs /api/containers/{name}/stats."""
+    payload = {
+        "name": "foo-dev",
+        "cpu_percent": "1.23%",
+        "mem_usage": "100MiB",
+        "mem_limit": "1GiB",
+    }
+    mock_resp = make_mock_response(payload)
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_container_stats({"name": "foo-dev"})
+    assert "foo-dev" in result
+    req = mock_open.call_args[0][0]
+    assert req.method == "GET"
+    assert "/api/containers/foo-dev/stats" in req.full_url
+
+
+def test_container_stats_missing_name():
     with pytest.raises(ValueError, match="name is required"):
-        tool_vm_stop_container({})
+        tool_container_stats({})
+
+
+def test_container_stop_always_sends_origin_signal():
+    """container_stop MUST carry via=canvas-claude so the server enforces
+    the created_by=canvas-claude Docker-label guard. Regression guard for #200."""
+    mock_resp = make_mock_response({"name": "foo", "state": "offline"})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        tool_container_stop({"name": "foo"})
+    req = mock_open.call_args[0][0]
+    assert "via=canvas-claude" in req.full_url
+
+
+def test_container_stop_propagates_403_guard_rejection():
+    """When the server returns 403 not_canvas_claude_owned, the MCP tool surfaces
+    the error instead of reporting success."""
+    import urllib.error
+
+    err_body = json.dumps({"error": "not_canvas_claude_owned", "container": "foo"}).encode()
+    http_err = urllib.error.HTTPError(
+        url="http://x/api/containers/foo/stop",
+        code=403,
+        msg="Forbidden",
+        hdrs=None,
+        fp=None,
+    )
+    http_err.read = lambda: err_body  # type: ignore[assignment]
+    with patch("urllib.request.urlopen", side_effect=http_err):
+        with pytest.raises(RuntimeError, match="403"):
+            tool_container_stop({"name": "foo"})
+
+
+def test_container_stop_missing_name():
+    """container_stop raises ValueError when name is missing."""
+    with pytest.raises(ValueError, match="name is required"):
+        tool_container_stop({})
+
+
+# ── container_create ─────────────────────────────────────────────────────
+
+
+def test_container_create_calls_rest():
+    """container_create POSTs to /api/containers/create with the JSON body."""
+    mock_resp = make_mock_response({"container_id": "cc-123-abc", "name": "cc-123-abc", "status": "created"})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_container_create({"image": "ubuntu:24.04"})
+    assert "cc-123-abc" in result
+    req = mock_open.call_args[0][0]
+    assert req.method == "POST"
+    assert "/api/containers/create" in req.full_url
+    sent = json.loads(req.data.decode())
+    assert sent == {"image": "ubuntu:24.04"}
+
+
+def test_container_create_passes_name_and_preset():
+    """container_create forwards optional name and preset fields."""
+    mock_resp = make_mock_response({"container_id": "my-dev", "status": "created"})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        tool_container_create({"image": "ubuntu:24.04", "name": "my-dev", "preset": "devcontainer"})
+    req = mock_open.call_args[0][0]
+    sent = json.loads(req.data.decode())
+    assert sent["name"] == "my-dev"
+    assert sent["preset"] == "devcontainer"
+
+
+def test_container_create_missing_image_raises():
+    """container_create raises ValueError when image is missing."""
+    with pytest.raises(ValueError, match="image is required"):
+        tool_container_create({})
+
+
+def test_container_create_surfaces_whitelist_error():
+    """A 400 image_not_whitelisted response surfaces a readable error string."""
+    import urllib.error
+
+    err = urllib.error.HTTPError(
+        url="http://localhost/api/containers/create",
+        code=400,
+        msg="Bad Request",
+        hdrs=None,
+        fp=None,
+    )
+    err.read = lambda: json.dumps({"error": "image_not_whitelisted", "allowed": ["ubuntu:24.04"]}).encode()
+    with patch("urllib.request.urlopen", side_effect=err):
+        result = tool_container_create({"image": "evil/image:latest"})
+    assert "not whitelisted" in result
+    assert "ubuntu:24.04" in result
+
+
+# ── container_rebuild ────────────────────────────────────────────────────
+
+
+def test_container_rebuild_calls_rest():
+    """container_rebuild POSTs to /api/containers/{name}/rebuild with via=canvas-claude."""
+    mock_resp = make_mock_response({"container_id": "cc-owned", "name": "cc-owned", "status": "rebuilt"})
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        result = tool_container_rebuild({"name": "cc-owned"})
+    assert "cc-owned" in result
+    assert "rebuilt" in result
+    req = mock_open.call_args[0][0]
+    assert req.method == "POST"
+    assert "/api/containers/cc-owned/rebuild" in req.full_url
+    assert "via=canvas-claude" in req.full_url
+
+
+def test_container_rebuild_missing_name():
+    """container_rebuild raises ValueError when name is missing."""
+    with pytest.raises(ValueError, match="name is required"):
+        tool_container_rebuild({})
+
+
+def test_container_rebuild_propagates_403_guard_rejection():
+    """When the server returns 403 not_canvas_claude_owned, the MCP tool surfaces the error."""
+    import urllib.error
+
+    err_body = json.dumps({"error": "not_canvas_claude_owned", "container": "foo"}).encode()
+    http_err = urllib.error.HTTPError(
+        url="http://x/api/containers/foo/rebuild",
+        code=403,
+        msg="Forbidden",
+        hdrs=None,
+        fp=None,
+    )
+    http_err.read = lambda: err_body  # type: ignore[assignment]
+    with patch("urllib.request.urlopen", side_effect=http_err):
+        with pytest.raises(RuntimeError, match="403"):
+            tool_container_rebuild({"name": "foo"})
+
+
+def test_container_rebuild_in_tools_list():
+    """tools/list includes container_rebuild."""
+    msg = {"jsonrpc": "2.0", "id": 99, "method": "tools/list", "params": {}}
+    resp = handle_request(msg)
+    names = {t["name"] for t in resp["result"]["tools"]}
+    assert "container_rebuild" in names
 
 
 # ── Blueprint MCP tool tests ─────────────────────────────────────────────
@@ -707,8 +868,8 @@ def test_blueprint_spawn_missing_name():
         tool_blueprint_spawn({})
 
 
-def test_vm_add_favorite_default_actions_empty():
-    """vm_add_favorite defaults to empty actions array (no terminal default)."""
+def test_container_add_favorite_default_actions_empty():
+    """container_add_favorite defaults to empty actions array (no terminal default)."""
     existing = []
     get_resp = make_mock_response(existing)
     put_resp = make_mock_response([{"name": "test-vm", "type": "docker", "actions": []}])
@@ -721,7 +882,7 @@ def test_vm_add_favorite_default_actions_empty():
         return resp
 
     with patch("urllib.request.urlopen", side_effect=mock_urlopen) as mock_open:
-        result = tool_vm_add_favorite({"name": "test-vm"})
+        result = tool_container_add_favorite({"name": "test-vm"})
     assert "test-vm" in result
     assert "0 action(s)" in result
     put_req = mock_open.call_args_list[1][0][0]

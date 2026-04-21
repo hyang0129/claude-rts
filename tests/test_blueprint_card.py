@@ -159,7 +159,7 @@ async def test_step_get_priority_profile_legacy_action_rejected(tmp_path, monkey
 
 async def test_step_discover_containers(tmp_path, monkeypatch):
     app, bus, mgr, reg = _make_app(tmp_path, monkeypatch)
-    app["_test_vm_containers"] = [
+    app["_test_containers"] = [
         {"name": "hub1", "state": "online"},
         {"name": "hub2", "state": "offline"},
     ]
@@ -184,7 +184,7 @@ async def test_step_discover_containers(tmp_path, monkeypatch):
 
 async def test_step_start_container(tmp_path, monkeypatch):
     app, bus, mgr, reg = _make_app(tmp_path, monkeypatch)
-    app["_test_vm_containers"] = [
+    app["_test_containers"] = [
         {"name": "hub1", "state": "offline"},
     ]
 
@@ -201,7 +201,7 @@ async def test_step_start_container(tmp_path, monkeypatch):
 
     assert card.variables.get("c") == "hub1"
     # Container should have been flipped to online
-    assert app["_test_vm_containers"][0]["state"] == "online"
+    assert app["_test_containers"][0]["state"] == "online"
     mgr.stop_all()
 
 
@@ -520,7 +520,7 @@ async def test_parameters_from_context(tmp_path, monkeypatch):
 
 async def test_for_each_step(tmp_path, monkeypatch):
     app, bus, mgr, reg = _make_app(tmp_path, monkeypatch)
-    app["_test_vm_containers"] = [
+    app["_test_containers"] = [
         {"name": "hub1", "state": "online"},
         {"name": "hub2", "state": "online"},
     ]

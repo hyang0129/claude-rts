@@ -12,7 +12,7 @@
     },
     {
       "type": "widget",
-      "widgetType": "vm-manager",
+      "widgetType": "container-manager",
       "x": 900,
       "y": 50,
       "w": 520,

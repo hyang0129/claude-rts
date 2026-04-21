@@ -5,6 +5,7 @@ Config file: ~/.supreme-claudemander/config.json
 Canvas layouts: ~/.supreme-claudemander/canvases/{name}.json
 """
 
+import copy
 import json
 import os
 import pathlib
@@ -63,8 +64,25 @@ DEFAULT_CONFIG = {
         "scrollback_size": 65536,
         "tmux_persistence": True,
     },
-    "vm_manager": {
+    "container_manager": {
         "favorites": [],
+        "image_whitelist": [
+            "ubuntu:24.04",
+            "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+            "mcr.microsoft.com/devcontainers/python:3.12",
+        ],
+        # Global cap on canvas-claude-created containers (running + stopped).
+        # See epic #199 intent §8 and child #205. Human-tunable.
+        "max_containers": 4,
+        # Resource caps applied at creation time (#204). Human-tunable.
+        # ``disk_limit`` is advisory in v1 — Docker named volumes have no
+        # native size cap on overlay2/ext4; observe via Child 7 stats widget.
+        "defaults": {
+            "cpu_limit": 2.0,
+            "memory_limit": "8g",
+            "disk_limit": "10g",
+            "pids_limit": 1024,
+        },
     },
 }
 
@@ -112,8 +130,10 @@ def read_config(app_config: AppConfig) -> dict:
     else:
         data = {}
 
-    # Merge defaults for any missing keys
-    merged = {**DEFAULT_CONFIG, **data}
+    # Merge defaults for any missing keys.
+    # Deep-copy DEFAULT_CONFIG so callers cannot mutate the global default
+    # (e.g. by appending to nested lists like container_manager.favorites).
+    merged = {**copy.deepcopy(DEFAULT_CONFIG), **data}
     return merged
 
 

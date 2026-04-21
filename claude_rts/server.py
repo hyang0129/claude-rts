@@ -23,6 +23,7 @@ from .cards import ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegis
 from .event_bus import EventBus  # noqa: E402
 from .ansi_strip import strip_ansi  # noqa: E402
 from . import blueprint as blueprint_mod  # noqa: E402
+from . import container_spec as container_spec_mod  # noqa: E402
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
@@ -144,13 +145,176 @@ async def widget_system_info_handler(request: web.Request) -> web.Response:
 _DOCKER_CMD = "docker"
 
 
-# ── VM Manager API ───────────────────────────────────────────────────────────
+async def widget_container_stats_handler(request: web.Request) -> web.Response:
+    """Return live CPU/MEM stats for every Docker container (running + stopped).
+
+    Runs ``docker stats --no-stream --format '{{json .}}'`` for running containers
+    and ``docker ps -a`` to include stopped containers (zeroed stats). Each row
+    is augmented with the ``created_by`` label so the UI can flag canvas-claude
+    ownership.
+    """
+    # Test-mode injection: return mocked payload verbatim
+    test_stats = request.app.get("_test_container_stats")
+    if test_stats is not None:
+        return web.json_response({"containers": list(test_stats)})
+
+    # 1) docker ps -a to enumerate all containers + their created_by label
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _DOCKER_CMD,
+            "ps",
+            "-a",
+            "--format",
+            '{{.Names}}|{{.State}}|{{.Label "created_by"}}',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+    except FileNotFoundError:
+        return web.json_response({"error": "docker_unavailable"}, status=500)
+
+    if proc.returncode != 0:
+        err = stderr.decode().strip() if stderr else "docker ps failed"
+        logger.warning("widget_container_stats: docker ps failed: {}", err)
+        return web.json_response({"error": err}, status=500)
+
+    containers: list[dict] = []
+    for line in stdout.decode().strip().splitlines():
+        parts = line.split("|", 2)
+        if len(parts) < 2:
+            continue
+        name = parts[0].strip()
+        state = parts[1].strip().lower()
+        created_by = parts[2].strip() if len(parts) > 2 else ""
+        containers.append(
+            {
+                "name": name,
+                "status": "running" if state == "running" else "stopped",
+                "cpu_percent": "0.00%",
+                "mem_usage": "0B",
+                "mem_limit": "0B",
+                "mem_percent": "0.00%",
+                "net_io": "--",
+                "block_io": "--",
+                "pids": 0,
+                "created_by": created_by,
+            }
+        )
+
+    if not containers:
+        return web.json_response({"containers": []})
+
+    # 2) docker stats --no-stream on running containers
+    try:
+        stats_proc = await asyncio.create_subprocess_exec(
+            _DOCKER_CMD,
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{json .}}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stats_out, stats_err = await stats_proc.communicate()
+    except FileNotFoundError:
+        return web.json_response({"containers": containers})
+
+    if stats_proc.returncode == 0:
+        by_name = {c["name"]: c for c in containers}
+        for line in stats_out.decode().strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                s = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            n = s.get("Name") or s.get("Container") or ""
+            if n not in by_name:
+                continue
+            c = by_name[n]
+            c["cpu_percent"] = s.get("CPUPerc", "0.00%")
+            mem_usage_raw = s.get("MemUsage", "0B / 0B")
+            # MemUsage format: "123MiB / 1.5GiB"
+            if " / " in mem_usage_raw:
+                used, limit = mem_usage_raw.split(" / ", 1)
+                c["mem_usage"] = used.strip()
+                c["mem_limit"] = limit.strip()
+            else:
+                c["mem_usage"] = mem_usage_raw
+            c["mem_percent"] = s.get("MemPerc", "0.00%")
+            c["net_io"] = s.get("NetIO", "--")
+            c["block_io"] = s.get("BlockIO", "--")
+            try:
+                c["pids"] = int(s.get("PIDs", 0))
+            except (TypeError, ValueError):
+                c["pids"] = 0
+
+    return web.json_response({"containers": containers})
 
 
-async def vm_discover_handler(request: web.Request) -> web.Response:
+async def container_single_stats_handler(request: web.Request) -> web.Response:
+    """Return live stats for a single container via ``docker stats --no-stream``."""
+    name = request.match_info["name"]
+
+    test_stats = request.app.get("_test_container_stats")
+    if test_stats is not None:
+        for c in test_stats:
+            if c.get("name") == name:
+                return web.json_response(c)
+        return web.json_response({"error": f"No such container: {name}"}, status=404)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _DOCKER_CMD,
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{json .}}",
+            "--",
+            name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+    except FileNotFoundError:
+        return web.json_response({"error": "docker_unavailable"}, status=500)
+
+    if proc.returncode != 0:
+        err = stderr.decode().strip() if stderr else "docker stats failed"
+        return web.json_response({"error": err}, status=500)
+
+    line = stdout.decode().strip().splitlines()
+    if not line:
+        return web.json_response({"error": f"No stats for: {name}"}, status=404)
+
+    try:
+        s = json.loads(line[0])
+    except json.JSONDecodeError:
+        return web.json_response({"error": "invalid stats output"}, status=500)
+
+    mem_usage_raw = s.get("MemUsage", "0B / 0B")
+    used, limit = (mem_usage_raw.split(" / ", 1) + [""])[:2] if " / " in mem_usage_raw else (mem_usage_raw, "")
+    return web.json_response(
+        {
+            "name": s.get("Name") or name,
+            "cpu_percent": s.get("CPUPerc", "0.00%"),
+            "mem_usage": used.strip(),
+            "mem_limit": limit.strip(),
+            "mem_percent": s.get("MemPerc", "0.00%"),
+            "net_io": s.get("NetIO", "--"),
+            "block_io": s.get("BlockIO", "--"),
+        }
+    )
+
+
+# ── Container Manager API ────────────────────────────────────────────────────
+
+
+async def container_discover_handler(request: web.Request) -> web.Response:
     """Discover all Docker containers (running + stopped) with status."""
     # In test mode, return injected mock data if available
-    test_containers = request.app.get("_test_vm_containers")
+    test_containers = request.app.get("_test_containers")
     if test_containers is not None:
         return web.json_response(sorted(test_containers, key=lambda c: c["name"]))
 
@@ -167,7 +331,7 @@ async def vm_discover_handler(request: web.Request) -> web.Response:
 
     if proc.returncode != 0:
         err = stderr.decode().strip() if stderr else "docker ps failed"
-        logger.warning("vm_discover: docker ps failed: {}", err)
+        logger.warning("container_discover: docker ps failed: {}", err)
         return web.json_response({"error": err}, status=500)
 
     containers = []
@@ -199,39 +363,39 @@ async def vm_discover_handler(request: web.Request) -> web.Response:
     return web.json_response(containers)
 
 
-async def vm_favorites_get_handler(request: web.Request) -> web.Response:
-    """Read the VM Manager favorites list from config."""
+async def container_favorites_get_handler(request: web.Request) -> web.Response:
+    """Read the Container Manager favorites list from config."""
     app_config: AppConfig = request.app["app_config"]
     config = read_config(app_config)
-    vm_config = config.get("vm_manager", {})
-    favorites = vm_config.get("favorites", [])
+    cm_config = config.get("container_manager", {})
+    favorites = cm_config.get("favorites", [])
     return web.json_response(favorites)
 
 
-async def vm_favorites_put_handler(request: web.Request) -> web.Response:
-    """Write the VM Manager favorites list to config."""
+async def container_favorites_put_handler(request: web.Request) -> web.Response:
+    """Write the Container Manager favorites list to config."""
     app_config: AppConfig = request.app["app_config"]
     body = await request.json()
     favorites = body if isinstance(body, list) else body.get("favorites", [])
     config = read_config(app_config)
-    if "vm_manager" not in config:
-        config["vm_manager"] = {}
-    config["vm_manager"]["favorites"] = favorites
+    if "container_manager" not in config:
+        config["container_manager"] = {}
+    config["container_manager"]["favorites"] = favorites
     write_config(app_config, config)
     return web.json_response(favorites)
 
 
-async def vm_start_handler(request: web.Request) -> web.Response:
+async def container_start_handler(request: web.Request) -> web.Response:
     """Start a stopped Docker container by name."""
     name = request.match_info["name"]
 
     # In test mode, flip mock container state instead of calling Docker
-    test_containers = request.app.get("_test_vm_containers")
+    test_containers = request.app.get("_test_containers")
     if test_containers is not None:
         for c in test_containers:
             if c["name"] == name:
                 c["state"] = "online"
-                logger.info("vm_start (test): flipped '{}' to online", name)
+                logger.info("container_start (test): flipped '{}' to online", name)
                 return web.json_response({"name": name, "state": "online"})
         return web.json_response({"error": f"No such container: {name}"}, status=500)
 
@@ -247,24 +411,99 @@ async def vm_start_handler(request: web.Request) -> web.Response:
 
     if proc.returncode != 0:
         err = stderr.decode().strip() if stderr else "docker start failed"
-        logger.warning("vm_start: failed to start container '{}': {}", name, err)
+        logger.warning("container_start: failed to start container '{}': {}", name, err)
         return web.json_response({"error": err}, status=500)
 
-    logger.info("vm_start: started container '{}'", name)
+    logger.info("container_start: started container '{}'", name)
     return web.json_response({"name": name, "state": "online"})
 
 
-async def vm_stop_handler(request: web.Request) -> web.Response:
+async def _require_canvas_claude_owned(request: web.Request, name: str) -> web.Response | None:
+    """Guard: if the request originates from Canvas Claude (MCP), verify the container
+    carries the Docker label ``created_by=canvas-claude``. Returns a 403 JSON response
+    if the guard rejects, 500 if ``docker inspect`` fails, or None if the request is
+    allowed (either not Canvas-Claude-originated, or label matches).
+
+    Origin signal: query param ``via=canvas-claude`` OR header ``X-Canvas-Claude-Spawner``.
+    Human UI requests do NOT set these and bypass the guard entirely.
+    """
+    via = request.query.get("via", "").strip().lower()
+    spawner_hdr = request.headers.get("X-Canvas-Claude-Spawner", "").strip()
+    is_canvas_claude = via == "canvas-claude" or bool(spawner_hdr)
+    if not is_canvas_claude:
+        return None
+
+    # Test-mode hook: label lookup table keyed by container name
+    test_labels = request.app.get("_test_container_labels")
+    if test_labels is not None:
+        label = test_labels.get(name, {}).get("created_by")
+        if label != "canvas-claude":
+            return web.json_response(
+                {"error": "not_canvas_claude_owned", "container": name},
+                status=403,
+            )
+        return None
+
+    # Real Docker path: inspect the container's created_by label
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _DOCKER_CMD,
+            "inspect",
+            "--format",
+            '{{index .Config.Labels "created_by"}}',
+            "--",
+            name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+    except Exception as exc:
+        logger.warning("created_by guard: docker inspect failed for '{}': {}", name, exc)
+        return web.json_response(
+            {"error": "docker_inspect_failed", "container": name, "detail": str(exc)},
+            status=500,
+        )
+    if proc.returncode != 0:
+        err = stderr.decode().strip() if stderr else "docker inspect failed"
+        logger.warning("created_by guard: docker inspect failed for '{}': {}", name, err)
+        return web.json_response(
+            {"error": "docker_inspect_failed", "container": name, "detail": err},
+            status=500,
+        )
+    label = stdout.decode().strip()
+    # `docker inspect --format '{{index .Config.Labels "created_by"}}'` returns
+    # the literal string "<no value>" when the label is missing.
+    if label != "canvas-claude":
+        logger.info(
+            "created_by guard: rejected Canvas-Claude stop of '{}' (label={!r})",
+            name,
+            label,
+        )
+        return web.json_response(
+            {"error": "not_canvas_claude_owned", "container": name},
+            status=403,
+        )
+    return None
+
+
+async def container_stop_handler(request: web.Request) -> web.Response:
     """Stop a running Docker container by name."""
     name = request.match_info["name"]
 
+    # Authorization guard: when the request originates from Canvas Claude (MCP),
+    # enforce that the container was created by Canvas Claude. Human UI calls do
+    # NOT set the origin signal and are unaffected.
+    guard_resp = await _require_canvas_claude_owned(request, name)
+    if guard_resp is not None:
+        return guard_resp
+
     # In test mode, flip mock container state instead of calling Docker
-    test_containers = request.app.get("_test_vm_containers")
+    test_containers = request.app.get("_test_containers")
     if test_containers is not None:
         for c in test_containers:
             if c["name"] == name:
                 c["state"] = "offline"
-                logger.info("vm_stop (test): flipped '{}' to offline", name)
+                logger.info("container_stop (test): flipped '{}' to offline", name)
                 return web.json_response({"name": name, "state": "offline"})
         return web.json_response({"error": f"No such container: {name}"}, status=500)
 
@@ -288,20 +527,20 @@ async def vm_stop_handler(request: web.Request) -> web.Response:
 
     if proc.returncode != 0:
         err = stderr.decode().strip() if stderr else "docker stop failed"
-        logger.warning("vm_stop: failed to stop container '{}': {}", name, err)
+        logger.warning("container_stop: failed to stop container '{}': {}", name, err)
         return web.json_response({"error": err}, status=500)
 
-    logger.info("vm_stop: stopped container '{}'", name)
+    logger.info("container_stop: stopped container '{}'", name)
     return web.json_response({"name": name, "state": "offline"})
 
 
-async def vm_favorites_actions_put_handler(request: web.Request) -> web.Response:
+async def container_favorites_actions_put_handler(request: web.Request) -> web.Response:
     """Update actions for a specific favorite container by name."""
     name = request.match_info["name"]
     app_config: AppConfig = request.app["app_config"]
     cfg = read_config(app_config)
-    vm_config = cfg.get("vm_manager", {})
-    favorites = vm_config.get("favorites", [])
+    cm_config = cfg.get("container_manager", {})
+    favorites = cm_config.get("favorites", [])
 
     # Find the target favorite
     target = None
@@ -322,12 +561,444 @@ async def vm_favorites_actions_put_handler(request: web.Request) -> web.Response
     target["actions"] = actions
 
     # Persist
-    if "vm_manager" not in cfg:
-        cfg["vm_manager"] = {}
-    cfg["vm_manager"]["favorites"] = favorites
+    if "container_manager" not in cfg:
+        cfg["container_manager"] = {}
+    cfg["container_manager"]["favorites"] = favorites
     write_config(app_config, cfg)
 
     return web.json_response(actions)
+
+
+async def container_create_handler(request: web.Request) -> web.Response:
+    """Create a new container via the devcontainer CLI.
+
+    Body (JSON): ``{"image": str, "name"?: str, "preset"?: str}``.
+    - Validates ``image`` against ``container_manager.image_whitelist`` config.
+    - Generates a temp devcontainer.json, invokes ``devcontainer up`` async,
+      stamps ``created_by=canvas-claude`` via runArgs.
+    - On success, auto-registers the container as a favorite and returns
+      ``{"container_id": name, "name": name, "status": "created"}``.
+    """
+    app_config: AppConfig = request.app["app_config"]
+    cfg = read_config(app_config)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Request body must be valid JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "Request body must be a JSON object"}, status=400)
+
+    image = (body.get("image") or "").strip()
+    if not image:
+        return web.json_response({"error": "image is required"}, status=400)
+
+    whitelist = cfg.get("container_manager", {}).get(
+        "image_whitelist",
+        ["ubuntu:24.04"],
+    )
+    if image not in whitelist:
+        return web.json_response(
+            {"error": "image_not_whitelisted", "allowed": whitelist},
+            status=400,
+        )
+
+    name = (body.get("name") or "").strip() or None
+    preset = body.get("preset") or "devcontainer"
+
+    # Resource caps (#204): merge config-level defaults onto the spec so a
+    # human can tune without code changes. Missing keys fall back to the
+    # ContainerSpec class defaults (v1 targets from epic #199 intent §8).
+    cap_defaults = cfg.get("container_manager", {}).get("defaults", {}) or {}
+    cap_kwargs: dict = {}
+    if "cpu_limit" in cap_defaults:
+        cap_kwargs["cpu_limit"] = float(cap_defaults["cpu_limit"])
+    if "memory_limit" in cap_defaults:
+        cap_kwargs["memory_limit"] = str(cap_defaults["memory_limit"])
+    if "disk_limit" in cap_defaults:
+        cap_kwargs["disk_limit"] = str(cap_defaults["disk_limit"])
+    if "pids_limit" in cap_defaults:
+        cap_kwargs["pids_limit"] = int(cap_defaults["pids_limit"])
+
+    # Profiles volume mount (#207). Volume name is configurable via the same
+    # ``util_container.mounts.profiles`` config key used by the util container
+    # so both point at the same named volume by default (``claude-profiles``).
+    profiles_volume = (
+        cfg.get("util_container", {}).get("mounts", {}).get("profiles") or container_spec_mod.DEFAULT_PROFILES_VOLUME
+    )
+    cap_kwargs["profiles_volume"] = profiles_volume
+
+    spec = container_spec_mod.ContainerSpec(
+        image=image,
+        name=name,
+        preset=preset,
+        **cap_kwargs,
+    )
+
+    # ── 4-container global cap (#205) ─────────────────────────────────────
+    # Mirrors the 10-terminal cap pattern at ``claude_terminal_create``: the
+    # lock is held across the count-check + creation so concurrent requests
+    # cannot race past the cap. The cap counts only containers stamped with
+    # ``created_by=canvas-claude``; human-created containers are excluded.
+    max_containers = int(cfg.get("container_manager", {}).get("max_containers", 4))
+    create_lock: asyncio.Lock = request.app["container_create_lock"]
+    async with create_lock:
+        existing_names, count_err = await _count_canvas_claude_containers(request.app)
+        if count_err is not None:
+            return count_err
+        if len(existing_names) >= max_containers:
+            return web.json_response(
+                {
+                    "error": "container_cap_reached",
+                    "message": (
+                        f"Canvas Claude has reached the {max_containers}-container cap. "
+                        "Rebuild or remove one before creating another."
+                    ),
+                    "existing_container_ids": sorted(existing_names),
+                    "live_container_names": sorted(existing_names),
+                },
+                status=429,
+            )
+
+        # Test-mode hook: bypass the real subprocess call.
+        test_create = request.app.get("_test_container_create")
+        if test_create is not None:
+            # Record the spec for assertions.
+            test_create.setdefault("calls", []).append(
+                {
+                    "image": spec.image,
+                    "name": spec.name,
+                    "preset": spec.preset,
+                    "labels": dict(spec.labels),
+                    "devcontainer_json": spec.devcontainer_preset(),
+                }
+            )
+            if test_create.get("should_fail"):
+                return web.json_response(
+                    {"error": "creation_failed", "detail": test_create.get("error", "mock failure")},
+                    status=500,
+                )
+            # Register the new container in the test-labels map so subsequent
+            # count-checks (inside the same test) see it as canvas-claude-owned.
+            test_labels = request.app.get("_test_container_labels")
+            if test_labels is not None:
+                test_labels.setdefault(spec.name, {})["created_by"] = "canvas-claude"
+        else:
+            try:
+                await container_spec_mod.create(spec)
+            except RuntimeError as exc:
+                return web.json_response(
+                    {"error": "creation_failed", "detail": str(exc)},
+                    status=500,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("container_create: unexpected failure")
+                return web.json_response(
+                    {"error": "creation_failed", "detail": str(exc)},
+                    status=500,
+                )
+
+        # Auto-register as favorite (idempotent — skip if already present).
+        if "container_manager" not in cfg:
+            cfg["container_manager"] = {}
+        favorites = cfg["container_manager"].get("favorites", [])
+        if not any(f.get("name") == spec.name for f in favorites):
+            favorites.append({"name": spec.name, "type": "docker", "actions": []})
+            cfg["container_manager"]["favorites"] = favorites
+            write_config(app_config, cfg)
+
+        return web.json_response(
+            {
+                "container_id": spec.name,
+                "name": spec.name,
+                "image": spec.image,
+                "status": "created",
+            }
+        )
+
+
+async def _count_canvas_claude_containers(
+    app: web.Application,
+) -> tuple[list[str], web.Response | None]:
+    """Return (names, error_response). Names are containers (running + stopped)
+    with the ``created_by=canvas-claude`` label. On docker failure, returns
+    ([], 500 response) — callers fail closed.
+
+    Test-mode path: when ``_test_container_labels`` is populated, derive the
+    count from that map so tests don't need to mock docker.
+    """
+    test_labels = app.get("_test_container_labels")
+    if test_labels is not None:
+        names = [name for name, entry in test_labels.items() if (entry or {}).get("created_by") == "canvas-claude"]
+        return names, None
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _DOCKER_CMD,
+            "ps",
+            "-a",
+            "--filter",
+            "label=created_by=canvas-claude",
+            "--format",
+            "{{.Names}}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("container_create: docker ps (cap count) failed: {}", exc)
+        return [], web.json_response(
+            {"error": "container_count_failed", "detail": str(exc)},
+            status=500,
+        )
+    if proc.returncode != 0:
+        err = stderr.decode().strip() if stderr else "docker ps failed"
+        logger.warning("container_create: docker ps (cap count) failed: {}", err)
+        return [], web.json_response(
+            {"error": "container_count_failed", "detail": err},
+            status=500,
+        )
+    names = [line.strip() for line in stdout.decode().splitlines() if line.strip()]
+    return names, None
+
+
+async def _inspect_container_for_rebuild(request: web.Request, name: str) -> tuple[dict | None, web.Response | None]:
+    """Return (inspect_info, error_response). ``inspect_info`` is a dict with
+    ``image``, ``labels``, ``mounts`` (list of mount-strings suitable for
+    ``ContainerSpec.mounts``). If this is a test (``_test_container_labels``
+    set), fall back to label data + image recorded in ``_test_container_create``
+    (where available). On docker failure, returns (None, error_response).
+    """
+    # Test-mode hook: reuse the labels lookup table populated by tests.
+    test_labels = request.app.get("_test_container_labels")
+    if test_labels is not None:
+        entry = test_labels.get(name) or {}
+        image = entry.get("image", "ubuntu:24.04")
+        labels = {k: v for k, v in entry.items() if k != "image"}
+        # workspace volume name follows the create-time default
+        mounts = entry.get("mounts") or [
+            f"source={name}-workspace,target=/workspace,type=volume",
+        ]
+        return (
+            {"image": image, "labels": labels, "mounts": mounts},
+            None,
+        )
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _DOCKER_CMD,
+            "inspect",
+            "--format",
+            "{{json .}}",
+            "--",
+            name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("container_rebuild: docker inspect failed for '{}': {}", name, exc)
+        return None, web.json_response(
+            {"error": "docker_inspect_failed", "container": name, "detail": str(exc)},
+            status=500,
+        )
+    if proc.returncode != 0:
+        err = stderr.decode().strip() if stderr else "docker inspect failed"
+        return None, web.json_response(
+            {"error": "docker_inspect_failed", "container": name, "detail": err},
+            status=500,
+        )
+    try:
+        raw = json.loads(stdout.decode())
+    except Exception as exc:  # noqa: BLE001
+        return None, web.json_response(
+            {"error": "docker_inspect_parse_failed", "container": name, "detail": str(exc)},
+            status=500,
+        )
+    cfg = raw.get("Config", {}) or {}
+    image = cfg.get("Image", "")
+    labels = cfg.get("Labels", {}) or {}
+    mounts: list[str] = []
+    for m in raw.get("Mounts", []) or []:
+        mtype = m.get("Type", "")
+        if mtype == "volume":
+            vol = m.get("Name", "")
+            target = m.get("Destination", "")
+            if vol and target:
+                mounts.append(f"source={vol},target={target},type=volume")
+        elif mtype == "bind":
+            src = m.get("Source", "")
+            target = m.get("Destination", "")
+            if src and target:
+                mounts.append(f"source={src},target={target},type=bind")
+    return {"image": image, "labels": labels, "mounts": mounts}, None
+
+
+async def container_rebuild_handler(request: web.Request) -> web.Response:
+    """Rebuild a canvas-claude-owned container: stop + docker rm + recreate.
+
+    ABSOLUTE INVARIANT: only containers with ``created_by=canvas-claude`` may be
+    rebuilt through this endpoint. The guard is enforced unconditionally (not
+    gated on the Canvas-Claude origin signal) because ``docker rm`` is a
+    destructive operation that must never touch human-owned containers.
+
+    The workspace volume is preserved — ``docker rm`` is called WITHOUT the
+    ``-v`` flag, so named volumes survive and are re-attached to the new
+    container via the reconstructed ``ContainerSpec``.
+    """
+    name = request.match_info["name"]
+
+    # Hard guard: rebuild is unconditionally gated on created_by=canvas-claude.
+    # We force the origin signal on so `_require_canvas_claude_owned` runs
+    # regardless of how the request was made.
+    test_labels = request.app.get("_test_container_labels")
+    if test_labels is not None:
+        label = test_labels.get(name, {}).get("created_by")
+        if label != "canvas-claude":
+            return web.json_response(
+                {"error": "not_canvas_claude_owned", "container": name},
+                status=403,
+            )
+    else:
+        # Real-Docker path: run the same inspect used by the stop guard.
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                _DOCKER_CMD,
+                "inspect",
+                "--format",
+                '{{index .Config.Labels "created_by"}}',
+                "--",
+                name,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response(
+                {"error": "docker_inspect_failed", "container": name, "detail": str(exc)},
+                status=500,
+            )
+        if proc.returncode != 0:
+            err = stderr.decode().strip() if stderr else "docker inspect failed"
+            return web.json_response(
+                {"error": "docker_inspect_failed", "container": name, "detail": err},
+                status=500,
+            )
+        label = stdout.decode().strip()
+        if label != "canvas-claude":
+            return web.json_response(
+                {"error": "not_canvas_claude_owned", "container": name},
+                status=403,
+            )
+
+    # Read the container's spec (image, labels, mounts) to reconstruct on recreate.
+    info, err_resp = await _inspect_container_for_rebuild(request, name)
+    if err_resp is not None:
+        return err_resp
+    assert info is not None
+
+    # Test-mode hook: flip mock state + record the rebuild call instead of
+    # calling Docker. Mirrors the _test_container_create convention so tests
+    # can assert on the reconstructed ContainerSpec.
+    test_create = request.app.get("_test_container_create")
+    test_containers = request.app.get("_test_containers")
+    if test_labels is not None or test_create is not None or test_containers is not None:
+        # Record the docker rm/stop invocations for assertions.
+        rebuild_log = request.app.setdefault("_test_rebuild_calls", [])
+        rebuild_log.append({"op": "stop", "name": name})
+        rebuild_log.append({"op": "rm", "name": name, "with_volumes": False})
+        # Rebuild the spec and hand to the create test-hook for recording.
+        spec = container_spec_mod.ContainerSpec(
+            image=info["image"] or "ubuntu:24.04",
+            name=name,
+            preset="devcontainer",
+            labels=dict(info["labels"]),
+            mounts=list(info["mounts"]),
+        )
+        if test_create is None:
+            test_create = {}
+            request.app["_test_container_create"] = test_create
+        test_create.setdefault("calls", []).append(
+            {
+                "image": spec.image,
+                "name": spec.name,
+                "preset": spec.preset,
+                "labels": dict(spec.labels),
+                "mounts": list(spec.mounts),
+                "devcontainer_json": spec.devcontainer_preset(),
+            }
+        )
+        if test_containers is not None:
+            for c in test_containers:
+                if c["name"] == name:
+                    c["state"] = "online"
+                    break
+        return web.json_response({"container_id": name, "name": name, "status": "rebuilt"})
+
+    # Real-Docker path: stop → rm → recreate.
+    stop_proc = await asyncio.create_subprocess_exec(
+        _DOCKER_CMD,
+        "stop",
+        "-t",
+        "10",
+        "--",
+        name,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await stop_proc.communicate()
+    # Note: stop failure is non-fatal — the container may already be stopped.
+
+    # `docker rm` WITHOUT -v so the named workspace volume is preserved.
+    rm_proc = await asyncio.create_subprocess_exec(
+        _DOCKER_CMD,
+        "rm",
+        "--",
+        name,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    rm_stdout, rm_stderr = await rm_proc.communicate()
+    if rm_proc.returncode != 0:
+        err = rm_stderr.decode().strip() if rm_stderr else "docker rm failed"
+        logger.warning("container_rebuild: docker rm failed for '{}': {}", name, err)
+        return web.json_response(
+            {"error": "rebuild_failed", "container": name, "detail": err},
+            status=500,
+        )
+
+    spec = container_spec_mod.ContainerSpec(
+        image=info["image"] or "ubuntu:24.04",
+        name=name,
+        preset="devcontainer",
+        labels=dict(info["labels"]),
+        mounts=list(info["mounts"]),
+    )
+    try:
+        await container_spec_mod.create(spec)
+    except RuntimeError as exc:
+        return web.json_response(
+            {
+                "error": "rebuild_failed",
+                "container": name,
+                "detail": str(exc),
+                "note": "container removed but recreation failed — volume preserved",
+            },
+            status=500,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("container_rebuild: unexpected failure during recreate")
+        return web.json_response(
+            {
+                "error": "rebuild_failed",
+                "container": name,
+                "detail": str(exc),
+                "note": "container removed but recreation failed — volume preserved",
+            },
+            status=500,
+        )
+
+    logger.info("container_rebuild: rebuilt '{}'", name)
+    return web.json_response({"container_id": name, "name": name, "status": "rebuilt"})
 
 
 async def exec_websocket_handler(request: web.Request) -> web.WebSocketResponse:
@@ -600,17 +1271,17 @@ async def test_sessions_list(request: web.Request) -> web.Response:
     return web.json_response(mgr.list_sessions())
 
 
-async def test_vm_containers_put(request: web.Request) -> web.Response:
-    """PUT /api/test/vm-containers — inject fake container list for E2E tests."""
+async def test_containers_put(request: web.Request) -> web.Response:
+    """PUT /api/test/containers — inject fake container list for E2E tests."""
     data = await request.json()
     containers = data if isinstance(data, list) else data.get("containers", [])
-    request.app["_test_vm_containers"] = containers
+    request.app["_test_containers"] = containers
     return web.json_response(containers)
 
 
-async def test_vm_containers_get(request: web.Request) -> web.Response:
-    """GET /api/test/vm-containers — read back fake container list."""
-    containers = request.app.get("_test_vm_containers", [])
+async def test_containers_get(request: web.Request) -> web.Response:
+    """GET /api/test/containers — read back fake container list."""
+    containers = request.app.get("_test_containers", [])
     return web.json_response(containers)
 
 
@@ -1646,6 +2317,9 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app["canvas_claude_spawns"]: dict[str, set[str]] = {}
     # Per-spawner asyncio.Lock to make the cap-check+add atomic
     app["canvas_claude_spawn_locks"]: dict[str, asyncio.Lock] = {}
+    # Global lock for the 4-container cap (#205): serialises the count-check +
+    # create so concurrent requests can't race past the cap.
+    app["container_create_lock"] = asyncio.Lock()
     # Pending ephemeral timeout tasks keyed by session_id
     app["ephemeral_timers"]: dict[str, asyncio.Task] = {}
 
@@ -1660,14 +2334,18 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_put("/api/canvases/{name}", canvas_put_handler)
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
     app.router.add_get("/api/widgets/system-info", widget_system_info_handler)
+    app.router.add_get("/api/widgets/container-stats", widget_container_stats_handler)
 
-    # VM Manager API
-    app.router.add_get("/api/vms/discover", vm_discover_handler)
-    app.router.add_get("/api/vms/favorites", vm_favorites_get_handler)
-    app.router.add_put("/api/vms/favorites", vm_favorites_put_handler)
-    app.router.add_post("/api/vms/{name}/start", vm_start_handler)
-    app.router.add_post("/api/vms/{name}/stop", vm_stop_handler)
-    app.router.add_put("/api/vms/favorites/{name}/actions", vm_favorites_actions_put_handler)
+    # Container Manager API
+    app.router.add_get("/api/containers/discover", container_discover_handler)
+    app.router.add_get("/api/containers/{name}/stats", container_single_stats_handler)
+    app.router.add_get("/api/containers/favorites", container_favorites_get_handler)
+    app.router.add_put("/api/containers/favorites", container_favorites_put_handler)
+    app.router.add_post("/api/containers/{name}/start", container_start_handler)
+    app.router.add_post("/api/containers/{name}/stop", container_stop_handler)
+    app.router.add_put("/api/containers/favorites/{name}/actions", container_favorites_actions_put_handler)
+    app.router.add_post("/api/containers/create", container_create_handler)
+    app.router.add_post("/api/containers/{name}/rebuild", container_rebuild_handler)
 
     app.router.add_get("/api/profiles", profiles_list_handler)
     app.router.add_get("/api/profiles/discover", profiles_discover_handler)
@@ -1716,8 +2394,8 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
         app.router.add_get("/api/test/session/{id}/status", test_session_status)
         app.router.add_delete("/api/test/session/{id}", test_session_delete)
         app.router.add_get("/api/test/sessions", test_sessions_list)
-        app.router.add_put("/api/test/vm-containers", test_vm_containers_put)
-        app.router.add_get("/api/test/vm-containers", test_vm_containers_get)
+        app.router.add_put("/api/test/containers", test_containers_put)
+        app.router.add_get("/api/test/containers", test_containers_get)
 
     # Lifecycle hooks
     async def on_startup(app: web.Application) -> None:

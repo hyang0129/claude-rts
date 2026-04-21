@@ -39,7 +39,7 @@ def test_container_name():
 async def test_start_success_emits_ready():
     """ContainerStarterCard starts container and emits container:ready:{name}."""
     app, bus, reg = _make_app_dict()
-    app["_test_vm_containers"] = [{"name": "hub1", "state": "offline"}]
+    app["_test_containers"] = [{"name": "hub1", "state": "offline"}]
 
     events = []
 
@@ -61,13 +61,13 @@ async def test_start_success_emits_ready():
     assert ready_events[0][1]["container_name"] == "hub1"
 
     # Container state should be "online"
-    assert app["_test_vm_containers"][0]["state"] == "online"
+    assert app["_test_containers"][0]["state"] == "online"
 
 
 async def test_self_close_after_success():
     """Card unregisters from CardRegistry after successful start."""
     app, bus, reg = _make_app_dict()
-    app["_test_vm_containers"] = [{"name": "hub1", "state": "offline"}]
+    app["_test_containers"] = [{"name": "hub1", "state": "offline"}]
 
     card = ContainerStarterCard(container_name="hub1", app=app)
     card.bus = bus
@@ -89,7 +89,7 @@ async def test_self_close_after_success():
 async def test_start_failure_emits_failed():
     """Starting a nonexistent container emits container:failed:{name}."""
     app, bus, reg = _make_app_dict()
-    app["_test_vm_containers"] = []  # No containers
+    app["_test_containers"] = []  # No containers
 
     events = []
 
@@ -113,7 +113,7 @@ async def test_start_failure_emits_failed():
 async def test_self_close_after_failure():
     """Card unregisters from CardRegistry even after failure."""
     app, bus, reg = _make_app_dict()
-    app["_test_vm_containers"] = []
+    app["_test_containers"] = []
 
     card = ContainerStarterCard(container_name="nope", app=app)
     card.bus = bus
@@ -132,7 +132,7 @@ async def test_self_close_after_failure():
 async def test_stop_cancels_task():
     """stop() cancels the running task."""
     app, bus, reg = _make_app_dict()
-    app["_test_vm_containers"] = [{"name": "hub1", "state": "offline"}]
+    app["_test_containers"] = [{"name": "hub1", "state": "offline"}]
 
     card = ContainerStarterCard(container_name="hub1", app=app)
     card.bus = bus

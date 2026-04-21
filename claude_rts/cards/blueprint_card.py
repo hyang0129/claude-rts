@@ -238,7 +238,7 @@ class BlueprintCard(BaseCard):
             raise RuntimeError("No app reference — cannot discover containers")
 
         # Use mock data if in test mode
-        test_containers = self._app.get("_test_vm_containers")
+        test_containers = self._app.get("_test_containers")
         if test_containers is not None:
             containers = [c["name"] for c in test_containers]
             await self._log(f"  Discovered {len(containers)} container(s): {containers}")

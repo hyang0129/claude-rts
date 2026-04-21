@@ -17,7 +17,7 @@
       "~/.claude-profiles": "/profiles"
     }
   },
-  "vm_manager": {
+  "container_manager": {
     "favorites": [
       {
         "name": "supreme-claudemander-util",
