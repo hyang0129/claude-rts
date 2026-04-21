@@ -1001,6 +1001,19 @@ async def container_rebuild_handler(request: web.Request) -> web.Response:
     return web.json_response({"container_id": name, "name": name, "status": "rebuilt"})
 
 
+# Remote-access note (issue #224, epic #119):
+# aiohttp 3.13.x's web.WebSocketResponse does NOT validate the WebSocket Origin
+# header — the class exposes no `check_origin` / `allowed_origins` parameter and
+# its source contains no reference to the Origin header. Browsers running on a
+# remote Tailscale peer (e.g. http://100.x.x.x:3000) can upgrade WebSocket
+# connections against `--host 0.0.0.0` without a 403.
+#
+# This is intentional for supreme-claudemander: the auth boundary is Tailscale
+# network enrollment, not an application-level Origin allowlist. All four
+# `web.WebSocketResponse()` call sites in this file (exec / session_new /
+# session_attach / ws_control) therefore remain bare `WebSocketResponse()`
+# constructions with no origin guard. See tests/test_server.py for the
+# regression test that pins this behaviour.
 async def exec_websocket_handler(request: web.Request) -> web.WebSocketResponse:
     """WebSocket handler that spawns a PTY for an arbitrary command."""
     cmd = request.query.get("cmd", "").strip()

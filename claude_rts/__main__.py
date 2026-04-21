@@ -55,6 +55,7 @@ def main():
     parser = argparse.ArgumentParser(description="supreme-claudemander terminal canvas")
     parser.add_argument("--version", action="version", version=f"supreme-claudemander {_get_version()}")
     parser.add_argument("--port", type=int, default=3000, help="Server port (default: 3000)")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
     parser.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
     parser.add_argument("--electron", action="store_true", help="Launch in Electron shell instead of browser")
     parser.add_argument("--test-mode", action="store_true", help="Enable test puppeting API")
@@ -98,7 +99,7 @@ def main():
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
     )
 
-    logger.info("supreme-claudemander starting on http://localhost:{}", args.port)
+    logger.info("supreme-claudemander starting on http://{}:{}", args.host, args.port)
 
     test_mode = args.test_mode or os.environ.get("CLAUDE_RTS_TEST_MODE", "").lower() in ("1", "true")
     app = create_app(app_config, test_mode=test_mode)
@@ -138,14 +139,17 @@ def main():
     elif not args.no_browser:
 
         async def open_browser(app):
-            url = f"http://localhost:{args.port}"
+            # Browser URL uses 'localhost' when binding to wildcard 0.0.0.0 (macOS
+            # cannot open http://0.0.0.0); otherwise use the explicit host.
+            browser_host = "localhost" if args.host == "0.0.0.0" else args.host
+            url = f"http://{browser_host}:{args.port}"
             logger.info("Opening browser: {}", url)
             webbrowser.open(url)
 
         app.on_startup.append(open_browser)
 
     logger.info("Press Ctrl+C to stop")
-    web.run_app(app, host="127.0.0.1", port=args.port, print=None)
+    web.run_app(app, host=args.host, port=args.port, print=None)
 
 
 if __name__ == "__main__":

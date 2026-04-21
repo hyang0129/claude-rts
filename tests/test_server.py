@@ -168,3 +168,27 @@ async def test_container_single_stats_404(client, app):
     app["_test_container_stats"] = []
     resp = await client.get("/api/containers/nope/stats")
     assert resp.status == 404
+
+
+# ── Remote-access (issue #224 / epic #119) ────────────────────────────────
+#
+# Regression guard: with --host 0.0.0.0 a remote browser on a Tailscale peer
+# (e.g. http://100.64.0.5:3000) initiates WebSocket upgrades whose `Origin`
+# header is NOT localhost. aiohttp 3.13.x's WebSocketResponse performs no
+# Origin validation, so the handshake must succeed. If a future aiohttp
+# release adds default Origin checking, this test fails and the four
+# WebSocketResponse() call sites in server.py must be updated consistently.
+
+
+async def test_websocket_accepts_non_localhost_origin(client):
+    """
+    /ws/control handshake must succeed when the browser sends a Tailscale-IP
+    Origin header, because the auth boundary for remote access is Tailscale
+    enrollment (not an application-level Origin allowlist). See the comment
+    above `exec_websocket_handler` in server.py for context.
+    """
+    async with client.ws_connect(
+        "/ws/control",
+        headers={"Origin": "http://100.64.0.5:3000"},
+    ) as ws:
+        assert not ws.closed

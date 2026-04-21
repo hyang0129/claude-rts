@@ -457,6 +457,30 @@
 </head>
 <body>
 
+<!-- Mobile-blocking gate (issue 223). Self-contained: delete this entire
+     block to re-enable mobile rendering. Detection uses viewport width and
+     pointer coarseness only — no navigator user-agent sniffing. -->
+<style>
+  @media (max-width: 767px), (pointer: coarse) {
+    body > :not(#mobile-block) { display: none !important; }
+  }
+</style>
+<div id="mobile-block" style="display:none;position:fixed;inset:0;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center;background:#11111b;color:#cdd6f4;font-family:system-ui,-apple-system,sans-serif;z-index:2147483647;">
+  <h1 style="color:#cba6f7;font-size:20px;margin-bottom:12px;">Desktop browser required</h1>
+  <p style="max-width:420px;line-height:1.5;">supreme-claudemander requires a desktop browser. Please open this URL on a desktop or laptop computer.</p>
+</div>
+<script>
+  (function () {
+    var isNarrow = window.innerWidth < 768;
+    var isCoarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+    if (!isNarrow && !isCoarse) return;
+    var el = document.getElementById('mobile-block');
+    if (el) el.style.display = 'flex';
+    // Throw to abort the rest of the inline canvas-boot scripts on mobile.
+    throw new Error('mobile-blocked');
+  })();
+</script>
+
 <div id="status-bar">
   <span class="title">supreme-claudemander</span>
   <span class="info" id="hub-count">connecting...</span>
