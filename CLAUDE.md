@@ -4,19 +4,22 @@ RTS-style terminal canvas — devcontainer shells as draggable, resizable cards 
 
 ## Server Rule
 
-**Never run more than one server instance at a time.** Before starting a server, kill any existing one. The devcontainer has no `pkill`/`fuser`/`killall`, so scan `/proc` directly:
+**Never run more than one server instance on the same port.** Before starting the dev server on port 3000, kill only the process bound to port 3000 — do **not** kill every `python -m claude_rts` process, because a second "prod-ish" instance may be running from a worktree on a different port (e.g. 3001). The devcontainer has no `pkill`/`fuser`/`killall`, so resolve the listener's pid from `/proc/net/tcp` inodes:
 
 ```bash
-for pid in $(ls /proc/ | grep -E '^[0-9]+$'); do
-  cmd=$(cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ')
-  echo "$cmd" | grep -q "python -m claude_rts" && kill "$pid"
-done
+# Find inode of the listener on port 3000 (0BB8 = 3000, 0A = LISTEN)
+inode=$(awk '$2 ~ /:0BB8$/ && $4 == "0A" {print $10; exit}' /proc/net/tcp /proc/net/tcp6 2>/dev/null)
+if [ -n "$inode" ]; then
+  for pid in $(ls /proc/ | grep -E '^[0-9]+$'); do
+    ls -l /proc/$pid/fd/ 2>/dev/null | grep -q "socket:\[$inode\]" && kill "$pid"
+  done
+fi
 sleep 1
-# verify port 3000 is clear (0BB8 = 3000, 0A = LISTEN)
+# verify port 3000 is clear
 cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk '$2 ~ /:0BB8$/ && $4 == "0A"'
 ```
 
-Verify the port is free before starting. Running multiple instances causes port conflicts, confusing log output, and stale probe sessions.
+Verify the port is free before starting. Running multiple instances on the **same** port causes port conflicts, confusing log output, and stale probe sessions.
 
 **Use `--electron` for manual/QA testing.** Launch via `python -m claude_rts --electron` to run in the Electron shell instead of a browser tab.
 
