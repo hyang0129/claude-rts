@@ -457,6 +457,25 @@
 </head>
 <body>
 
+<!-- Mobile-blocking gate (issue #223). Self-contained: delete this entire
+     <script> block to re-enable mobile rendering. Detection uses viewport
+     width and pointer coarseness only — no navigator.userAgent. -->
+<script>
+  (function () {
+    var isNarrow = window.innerWidth < 768;
+    var isCoarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+    if (!isNarrow && !isCoarse) return;
+    document.body.innerHTML =
+      '<div id="mobile-block" style="position:fixed;inset:0;display:flex;' +
+      'flex-direction:column;align-items:center;justify-content:center;' +
+      'padding:24px;text-align:center;background:#11111b;color:#cdd6f4;' +
+      'font-family:system-ui,-apple-system,sans-serif;">' +
+      '<h1 style="color:#cba6f7;font-size:20px;margin-bottom:12px;">Desktop browser required</h1>' +
+      '<p style="max-width:420px;line-height:1.5;">supreme-claudemander requires a desktop browser. ' +
+      'Please open this URL on a desktop or laptop computer.</p></div>';
+  })();
+</script>
+
 <div id="status-bar">
   <span class="title">supreme-claudemander</span>
   <span class="info" id="hub-count">connecting...</span>
