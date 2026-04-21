@@ -58,6 +58,8 @@ python -m claude_rts
 
 The server starts on `http://localhost:3000` and opens your browser automatically. Press `Ctrl+C` to stop — your containers keep running.
 
+**Remote access**: to reach the canvas from a second machine over Tailscale, see [`docs/tailscale-setup.md`](docs/tailscale-setup.md). Default bind is `127.0.0.1` (local-only); pass `--host 0.0.0.0` to opt in to remote access.
+
 ### Windows (community supported)
 
 ```bash
