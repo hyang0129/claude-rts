@@ -26,3 +26,6 @@ supreme-claudemander.*.log
 
 # devcontainer git identity temp file
 .devcontainer/.gituser.tmp
+
+# local launch scripts (per-user, not checked in)
+scripts/launch-prod.sh
