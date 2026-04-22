@@ -101,6 +101,17 @@ class CardRegistry:
             setattr(card, key, value)
             applied[key] = value
 
+        # Epic #236 child 4 (#240): track which geometry fields have been
+        # explicitly mutated so ``to_descriptor`` can decide whether to emit
+        # them. A card that has never received an explicit ``x``/``y``/``w``/
+        # ``h``/``z_order`` (constructor or PUT) keeps its default-0 values
+        # internal and the frontend's viewport-center fallback applies.
+        explicit = getattr(card, "_explicit_geometry", None)
+        if explicit is not None:
+            for key in applied:
+                if key in {"x", "y", "w", "h", "z_order"}:
+                    explicit.add(key)
+
         if applied:
             logger.debug("CardRegistry: patched card '{}' fields={}", card_id, list(applied.keys()))
         return applied

@@ -74,11 +74,18 @@ class TerminalCard(BaseCard):
         # values live in ``self.x/y/w/h/z_order``. Drag/resize/focus on the
         # client commit through ``PUT /api/cards/{id}/state``.
         self.layout = layout or {}
+        # Track whether the card has explicit position / size set — either at
+        # construction (via the ``layout={...}`` spawn hint) or later via
+        # ``apply_state_patch``. Used by ``to_descriptor`` to decide whether
+        # to emit these fields, so the frontend's viewport-center fallback in
+        # ``handleControlCardCreated`` keeps working for ad-hoc server spawns.
+        self._explicit_geometry: set[str] = set()
         if self.layout:
             for _field in ("x", "y", "w", "h", "z_order"):
                 _val = self.layout.get(_field)
                 if isinstance(_val, int) and not isinstance(_val, bool):
                     setattr(self, _field, _val)
+                    self._explicit_geometry.add(_field)
         self.display_name = display_name or ""
         self.recovery_script = recovery_script or ""
         # Epic #236 child 3: ``starred`` is server-owned (see docs/state-model.md).
@@ -101,15 +108,6 @@ class TerminalCard(BaseCard):
             # False — so the client boot path can use it as the authoritative
             # value without needing to fall back to a legacy default.
             "starred": bool(self.starred),
-            # Epic #236 child 4 (#240): position / size / z-order are always
-            # included as first-class fields. The client boot path uses these
-            # as authoritative; legacy readers that previously consumed the
-            # ``layout`` dict overlay still see the same keys.
-            "x": int(self.x),
-            "y": int(self.y),
-            "w": int(self.w),
-            "h": int(self.h),
-            "z_order": int(self.z_order),
         }
         if self.hub:
             desc["hub"] = self.hub
@@ -121,6 +119,15 @@ class TerminalCard(BaseCard):
             desc["display_name"] = self.display_name
         if self.recovery_script:
             desc["recovery_script"] = self.recovery_script
+        # Epic #236 child 4 (#240): position / size / z-order are server-owned
+        # and emitted only when explicitly set (via the ``layout={...}`` spawn
+        # hint or a ``PUT /api/cards/{id}/state`` patch). Default values are
+        # omitted so the frontend's existing ``desc.x != null ? ... :
+        # viewport-center`` fallback at handleControlCardCreated keeps placing
+        # ad-hoc spawns near the user's view instead of pinning them to (0,0).
+        for _field in ("x", "y", "w", "h", "z_order"):
+            if _field in self._explicit_geometry:
+                desc[_field] = int(getattr(self, _field))
         return desc
 
     # ── Lifecycle ──────────────────────────────────────────────────────

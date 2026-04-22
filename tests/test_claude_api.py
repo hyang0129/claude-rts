@@ -935,8 +935,37 @@ async def test_terminal_card_position_layout_backfill(aiohttp_client, app_factor
     assert desc["y"] == 250
     assert desc["w"] == 700
     assert desc["h"] == 450
-    # z_order defaults to 0 when not specified at construction time.
-    assert desc["z_order"] == 0
+    # ``z_order`` was not in the construction-time layout dict, so the
+    # descriptor omits it (frontend will use its viewport-center / topmost
+    # fallback). The card's ``z_order`` attribute is still 0 internally.
+    assert "z_order" not in desc
+    assert card.z_order == 0
+
+
+async def test_terminal_card_descriptor_omits_default_geometry(aiohttp_client, app_factory):
+    """Cards without explicit geometry (no ``layout=`` and no PUT) omit
+    ``x``/``y``/``w``/``h``/``z_order`` from ``to_descriptor`` so the frontend
+    keeps its viewport-center fallback for ad-hoc server spawns. After a PUT
+    the patched fields surface in the descriptor.
+    """
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    sid = (await resp.json())["session_id"]
+
+    card = client.app["card_registry"].get_terminal(sid)
+    desc = card.to_descriptor()
+    for f in ("x", "y", "w", "h", "z_order"):
+        assert f not in desc, f"{f} unexpectedly present: {desc}"
+
+    # After a PUT, the patched fields appear in subsequent descriptors.
+    resp = await client.put(f"/api/cards/{sid}/state", json={"x": 5, "y": 6})
+    assert resp.status == 200
+    desc = card.to_descriptor()
+    assert desc["x"] == 5
+    assert desc["y"] == 6
+    # Fields that were not patched stay omitted.
+    for f in ("w", "h", "z_order"):
+        assert f not in desc
 
 
 async def test_legacy_rename_still_broadcasts_via_generic_path(aiohttp_client, app_factory):
