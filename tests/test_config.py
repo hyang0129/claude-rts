@@ -161,28 +161,36 @@ async def test_list_canvases_empty_api(client, app_config):
     assert data == []
 
 
-async def test_put_and_get_canvas(client, app_config):
+async def test_get_canvas_after_direct_write(client, app_config):
+    """GET /api/canvases/{name} returns whatever the server wrote."""
+    # Epic #236 child 5 (#241): PUT /api/canvases/{name} is retired. Tests
+    # that exercise the GET path now seed the file directly via write_canvas
+    # to mimic what the write-through hook would do at runtime.
     layout = {
         "name": "main",
         "canvas_size": [3840, 2160],
-        "cards": [{"type": "terminal", "hub": "hub_1", "x": 100, "y": 100, "w": 720, "h": 480}],
+        "cards": [
+            {
+                "type": "terminal",
+                "card_id": "abc",
+                "hub": "hub_1",
+                "x": 100,
+                "y": 100,
+                "w": 720,
+                "h": 480,
+            }
+        ],
     }
-    resp = await client.put("/api/canvases/main", json=layout)
-    assert resp.status == 200
-    result = await resp.json()
-    assert result["status"] == "ok"
-    assert result["name"] == "main"
+    write_canvas(app_config, "main", layout)
 
-    # Read it back
-    resp2 = await client.get("/api/canvases/main")
-    assert resp2.status == 200
-    data = await resp2.json()
+    resp = await client.get("/api/canvases/main")
+    assert resp.status == 200
+    data = await resp.json()
     assert data["name"] == "main"
     assert len(data["cards"]) == 1
 
-    # Should appear in list
-    resp3 = await client.get("/api/canvases")
-    names = await resp3.json()
+    resp2 = await client.get("/api/canvases")
+    names = await resp2.json()
     assert "main" in names
 
 
@@ -191,21 +199,19 @@ async def test_get_canvas_not_found(client, app_config):
     assert resp.status == 404
 
 
-async def test_put_canvas_invalid_json(client, app_config):
-    resp = await client.put(
-        "/api/canvases/main",
-        data=b"bad",
-        headers={"Content-Type": "application/json"},
-    )
-    assert resp.status == 400
+async def test_put_canvas_route_removed(client, app_config):
+    """Epic #236 child 5: PUT /api/canvases/{name} no longer exists."""
+    resp = await client.put("/api/canvases/main", json={"cards": []})
+    # aiohttp returns 405 (Method Not Allowed) for an unregistered method on
+    # a known resource path.
+    assert resp.status == 405
 
 
 async def test_delete_canvas_via_api(client, app_config):
     """DELETE /api/canvases/{name} removes a canvas."""
-    # Create a canvas first
-    layout = {"name": "temp", "canvas_size": [3840, 2160], "cards": []}
-    resp = await client.put("/api/canvases/temp", json=layout)
-    assert resp.status == 200
+    # Seed a canvas directly (server-authored snapshots are how files appear
+    # post-#241; PUT /api/canvases is retired).
+    write_canvas(app_config, "temp", {"name": "temp", "canvas_size": [3840, 2160], "cards": []})
 
     # Verify it exists
     resp = await client.get("/api/canvases/temp")
@@ -231,8 +237,7 @@ async def test_delete_canvas_not_found_via_api(client, app_config):
 
 async def test_delete_default_canvas_forbidden(client, app_config):
     """DELETE returns 400 when trying to delete 'probe-qa' canvas."""
-    layout = {"name": "probe-qa", "canvas_size": [3840, 2160], "cards": []}
-    await client.put("/api/canvases/probe-qa", json=layout)
+    write_canvas(app_config, "probe-qa", {"name": "probe-qa", "canvas_size": [3840, 2160], "cards": []})
 
     resp = await client.delete("/api/canvases/probe-qa")
     assert resp.status == 400
@@ -243,3 +248,14 @@ async def test_app_has_config_and_canvas_routes(app):
     assert "/api/config" in routes
     assert "/api/canvases" in routes
     assert "/api/canvases/{name}" in routes
+    # Epic #236 child 5 (#241): PUT on /api/canvases/{name} must NOT be
+    # registered. Inspect the resource to confirm only GET + DELETE methods
+    # are bound.
+    methods: set[str] = set()
+    for route in app.router.routes():
+        if route.resource is not None and route.resource.canonical == "/api/canvases/{name}":
+            methods.add(route.method)
+    # aiohttp registers an implicit HEAD alongside every GET; the load-bearing
+    # invariant is the absence of PUT.
+    assert "PUT" not in methods
+    assert {"GET", "DELETE"}.issubset(methods)

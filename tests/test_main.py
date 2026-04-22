@@ -1,5 +1,6 @@
 """Tests for CLI entry point."""
 
+import pytest
 from unittest.mock import patch, MagicMock
 
 from claude_rts.__main__ import main
@@ -201,3 +202,44 @@ def test_config_dir_not_provided_uses_default():
         except SystemExit:
             pass
         mock_config.load.assert_called_once_with()
+
+
+def test_migrate_canvases_flag_runs_and_exits():
+    """Epic #236 child 5 (#241): --migrate-canvases runs the migration and exits."""
+    with (
+        patch("sys.argv", ["supreme-claudemander", "--migrate-canvases"]),
+        patch("claude_rts.__main__.web") as mock_web,
+        patch("claude_rts.__main__.create_app") as mock_create,
+        patch("claude_rts.__main__.config") as mock_config,
+        patch("claude_rts.migrations.canvas_236.migrate_canvas_dir") as mock_migrate,
+    ):
+        mock_config.load.return_value = MagicMock()
+        mock_create.return_value = MagicMock()
+        mock_migrate.return_value = {"migrated": [], "skipped": [], "errors": []}
+        try:
+            main()
+        except SystemExit as exc:
+            assert exc.code == 0  # no errors → exit 0
+        mock_migrate.assert_called_once()
+        # Server must NOT have been started in migrate mode.
+        mock_web.run_app.assert_not_called()
+
+
+def test_migrate_canvases_flag_exits_nonzero_on_error():
+    """--migrate-canvases exits with non-zero status when any file errored."""
+    with (
+        patch("sys.argv", ["supreme-claudemander", "--migrate-canvases"]),
+        patch("claude_rts.__main__.web") as _mock_web,
+        patch("claude_rts.__main__.create_app") as _mock_create,
+        patch("claude_rts.__main__.config") as mock_config,
+        patch("claude_rts.migrations.canvas_236.migrate_canvas_dir") as mock_migrate,
+    ):
+        mock_config.load.return_value = MagicMock()
+        mock_migrate.return_value = {
+            "migrated": [],
+            "skipped": [],
+            "errors": [("/path/to/main.json", "boom")],
+        }
+        with pytest.raises(SystemExit) as excinfo:
+            main()
+        assert excinfo.value.code == 1

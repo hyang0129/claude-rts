@@ -68,6 +68,15 @@ def main():
         metavar="PRESET",
         help="Wipe and rebuild an isolated dev config dir; optionally specify a preset name (default: 'default')",
     )
+    parser.add_argument(
+        "--migrate-canvases",
+        action="store_true",
+        help=(
+            "Run the one-shot canvas JSON migration (epic #236 child 5) and exit. "
+            "Writes a {name}.json.pre-236-backup sidecar before rewriting each "
+            "old-schema file. Refuses to re-run when a sidecar already exists."
+        ),
+    )
     args = parser.parse_args()
 
     import os
@@ -84,13 +93,7 @@ def main():
     else:
         app_config = config.load()
 
-    # Configure loguru: remove default handler, add our own
-    logger.remove()
-    logger.add(
-        sys.stderr,
-        format="<green>{time:HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-        level="DEBUG",
-    )
+    # File log handler (sidecar to the stderr handler set up above).
     logger.add(
         "supreme-claudemander.log",
         rotation="10 MB",
@@ -99,12 +102,46 @@ def main():
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
     )
 
+    # Configure logging earlier so --migrate-canvases output uses the same
+    # format as the running server.
+    logger.remove()
+    logger.add(
+        sys.stderr,
+        format="<green>{time:HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        level="DEBUG",
+    )
+
+    if args.migrate_canvases:
+        from .migrations import canvas_236
+
+        config.ensure_dirs(app_config)
+        summary = canvas_236.migrate_canvas_dir(app_config.canvases_dir)
+        logger.info(
+            "canvas migration complete: migrated={} skipped={} errors={}",
+            len(summary["migrated"]),
+            len(summary["skipped"]),
+            len(summary["errors"]),
+        )
+        for path in summary["migrated"]:
+            logger.info("  migrated: {}", path)
+        for path, msg in summary["errors"]:
+            logger.error("  error: {} — {}", path, msg)
+        sys.exit(1 if summary["errors"] else 0)
+
     logger.info("supreme-claudemander starting on http://{}:{}", args.host, args.port)
 
     test_mode = args.test_mode or os.environ.get("CLAUDE_RTS_TEST_MODE", "").lower() in ("1", "true")
     app = create_app(app_config, test_mode=test_mode)
     if test_mode:
         logger.info("Test mode enabled — puppeting API available")
+
+    # Epic #236 child 5 (#241): dev-config canvases are spawn-hint fixtures
+    # (no ``card_id`` per entry — they are not server snapshots). The startup
+    # canvas-schema check would falsely flag them as pre-epic. Skip the
+    # check in dev-config mode; the preset copy is wiped+rebuilt every boot
+    # so it cannot drift into a corrupt state.
+    if args.dev_config is not None:
+        app["_skip_canvas_schema_check"] = True
 
     # --- Frontend launch strategy ---
     electron_proc = None
