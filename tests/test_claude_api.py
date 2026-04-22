@@ -698,7 +698,11 @@ async def test_cards_state_put_rejects_unknown_field(aiohttp_client, app_factory
 
 
 async def test_cards_state_put_rejects_non_string_value(aiohttp_client, app_factory):
-    """Allowlisted fields must be strings (initial slice); ints rejected with 400."""
+    """Allowlisted str fields (e.g. ``display_name``) reject non-string values with 400.
+
+    After child 3 (#239), per-field type validation is declared via
+    ``MUTABLE_FIELD_TYPES``; fields defaulting to ``str`` still reject ints.
+    """
     client = await aiohttp_client(app_factory())
     resp = await client.post("/api/claude/terminal/create?cmd=bash")
     sid = (await resp.json())["session_id"]
@@ -731,6 +735,54 @@ async def test_cards_state_put_rejects_non_object_body(aiohttp_client, app_facto
         data="[1, 2, 3]",
         headers={"Content-Type": "application/json"},
     )
+    assert resp.status == 400
+
+
+async def test_cards_state_put_patches_starred_and_broadcasts(aiohttp_client, app_factory):
+    """Epic #236 child 3 (#239): PUT /api/cards/{id}/state accepts bool ``starred``.
+
+    Mutates CardRegistry, broadcasts ``card_updated`` with the new starred
+    value, and surfaces it in ``to_descriptor`` for the boot path.
+    """
+    client = await aiohttp_client(app_factory())
+    async with client.ws_connect("/ws/control") as ws:
+        resp = await client.post("/api/claude/terminal/create?cmd=bash")
+        sid = (await resp.json())["session_id"]
+        await ws.receive_json(timeout=2)  # drain card_created
+
+        resp = await client.put(f"/api/cards/{sid}/state", json={"starred": True})
+        assert resp.status == 200
+        result = await resp.json()
+        assert result["status"] == "ok"
+        assert result["starred"] is True
+
+        card = client.app["card_registry"].get_terminal(sid)
+        assert card.starred is True
+        assert card.to_descriptor()["starred"] is True
+
+        msg = await ws.receive_json(timeout=2)
+        assert msg["type"] == "card_updated"
+        assert msg["card_id"] == sid
+        assert msg["starred"] is True
+
+        # Toggle back off.
+        resp = await client.put(f"/api/cards/{sid}/state", json={"starred": False})
+        assert resp.status == 200
+        assert client.app["card_registry"].get_terminal(sid).starred is False
+        msg = await ws.receive_json(timeout=2)
+        assert msg["starred"] is False
+
+
+async def test_cards_state_put_rejects_non_bool_starred(aiohttp_client, app_factory):
+    """``starred`` must be a ``bool`` — strings / ints are rejected with 400."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    sid = (await resp.json())["session_id"]
+
+    resp = await client.put(f"/api/cards/{sid}/state", json={"starred": "yes"})
+    assert resp.status == 400
+
+    resp = await client.put(f"/api/cards/{sid}/state", json={"starred": 1})
     assert resp.status == 400
 
 

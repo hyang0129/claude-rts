@@ -62,9 +62,11 @@ class CardRegistry:
         here (see issue #238 / state-model.md).
 
         Each key in ``fields`` must appear in the card's
-        ``MUTABLE_FIELDS`` allowlist and its value must be a ``str`` (the
-        initial slice only covers string fields; Children 3/4 extend to
-        ``bool`` / ``int`` / ``float`` as needed).
+        ``MUTABLE_FIELDS`` allowlist. Allowed value types per field are
+        declared in ``MUTABLE_FIELD_TYPES`` on the card class (defaults to
+        ``str`` for any field not listed there). Child 3 extends this to
+        ``bool`` for ``starred``; Child 4 will extend to ``int`` / ``float``
+        for position / size.
 
         Returns the dict of fields that were actually applied.
 
@@ -79,14 +81,23 @@ class CardRegistry:
             raise LookupError(card_id)
 
         allowed = getattr(card, "MUTABLE_FIELDS", frozenset())
+        field_types: dict = getattr(card, "MUTABLE_FIELD_TYPES", {})
         applied: dict = {}
         for key, value in fields.items():
             if key not in allowed:
                 raise ValueError(f"field '{key}' is not mutable on card_type '{card.card_type}'")
-            # Initial allowlist (display_name, recovery_script) is str-only.
-            # When Children 3/4 add bool/int/float fields, extend this check.
-            if not isinstance(value, str):
-                raise ValueError(f"field '{key}' must be a string")
+            expected_type = field_types.get(key, str)
+            # ``bool`` is a subclass of ``int`` in Python — enforce exact type
+            # so a caller can't sneak a bool into an int field or vice-versa.
+            if expected_type is bool:
+                if not isinstance(value, bool):
+                    raise ValueError(f"field '{key}' must be a boolean")
+            elif expected_type is int:
+                if not isinstance(value, int) or isinstance(value, bool):
+                    raise ValueError(f"field '{key}' must be an integer")
+            elif not isinstance(value, expected_type):
+                type_name = getattr(expected_type, "__name__", str(expected_type))
+                raise ValueError(f"field '{key}' must be a {type_name}")
             setattr(card, key, value)
             applied[key] = value
 

@@ -403,7 +403,14 @@ class TestStarPersistence:
         assert text == "\u2605", "Star should be filled after resume"
 
     def test_star_state_in_canvas_json(self, page, backend_port):
-        """Canvas JSON correctly stores starred/unstarred state."""
+        """Canvas JSON no longer carries ``starred`` — it is server-owned.
+
+        Epic #236 child 3 (#239): ``saveLayout()`` filters to only starred
+        cards and does NOT serialise the ``starred`` key. Unstarred cards
+        are absent from the canvas JSON entirely; starred cards appear
+        without a ``starred`` field. The server's ``CardRegistry`` (and the
+        ``PUT /api/cards/{id}/state`` mutation path) is the sole authority.
+        """
         card_ids = get_terminal_card_ids(page)
         assert len(card_ids) >= 2
 
@@ -439,10 +446,13 @@ class TestStarPersistence:
         )
 
         terminal_cards = [c for c in canvas_json["cards"] if c.get("type") == "terminal"]
-        assert len(terminal_cards) > 0
-
-        has_unstarred = any(c.get("starred") is False for c in terminal_cards)
-        assert has_unstarred, "Expected at least one card with starred=false in canvas JSON"
+        # Only starred cards are persisted (unstarred ones are filtered by
+        # ``cards.filter(c => c.starred)`` in saveLayout()).
+        assert len(terminal_cards) > 0, "Expected at least one starred card in canvas JSON"
+        # ``starred`` is no longer client-serialised — none of the saved
+        # entries carry the key, in either truthy or falsy form.
+        for c in terminal_cards:
+            assert "starred" not in c, f"saveLayout() must not write 'starred' post-migration; got {c!r}"
 
 
 # ---------------------------------------------------------------------------

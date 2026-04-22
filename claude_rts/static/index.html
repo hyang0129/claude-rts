@@ -1165,11 +1165,12 @@ class Card {
     starBtn.style.cssText = 'background:none;border:none;cursor:pointer;font-size:14px;padding:0 4px;color:' + (this.starred ? '#f9e2af' : '#585b70');
     starBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      this.starred = !this.starred;
-      starBtn.textContent = this.starred ? '\u2605' : '\u2606';
-      starBtn.style.color = this.starred ? '#f9e2af' : '#585b70';
-      starBtn.title = this.starred ? 'Starred — will persist across reload' : 'Unstarred — will not persist across reload';
-      saveLayout();
+      // Epic #236 child 3: ``starred`` is server-owned. The click issues
+      // PUT /api/cards/{id}/state and does NOT mutate ``this.starred`` or
+      // the DOM synchronously — the server's ``card_updated`` broadcast
+      // (handled by applyStarredToCard) drives the re-render.
+      const next = !this.starred;
+      putCardState(this.id, { starred: next }).catch(err => console.error('star put failed:', err));
     });
     titlebar.appendChild(starBtn);
 
@@ -1387,8 +1388,11 @@ class Card {
     const data = { hub: this.hub, x: this.x, y: this.y, w: this.w, h: this.h, type: this.type, controlGroups: this.controlGroupNums.length > 0 ? [...this.controlGroupNums] : undefined };
     if (this.execCmd) data.exec = this.execCmd;
     if (this.sessionId) data.session_id = this.sessionId;
-    // Issue #151: persist starring, rename, recovery, stable identity
-    if (!this.starred) data.starred = false;
+    // Issue #151: persist rename, recovery, stable identity.
+    // Epic #236 child 3 (#239): ``starred`` is server-owned — it is NOT
+    // serialised into canvas JSON. The ``cards.filter(c => c.starred)`` in
+    // saveLayout() still filters correctly because ``c.starred`` now reads
+    // from server-pushed state.
     if (this.displayName) data.displayName = this.displayName;
     if (this.recoveryScript) data.recoveryScript = this.recoveryScript;
     if (this.cardUid) data.cardUid = this.cardUid;
@@ -1629,11 +1633,68 @@ class TerminalCard extends Card {
       this._renderDormant();
       return;
     }
+    this._activate();
+  }
+
+  // Live-terminal init path. Called from onInit() for starred cards and
+  // from _applyStarredBroadcast() when a dormant card is starred from
+  // another client. Idempotent guard via ``this.term``.
+  _activate() {
+    if (this.term) return; // already live
+    const body = this.el.querySelector(`[data-body="${this.id}"]`);
+    if (body) {
+      body.innerHTML = '';
+      body.style.cssText = '';
+    }
     this.initTerminal();
     this.connectWs();
     this.setupInput();
     this.setupResizeObserver();
     this.setupClaudeBtn();
+  }
+
+  // Apply a server-pushed ``starred`` update (from card_updated). Updates
+  // ``this.starred``, the star-glyph DOM, and drives the dormant↔live
+  // transition. This is the ONLY place outside the constructor /
+  // deserialiser where ``this.starred`` is assigned (epic #236 I-1).
+  _applyStarredBroadcast(next) {
+    const wasStarred = this.starred;
+    this.starred = !!next;
+
+    // Update star-button glyph / colour / tooltip.
+    const starBtn = this.el ? this.el.querySelector(`[data-star="${this.id}"]`) : null;
+    if (starBtn) {
+      starBtn.textContent = this.starred ? '\u2605' : '\u2606';
+      starBtn.style.color = this.starred ? '#f9e2af' : '#585b70';
+      starBtn.title = this.starred
+        ? 'Starred — will persist across reload'
+        : 'Unstarred — will not persist across reload';
+    }
+
+    // Drive dormant↔live transition.
+    if (this.starred && !wasStarred) {
+      this._activate();
+    } else if (!this.starred && wasStarred) {
+      this._deactivate();
+    }
+  }
+
+  // Live→dormant transition for remote un-star events.
+  _deactivate() {
+    // Tear down the live terminal, preserving the session on the server
+    // (kill_tmux=False default). The dormant placeholder is re-rendered
+    // so the card UI matches the fresh-load dormant look.
+    this._intentionalClose = true;
+    if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try { this.ws.close(); } catch (e) { /* ignore */ }
+    }
+    this.ws = null;
+    if (this.ro) { try { this.ro.disconnect(); } catch (e) { /* ignore */ } this.ro = null; }
+    if (this.term) { try { this.term.dispose(); } catch (e) { /* ignore */ } this.term = null; }
+    this.fitAddon = null;
+    this._intentionalClose = false;
+    this._renderDormant();
   }
 
   _renderDormant() {
@@ -1648,19 +1709,11 @@ class TerminalCard extends Card {
     resumeBtn.style.cssText = 'background:#313244;color:#cdd6f4;border:1px solid #585b70;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:13px;';
     resumeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      this.starred = true;
-      // Update star button
-      const starBtn = this.el.querySelector(`[data-star="${this.id}"]`);
-      if (starBtn) { starBtn.textContent = '\u2605'; starBtn.style.color = '#f9e2af'; starBtn.title = 'Starred — will persist across reload'; }
-      // Clear dormant body and init live terminal
-      body.innerHTML = '';
-      body.style.cssText = '';
-      this.initTerminal();
-      this.connectWs();
-      this.setupInput();
-      this.setupResizeObserver();
-      this.setupClaudeBtn();
-      saveLayout();
+      // Epic #236 child 3: Resume is a ``starred = true`` mutation — it
+      // round-trips through the server. The dormant→live transition
+      // (clearing the body, initTerminal, connectWs, etc.) is performed in
+      // applyStarredToCard when the ``card_updated`` broadcast arrives.
+      putCardState(this.id, { starred: true }).catch(err => console.error('resume put failed:', err));
     });
     body.appendChild(resumeBtn);
     this.updateState('dead');
@@ -3795,7 +3848,10 @@ async function handleControlCardCreated(msg) {
       x, y,
       w: desc.w || CARD_W,
       h: desc.h || CARD_H,
-      starred: desc.starred != null ? desc.starred : true,
+      // Epic #236 child 3: ``to_descriptor()`` always includes ``starred``
+      // (both True and False). The ``!= null`` fallback remains only for
+      // pre-epic descriptors that may predate the server-side field.
+      starred: desc.starred != null ? desc.starred : false,
       displayName: desc.display_name || '',
       recoveryScript: desc.recovery_script || '',
       cardUid: desc.cardUid || '',
@@ -3854,8 +3910,18 @@ const CARD_UPDATED_FIELD_HANDLERS = {
     const recoveryBtn = card.el ? card.el.querySelector(`[data-recovery="${card.id}"]`) : null;
     if (recoveryBtn) recoveryBtn.style.display = value ? 'inline' : 'none';
   },
-  // To add a new field (e.g. `starred` in Child 3, `x`/`y`/`w`/`h`/`z_order`
-  // in Child 4): add another entry here — one line reference per field.
+  // Epic #236 child 3 (#239): ``starred`` is server-owned. The applier
+  // updates the star glyph and drives the dormant↔live terminal transition.
+  starred(card, value) {
+    if (typeof card._applyStarredBroadcast === 'function') {
+      card._applyStarredBroadcast(value);
+    } else {
+      // Non-terminal cards: just mirror the field; no transition logic.
+      card.starred = !!value;
+    }
+  },
+  // To add a new field (e.g. `x`/`y`/`w`/`h`/`z_order` in Child 4): add
+  // another entry here — one line reference per field.
 };
 
 function handleControlCardUpdated(msg) {

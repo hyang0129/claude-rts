@@ -344,8 +344,38 @@ async def test_terminal_card_descriptor_omits_empty_display_name(monkeypatch):
     desc = card.to_descriptor()
     assert "display_name" not in desc
     assert "recovery_script" not in desc
+    # Epic #236 child 3 (#239): ``starred`` is always present in the
+    # descriptor — both ``True`` and ``False`` — so the client boot path
+    # reads the server's authoritative value instead of defaulting.
+    assert desc["starred"] is False
 
     await card.stop()
+    mgr.stop_all()
+
+
+async def test_terminal_card_starred_descriptor_round_trip(monkeypatch):
+    """``starred`` round-trips through ``to_descriptor`` in both states."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+
+    # Default (unstarred)
+    card = TerminalCard(session_manager=mgr, cmd="bash")
+    await card.start()
+    desc = card.to_descriptor()
+    assert desc["starred"] is False
+
+    # Mutated to starred (simulating apply_state_patch)
+    card.starred = True
+    desc = card.to_descriptor()
+    assert desc["starred"] is True
+
+    # Constructed as starred
+    card2 = TerminalCard(session_manager=mgr, cmd="bash", starred=True)
+    await card2.start()
+    assert card2.to_descriptor()["starred"] is True
+
+    await card.stop()
+    await card2.stop()
     mgr.stop_all()
 
 
