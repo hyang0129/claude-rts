@@ -3821,6 +3821,43 @@ function handleControlCardDeleted(msg) {
   updateHubCount();
 }
 
+// PUT /api/cards/{id}/state — the single server-owned-state mutation path
+// (epic #236 / issue #238). Every user action that mutates a server-owned
+// card field MUST round-trip through here; direct assignment to card
+// properties followed by local rendering is forbidden (see docs/state-model.md).
+async function putCardState(cardId, fields) {
+  const resp = await fetch(`/api/cards/${encodeURIComponent(cardId)}/state`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`putCardState ${cardId} failed: ${resp.status} ${text}`);
+  }
+  return resp.json();
+}
+
+// Field-dispatch table for card_updated broadcasts.
+//
+// To add a new server-owned field: add one entry here mapping the field name
+// to a (card, value) => void applier. Keep each applier self-contained — the
+// dispatcher below iterates every known field in the incoming message.
+const CARD_UPDATED_FIELD_HANDLERS = {
+  display_name(card, value) {
+    card.displayName = value;
+    const nameSpan = card.el ? card.el.querySelector(`[data-display-name="${card.id}"]`) : null;
+    if (nameSpan) nameSpan.textContent = value || card.hub;
+  },
+  recovery_script(card, value) {
+    card.recoveryScript = value;
+    const recoveryBtn = card.el ? card.el.querySelector(`[data-recovery="${card.id}"]`) : null;
+    if (recoveryBtn) recoveryBtn.style.display = value ? 'inline' : 'none';
+  },
+  // To add a new field (e.g. `starred` in Child 3, `x`/`y`/`w`/`h`/`z_order`
+  // in Child 4): add another entry here — one line reference per field.
+};
+
 function handleControlCardUpdated(msg) {
   const cardId = msg.card_id;
   if (!cardId) return;
@@ -3829,21 +3866,15 @@ function handleControlCardUpdated(msg) {
   const card = cards.find(c => c.sessionId === cardId);
   if (!card) return;
 
-  // Update display_name if present
-  if ('display_name' in msg) {
-    card.displayName = msg.display_name;
-    const nameSpan = card.el ? card.el.querySelector(`[data-display-name="${card.id}"]`) : null;
-    if (nameSpan) nameSpan.textContent = msg.display_name || card.hub;
+  let changed = false;
+  for (const [field, applier] of Object.entries(CARD_UPDATED_FIELD_HANDLERS)) {
+    if (field in msg) {
+      applier(card, msg[field]);
+      changed = true;
+    }
   }
 
-  // Update recovery_script if present
-  if ('recovery_script' in msg) {
-    card.recoveryScript = msg.recovery_script;
-    const recoveryBtn = card.el ? card.el.querySelector(`[data-recovery="${card.id}"]`) : null;
-    if (recoveryBtn) recoveryBtn.style.display = msg.recovery_script ? 'inline' : 'none';
-  }
-
-  saveLayout();
+  if (changed) saveLayout();
 }
 
 // ════════════════════════════════════════════

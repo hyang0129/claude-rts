@@ -628,6 +628,168 @@ async def test_ws_control_receives_card_updated_on_rename(aiohttp_client, app_fa
         assert msg["display_name"] == "Renamed"
 
 
+# ── Issue #238: generic PUT /api/cards/{id}/state endpoint ────────────────
+
+
+async def test_cards_state_put_patches_display_name_and_broadcasts(aiohttp_client, app_factory):
+    """PUT /api/cards/{id}/state applies partial dict, updates registry, broadcasts card_updated."""
+    client = await aiohttp_client(app_factory())
+    async with client.ws_connect("/ws/control") as ws:
+        resp = await client.post("/api/claude/terminal/create?cmd=bash")
+        data = await resp.json()
+        sid = data["session_id"]
+
+        # Drain card_created
+        await ws.receive_json(timeout=2)
+
+        resp = await client.put(
+            f"/api/cards/{sid}/state",
+            json={"display_name": "Renamed via generic"},
+        )
+        assert resp.status == 200
+        result = await resp.json()
+        assert result["status"] == "ok"
+        assert result["display_name"] == "Renamed via generic"
+
+        # CardRegistry has been mutated
+        card = client.app["card_registry"].get_terminal(sid)
+        assert card.display_name == "Renamed via generic"
+
+        # card_updated was broadcast
+        msg = await ws.receive_json(timeout=2)
+        assert msg["type"] == "card_updated"
+        assert msg["card_id"] == sid
+        assert msg["display_name"] == "Renamed via generic"
+
+
+async def test_cards_state_put_multiple_fields(aiohttp_client, app_factory):
+    """PUT /api/cards/{id}/state accepts multiple fields in one patch."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    sid = (await resp.json())["session_id"]
+
+    resp = await client.put(
+        f"/api/cards/{sid}/state",
+        json={"display_name": "DN", "recovery_script": "echo hi"},
+    )
+    assert resp.status == 200
+    result = await resp.json()
+    assert result["display_name"] == "DN"
+    assert result["recovery_script"] == "echo hi"
+
+    card = client.app["card_registry"].get_terminal(sid)
+    assert card.display_name == "DN"
+    assert card.recovery_script == "echo hi"
+
+
+async def test_cards_state_put_rejects_unknown_field(aiohttp_client, app_factory):
+    """PUT /api/cards/{id}/state returns 400 for fields outside the allowlist."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    sid = (await resp.json())["session_id"]
+
+    resp = await client.put(
+        f"/api/cards/{sid}/state",
+        json={"bogus_field": 1},
+    )
+    assert resp.status == 400
+    text = await resp.text()
+    assert "bogus_field" in text
+
+
+async def test_cards_state_put_rejects_non_string_value(aiohttp_client, app_factory):
+    """Allowlisted fields must be strings (initial slice); ints rejected with 400."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    sid = (await resp.json())["session_id"]
+
+    resp = await client.put(
+        f"/api/cards/{sid}/state",
+        json={"display_name": 123},
+    )
+    assert resp.status == 400
+
+
+async def test_cards_state_put_nonexistent_card(aiohttp_client, app_factory):
+    """PUT /api/cards/{id}/state on unknown card returns 404."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.put(
+        "/api/cards/nonexistent/state",
+        json={"display_name": "x"},
+    )
+    assert resp.status == 404
+
+
+async def test_cards_state_put_rejects_non_object_body(aiohttp_client, app_factory):
+    """PUT /api/cards/{id}/state with a non-object JSON body returns 400."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    sid = (await resp.json())["session_id"]
+
+    resp = await client.put(
+        f"/api/cards/{sid}/state",
+        data="[1, 2, 3]",
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status == 400
+
+
+async def test_cards_state_put_empty_patch_is_noop(aiohttp_client, app_factory):
+    """Empty patch returns 200 and does not broadcast."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    sid = (await resp.json())["session_id"]
+
+    resp = await client.put(f"/api/cards/{sid}/state", json={})
+    assert resp.status == 200
+    result = await resp.json()
+    assert result["status"] == "ok"
+
+
+async def test_legacy_rename_still_broadcasts_via_generic_path(aiohttp_client, app_factory):
+    """Legacy /rename URL continues to work and broadcasts card_updated identically."""
+    client = await aiohttp_client(app_factory())
+    async with client.ws_connect("/ws/control") as ws:
+        resp = await client.post("/api/claude/terminal/create?cmd=bash")
+        sid = (await resp.json())["session_id"]
+        await ws.receive_json(timeout=2)  # drain card_created
+
+        resp = await client.put(
+            f"/api/claude/terminal/{sid}/rename",
+            json={"display_name": "Legacy"},
+        )
+        assert resp.status == 200
+        result = await resp.json()
+        assert result["display_name"] == "Legacy"
+
+        msg = await ws.receive_json(timeout=2)
+        assert msg["type"] == "card_updated"
+        assert msg["card_id"] == sid
+        assert msg["display_name"] == "Legacy"
+
+
+async def test_legacy_recovery_script_still_broadcasts(aiohttp_client, app_factory):
+    """Legacy /recovery-script URL continues to work via the generic path."""
+    client = await aiohttp_client(app_factory())
+    async with client.ws_connect("/ws/control") as ws:
+        resp = await client.post("/api/claude/terminal/create?cmd=bash")
+        sid = (await resp.json())["session_id"]
+        await ws.receive_json(timeout=2)  # drain card_created
+
+        resp = await client.put(
+            f"/api/claude/terminal/{sid}/recovery-script",
+            json={"recovery_script": "echo recovered"},
+        )
+        assert resp.status == 200
+        result = await resp.json()
+        assert result["recovery_script"] == "echo recovered"
+
+        msg = await ws.receive_json(timeout=2)
+        assert msg["type"] == "card_updated"
+        assert msg["card_id"] == sid
+        assert msg["recovery_script"] == "echo recovered"
+
+
 # ── Ephemeral session tests (#193) ────────────────────────────────────────────
 
 

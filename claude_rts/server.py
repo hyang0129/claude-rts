@@ -1900,30 +1900,82 @@ async def claude_terminal_delete(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
-async def claude_terminal_rename(request: web.Request) -> web.Response:
-    """PUT /api/claude/terminal/{id}/rename — set a display name."""
-    card_id = request.match_info["id"]
-    card_registry: CardRegistry = request.app["card_registry"]
-    card = card_registry.get_terminal(card_id)
-    if not card:
-        raise web.HTTPNotFound(text="Terminal not found")
+async def _apply_card_state_patch(request: web.Request, card_id: str, fields: dict) -> dict:
+    """Shared body of the generic + legacy state-mutation handlers.
 
+    This is the single authoritative code path for mutating server-owned card
+    state (see ``docs/state-model.md`` and epic #236 / issue #238). Both the
+    generic ``PUT /api/cards/{id}/state`` handler and the legacy
+    ``/rename`` + ``/recovery-script`` aliases funnel through here so exactly
+    one implementation performs allowlist validation, attribute mutation via
+    ``CardRegistry.apply_state_patch``, and the ``card_updated`` broadcast.
+
+    Raises ``web.HTTPNotFound`` / ``web.HTTPBadRequest`` for the caller to
+    propagate. Returns the dict of applied fields.
+    """
+    card_registry: CardRegistry = request.app["card_registry"]
+    try:
+        applied = card_registry.apply_state_patch(card_id, fields)
+    except LookupError:
+        raise web.HTTPNotFound(text="Card not found")
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc))
+
+    if applied:
+        await _broadcast_card_updated(request.app, card_id, applied)
+    return applied
+
+
+async def cards_state_put(request: web.Request) -> web.Response:
+    """PUT /api/cards/{id}/state — generic server-owned state mutation.
+
+    Accepts a partial JSON dict of card state fields. Each field is validated
+    against the target card's ``MUTABLE_FIELDS`` allowlist; unknown fields get
+    HTTP 400. On success the patched fields are broadcast to every
+    ``/ws/control`` client via ``card_updated``.
+
+    This endpoint is the structural embodiment of Decision Prior DP-2 from
+    epic #236 — a single generic mutation path, not per-field endpoints.
+    """
+    card_id = request.match_info["id"]
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="Invalid JSON")
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(text="Body must be a JSON object")
+
+    applied = await _apply_card_state_patch(request, card_id, body)
+    logger.info("cards_state_put: {} patched fields={}", card_id, list(applied.keys()))
+    return web.json_response({"status": "ok", **applied})
+
+
+async def claude_terminal_rename(request: web.Request) -> web.Response:
+    """PUT /api/claude/terminal/{id}/rename — legacy alias for display_name.
+
+    Thin wrapper around the generic ``PUT /api/cards/{id}/state`` path.
+    Retained for one release per epic #236 invariant I-6 so MCP callers
+    (``mcp_server.py``) keep working. The body ``{"display_name": ...}`` is
+    translated into the generic patch shape and delegated to the shared
+    ``_apply_card_state_patch`` helper.
+    """
+    card_id = request.match_info["id"]
     try:
         body = await request.json()
     except json.JSONDecodeError:
         raise web.HTTPBadRequest(text="Invalid JSON")
 
     display_name = body.get("display_name", "")
-    if not isinstance(display_name, str):
-        raise web.HTTPBadRequest(text="'display_name' must be a string")
+    # Preserve the legacy 404-for-terminal-only semantics so existing tests
+    # keep passing: if the card exists but isn't a terminal, the legacy URL
+    # must still report "not found".
+    card_registry: CardRegistry = request.app["card_registry"]
+    if card_registry.get_terminal(card_id) is None:
+        raise web.HTTPNotFound(text="Terminal not found")
 
-    card.display_name = display_name
+    applied = await _apply_card_state_patch(request, card_id, {"display_name": display_name})
     logger.info("claude_terminal_rename: {} -> {!r}", card_id, display_name)
-
-    # Broadcast card_updated via control WS
-    await _broadcast_card_updated(request.app, card_id, {"display_name": display_name})
-
-    return web.json_response({"status": "ok", "display_name": display_name})
+    return web.json_response({"status": "ok", "display_name": applied.get("display_name", display_name)})
 
 
 async def claude_terminal_recovery_get(request: web.Request) -> web.Response:
@@ -1938,29 +1990,25 @@ async def claude_terminal_recovery_get(request: web.Request) -> web.Response:
 
 
 async def claude_terminal_recovery_put(request: web.Request) -> web.Response:
-    """PUT /api/claude/terminal/{id}/recovery-script — set recovery script."""
-    card_id = request.match_info["id"]
-    card_registry: CardRegistry = request.app["card_registry"]
-    card = card_registry.get_terminal(card_id)
-    if not card:
-        raise web.HTTPNotFound(text="Terminal not found")
+    """PUT /api/claude/terminal/{id}/recovery-script — legacy alias for recovery_script.
 
+    Thin wrapper around the generic ``PUT /api/cards/{id}/state`` path.
+    Retained for one release per epic #236 invariant I-6.
+    """
+    card_id = request.match_info["id"]
     try:
         body = await request.json()
     except json.JSONDecodeError:
         raise web.HTTPBadRequest(text="Invalid JSON")
 
     script = body.get("recovery_script", "")
-    if not isinstance(script, str):
-        raise web.HTTPBadRequest(text="'recovery_script' must be a string")
+    card_registry: CardRegistry = request.app["card_registry"]
+    if card_registry.get_terminal(card_id) is None:
+        raise web.HTTPNotFound(text="Terminal not found")
 
-    card.recovery_script = script
+    applied = await _apply_card_state_patch(request, card_id, {"recovery_script": script})
     logger.info("claude_terminal_recovery_put: {} -> {!r}", card_id, script[:80])
-
-    # Broadcast card_updated via control WS
-    await _broadcast_card_updated(request.app, card_id, {"recovery_script": script})
-
-    return web.json_response({"status": "ok", "recovery_script": script})
+    return web.json_response({"status": "ok", "recovery_script": applied.get("recovery_script", script)})
 
 
 async def claude_terminals_list(request: web.Request) -> web.Response:
@@ -2346,6 +2394,9 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_get("/api/canvases/{name}", canvas_get_handler)
     app.router.add_put("/api/canvases/{name}", canvas_put_handler)
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
+
+    # Generic card state mutation (epic #236 / issue #238 — single mutation path)
+    app.router.add_put("/api/cards/{id}/state", cards_state_put)
     app.router.add_get("/api/widgets/system-info", widget_system_info_handler)
     app.router.add_get("/api/widgets/container-stats", widget_container_stats_handler)
 

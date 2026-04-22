@@ -18,6 +18,10 @@ class TerminalCard(BaseCard):
     card_type: str = "terminal"
     hidden: bool = False
 
+    # Server-owned fields that ``PUT /api/cards/{id}/state`` may mutate.
+    # See ``BaseCard.MUTABLE_FIELDS`` for the contract.
+    MUTABLE_FIELDS: frozenset[str] = frozenset({"display_name", "recovery_script"})
+
     def __init__(
         self,
         session_manager,

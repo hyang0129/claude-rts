@@ -53,6 +53,47 @@ class CardRegistry:
         """Look up a card by id."""
         return self._cards.get(card_id)
 
+    def apply_state_patch(self, card_id: str, fields: dict) -> dict:
+        """Apply a partial state patch to the card with the given id.
+
+        This is the **sole** attribute-mutation path for server-owned card
+        fields — the generic ``PUT /api/cards/{id}/state`` handler and the
+        legacy ``/rename`` + ``/recovery-script`` aliases all funnel through
+        here (see issue #238 / state-model.md).
+
+        Each key in ``fields`` must appear in the card's
+        ``MUTABLE_FIELDS`` allowlist and its value must be a ``str`` (the
+        initial slice only covers string fields; Children 3/4 extend to
+        ``bool`` / ``int`` / ``float`` as needed).
+
+        Returns the dict of fields that were actually applied.
+
+        Raises:
+            LookupError: card_id is not in the registry.
+            ValueError: a field is not in the card's allowlist or has the
+                wrong type. The message identifies the offending field so
+                callers can surface a structured 400.
+        """
+        card = self._cards.get(card_id)
+        if card is None:
+            raise LookupError(card_id)
+
+        allowed = getattr(card, "MUTABLE_FIELDS", frozenset())
+        applied: dict = {}
+        for key, value in fields.items():
+            if key not in allowed:
+                raise ValueError(f"field '{key}' is not mutable on card_type '{card.card_type}'")
+            # Initial allowlist (display_name, recovery_script) is str-only.
+            # When Children 3/4 add bool/int/float fields, extend this check.
+            if not isinstance(value, str):
+                raise ValueError(f"field '{key}' must be a string")
+            setattr(card, key, value)
+            applied[key] = value
+
+        if applied:
+            logger.debug("CardRegistry: patched card '{}' fields={}", card_id, list(applied.keys()))
+        return applied
+
     def get_terminal(self, session_id: str) -> TerminalCard | None:
         """Look up a TerminalCard by session_id (convenience)."""
         card = self._cards.get(session_id)

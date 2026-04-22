@@ -16,6 +16,18 @@ class BaseCard(abc.ABC):
     card_type: str = "base"
     hidden: bool = False  # ServiceCard overrides to True
 
+    # Allowlist of attribute names that may be mutated through
+    # ``CardRegistry.apply_state_patch`` (the single server-owned mutation path
+    # defined by epic #236 / issue #238). Subclasses extend this set with any
+    # additional server-owned fields. Fields outside this set are rejected with
+    # HTTP 400 by ``PUT /api/cards/{id}/state``.
+    #
+    # To add a new server-owned field: add its name here (or on a subclass),
+    # ensure it is a plain ``str`` attribute on the card instance, and add a
+    # one-line dispatch entry in ``handleControlCardUpdated`` in
+    # ``static/index.html``.
+    MUTABLE_FIELDS: frozenset[str] = frozenset()
+
     def __init__(self, card_id: str | None = None, bus: EventBus | None = None):
         self._id = card_id or uuid.uuid4().hex[:8]
         self._bus = bus
