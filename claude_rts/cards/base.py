@@ -35,6 +35,18 @@ class BaseCard(abc.ABC):
         # in ``MUTABLE_FIELDS`` on the subclass that wants it mutable through
         # ``PUT /api/cards/{id}/state`` (see docs/state-model.md).
         self.starred: bool = False
+        # Epic #236 child 4 (#240): position / size / z-order are server-owned.
+        # Mutated only through ``CardRegistry.apply_state_patch`` (drag/resize/
+        # focus all PUT to ``/api/cards/{id}/state`` on ``pointerup``); the
+        # ``card_updated`` broadcast carries them to every connected client.
+        # Defaults are 0; the spawn handler back-fills real values from the
+        # query params, and the client renders optimistically during the
+        # gesture and only commits on mouseup (DP-4).
+        self.x: int = 0
+        self.y: int = 0
+        self.w: int = 0
+        self.h: int = 0
+        self.z_order: int = 0
 
     @property
     def id(self) -> str:

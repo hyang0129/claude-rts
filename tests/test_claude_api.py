@@ -798,6 +798,147 @@ async def test_cards_state_put_empty_patch_is_noop(aiohttp_client, app_factory):
     assert result["status"] == "ok"
 
 
+# ── Epic #236 child 4 (#240): position / size / z-order migration ────────
+
+
+async def test_cards_state_put_patches_position_and_broadcasts(aiohttp_client, app_factory):
+    """PUT /api/cards/{id}/state accepts integer ``x`` / ``y`` and broadcasts.
+
+    Mirrors the starred test (#239): mutates CardRegistry, broadcasts
+    ``card_updated`` carrying the new position, and surfaces the values
+    through ``to_descriptor`` so a reconnecting client sees them.
+    """
+    client = await aiohttp_client(app_factory())
+    async with client.ws_connect("/ws/control") as ws:
+        resp = await client.post("/api/claude/terminal/create?cmd=bash")
+        sid = (await resp.json())["session_id"]
+        await ws.receive_json(timeout=2)  # drain card_created
+
+        resp = await client.put(f"/api/cards/{sid}/state", json={"x": 400, "y": 600})
+        assert resp.status == 200
+        result = await resp.json()
+        assert result["status"] == "ok"
+        assert result["x"] == 400
+        assert result["y"] == 600
+
+        card = client.app["card_registry"].get_terminal(sid)
+        assert card.x == 400
+        assert card.y == 600
+        desc = card.to_descriptor()
+        assert desc["x"] == 400
+        assert desc["y"] == 600
+
+        msg = await ws.receive_json(timeout=2)
+        assert msg["type"] == "card_updated"
+        assert msg["card_id"] == sid
+        assert msg["x"] == 400
+        assert msg["y"] == 600
+
+
+async def test_cards_state_put_patches_size_and_broadcasts(aiohttp_client, app_factory):
+    """PUT /api/cards/{id}/state accepts integer ``w`` / ``h`` and broadcasts."""
+    client = await aiohttp_client(app_factory())
+    async with client.ws_connect("/ws/control") as ws:
+        resp = await client.post("/api/claude/terminal/create?cmd=bash")
+        sid = (await resp.json())["session_id"]
+        await ws.receive_json(timeout=2)
+
+        resp = await client.put(f"/api/cards/{sid}/state", json={"w": 800, "h": 500})
+        assert resp.status == 200
+        result = await resp.json()
+        assert result["w"] == 800
+        assert result["h"] == 500
+
+        card = client.app["card_registry"].get_terminal(sid)
+        assert card.w == 800
+        assert card.h == 500
+
+        msg = await ws.receive_json(timeout=2)
+        assert msg["type"] == "card_updated"
+        assert msg["w"] == 800
+        assert msg["h"] == 500
+
+
+async def test_cards_state_put_patches_z_order_and_broadcasts(aiohttp_client, app_factory):
+    """PUT /api/cards/{id}/state accepts integer ``z_order`` and broadcasts."""
+    client = await aiohttp_client(app_factory())
+    async with client.ws_connect("/ws/control") as ws:
+        resp = await client.post("/api/claude/terminal/create?cmd=bash")
+        sid = (await resp.json())["session_id"]
+        await ws.receive_json(timeout=2)
+
+        resp = await client.put(f"/api/cards/{sid}/state", json={"z_order": 42})
+        assert resp.status == 200
+        result = await resp.json()
+        assert result["z_order"] == 42
+
+        assert client.app["card_registry"].get_terminal(sid).z_order == 42
+
+        msg = await ws.receive_json(timeout=2)
+        assert msg["type"] == "card_updated"
+        assert msg["z_order"] == 42
+
+
+async def test_cards_state_put_rejects_non_int_position(aiohttp_client, app_factory):
+    """``x`` / ``y`` / ``w`` / ``h`` / ``z_order`` must be ``int`` — strings, floats,
+    and bools are rejected with 400 (bool subclass-of-int is explicitly excluded).
+    """
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    sid = (await resp.json())["session_id"]
+
+    for bad in [{"x": "100"}, {"y": 1.5}, {"w": True}, {"h": None}, {"z_order": "5"}]:
+        resp = await client.put(f"/api/cards/{sid}/state", json=bad)
+        assert resp.status == 400, f"expected 400 for {bad}, got {resp.status}"
+
+
+async def test_cards_state_put_position_size_zorder_combined(aiohttp_client, app_factory):
+    """All five fields can be PUT in a single patch."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    sid = (await resp.json())["session_id"]
+
+    resp = await client.put(
+        f"/api/cards/{sid}/state",
+        json={"x": 10, "y": 20, "w": 300, "h": 400, "z_order": 7},
+    )
+    assert resp.status == 200
+    result = await resp.json()
+    assert result["x"] == 10
+    assert result["y"] == 20
+    assert result["w"] == 300
+    assert result["h"] == 400
+    assert result["z_order"] == 7
+
+    card = client.app["card_registry"].get_terminal(sid)
+    assert (card.x, card.y, card.w, card.h, card.z_order) == (10, 20, 300, 400, 7)
+
+
+async def test_terminal_card_position_layout_backfill(aiohttp_client, app_factory):
+    """Layout-dict construction back-fills first-class x/y/w/h on the card.
+
+    Verifies the spawn handler's ``layout={...}`` query-param parsing populates
+    the new server-owned attributes (not just the legacy ``self.layout`` dict).
+    """
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash&x=150&y=250&w=700&h=450")
+    assert resp.status == 200
+    sid = (await resp.json())["session_id"]
+
+    card = client.app["card_registry"].get_terminal(sid)
+    assert card.x == 150
+    assert card.y == 250
+    assert card.w == 700
+    assert card.h == 450
+    desc = card.to_descriptor()
+    assert desc["x"] == 150
+    assert desc["y"] == 250
+    assert desc["w"] == 700
+    assert desc["h"] == 450
+    # z_order defaults to 0 when not specified at construction time.
+    assert desc["z_order"] == 0
+
+
 async def test_legacy_rename_still_broadcasts_via_generic_path(aiohttp_client, app_factory):
     """Legacy /rename URL continues to work and broadcasts card_updated identically."""
     client = await aiohttp_client(app_factory())

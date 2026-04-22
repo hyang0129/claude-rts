@@ -20,10 +20,31 @@ class TerminalCard(BaseCard):
 
     # Server-owned fields that ``PUT /api/cards/{id}/state`` may mutate.
     # See ``BaseCard.MUTABLE_FIELDS`` for the contract.
-    MUTABLE_FIELDS: frozenset[str] = frozenset({"display_name", "recovery_script", "starred"})
+    MUTABLE_FIELDS: frozenset[str] = frozenset(
+        {
+            "display_name",
+            "recovery_script",
+            "starred",
+            # Epic #236 child 4 (#240): position / size / z-order are
+            # server-owned and committed on drag/resize/focus mouseup.
+            "x",
+            "y",
+            "w",
+            "h",
+            "z_order",
+        }
+    )
     # Per-field expected type for ``CardRegistry.apply_state_patch`` validation.
-    # Fields not listed here default to ``str``. Child 3 adds ``starred: bool``.
-    MUTABLE_FIELD_TYPES: dict = {"starred": bool}
+    # Fields not listed here default to ``str``. Child 3 adds ``starred: bool``;
+    # child 4 adds ``x``/``y``/``w``/``h``/``z_order`` as ``int``.
+    MUTABLE_FIELD_TYPES: dict = {
+        "starred": bool,
+        "x": int,
+        "y": int,
+        "w": int,
+        "h": int,
+        "z_order": int,
+    }
 
     def __init__(
         self,
@@ -45,7 +66,19 @@ class TerminalCard(BaseCard):
         self.hub = hub
         self.container = container
         self._session = None  # set by start()
-        self.layout = layout or {}  # optional {x, y, w, h} hints for frontend
+        # Epic #236 child 4 (#240): the legacy ``layout`` dict is read **once**
+        # at construction time as an initialisation source for the new
+        # first-class server-owned position/size attributes (declared on
+        # ``BaseCard``). After this point ``self.layout`` is retained for
+        # backward compatibility with any direct readers but the authoritative
+        # values live in ``self.x/y/w/h/z_order``. Drag/resize/focus on the
+        # client commit through ``PUT /api/cards/{id}/state``.
+        self.layout = layout or {}
+        if self.layout:
+            for _field in ("x", "y", "w", "h", "z_order"):
+                _val = self.layout.get(_field)
+                if isinstance(_val, int) and not isinstance(_val, bool):
+                    setattr(self, _field, _val)
         self.display_name = display_name or ""
         self.recovery_script = recovery_script or ""
         # Epic #236 child 3: ``starred`` is server-owned (see docs/state-model.md).
@@ -68,6 +101,15 @@ class TerminalCard(BaseCard):
             # False — so the client boot path can use it as the authoritative
             # value without needing to fall back to a legacy default.
             "starred": bool(self.starred),
+            # Epic #236 child 4 (#240): position / size / z-order are always
+            # included as first-class fields. The client boot path uses these
+            # as authoritative; legacy readers that previously consumed the
+            # ``layout`` dict overlay still see the same keys.
+            "x": int(self.x),
+            "y": int(self.y),
+            "w": int(self.w),
+            "h": int(self.h),
+            "z_order": int(self.z_order),
         }
         if self.hub:
             desc["hub"] = self.hub
@@ -79,8 +121,6 @@ class TerminalCard(BaseCard):
             desc["display_name"] = self.display_name
         if self.recovery_script:
             desc["recovery_script"] = self.recovery_script
-        if self.layout:
-            desc.update(self.layout)
         return desc
 
     # ── Lifecycle ──────────────────────────────────────────────────────
