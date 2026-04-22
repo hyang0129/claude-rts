@@ -1119,10 +1119,15 @@ class Card {
     this.type = type || 'base';
     this.hub = hub;
     this.container = container;
-    this.x = x;
-    this.y = y;
+    // Epic #236 child 4 (#240): position is server-owned. Defaults guard
+    // against deserialised entries that omit ``x``/``y`` (post-strip canvas
+    // JSON). The server's ``card_updated`` broadcast will overwrite these
+    // with the authoritative geometry shortly after construction.
+    this.x = (typeof x === 'number') ? x : 0;
+    this.y = (typeof y === 'number') ? y : 0;
     this.w = w || CARD_W;
     this.h = h || CARD_H;
+    this.zOrder = 0; // updated by focus-click and ``card_updated`` broadcasts
     this.symbol = symbol;
     this.execCmd = null; // overridden by subclasses if needed
     this.state = 'connecting';
@@ -1267,10 +1272,24 @@ class Card {
 
     this.el = el;
 
-    // Focus on click
+    // Focus on click. Epic #236 child 4 (#240): z-order is server-owned.
+    // We render optimistically (++Card.maxZ + zIndex) so focus feels instant,
+    // then PUT the new z_order through the generic state endpoint. The
+    // ``card_updated`` broadcast confirms on the authoring device (no-op
+    // because the local value already matches) and teleports on every other
+    // connected client.
     el.addEventListener('pointerdown', () => {
       focusCard(this.id);
-      el.style.zIndex = ++Card.maxZ;
+      const nextZ = ++Card.maxZ;
+      el.style.zIndex = nextZ;
+      this.zOrder = nextZ;
+      // Only TerminalCards currently flow through the server-state path
+      // (sessionId is set after the WS handshake). Skip the PUT before the
+      // session has registered, and for non-terminal cards (loader, blueprint).
+      if (this.type === 'terminal' && this.sessionId) {
+        putCardState(this.sessionId, { z_order: nextZ }).catch(err =>
+          console.error('z_order put failed:', err));
+      }
     });
 
     // Double-click anywhere on card to zoom-to-fill
@@ -1321,7 +1340,18 @@ class Card {
       [this.x, this.y] = snapPos(this.x, this.y, this.w, this.h, this.id);
       this.el.style.left = this.x + 'px';
       this.el.style.top = this.y + 'px';
-      saveLayout();
+      // Epic #236 child 4 (#240): commit position to the server on mouseup
+      // (DP-4 — single PUT per gesture). The authoring device already
+      // rendered the final position optimistically during ``onMove``; the
+      // ``card_updated`` broadcast teleports the non-authoring devices.
+      if (this.type === 'terminal' && this.sessionId) {
+        putCardState(this.sessionId, { x: Math.round(this.x), y: Math.round(this.y) })
+          .catch(err => console.error('drag put failed:', err));
+      } else {
+        // Non-terminal cards (loader, blueprint, etc.) don't yet flow through
+        // the server-state path — fall back to layout JSON for those.
+        saveLayout();
+      }
     };
 
     titlebar.addEventListener('pointerdown', (e) => {
@@ -1356,7 +1386,15 @@ class Card {
     const onUp = () => {
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
-      saveLayout();
+      // Epic #236 child 4 (#240): commit size to the server on mouseup.
+      // Same pattern as drag — optimistic during gesture, single PUT on
+      // pointerup, broadcast teleports non-authoring devices.
+      if (this.type === 'terminal' && this.sessionId) {
+        putCardState(this.sessionId, { w: Math.round(this.w), h: Math.round(this.h) })
+          .catch(err => console.error('resize put failed:', err));
+      } else {
+        saveLayout();
+      }
     };
 
     handle.addEventListener('pointerdown', (e) => {
@@ -1385,7 +1423,13 @@ class Card {
   }
 
   serialize() {
-    const data = { hub: this.hub, x: this.x, y: this.y, w: this.w, h: this.h, type: this.type, controlGroups: this.controlGroupNums.length > 0 ? [...this.controlGroupNums] : undefined };
+    // Epic #236 child 4 (#240): ``x``/``y``/``w``/``h`` are server-owned and
+    // are NOT serialised into canvas JSON. The authoritative values live in
+    // ``CardRegistry`` and are surfaced through ``to_descriptor()`` on boot
+    // (and through ``card_updated`` thereafter). After this slice
+    // ``saveLayout()`` writes only layout-neutral metadata; child 5 will
+    // delete ``saveLayout()`` outright.
+    const data = { hub: this.hub, type: this.type, controlGroups: this.controlGroupNums.length > 0 ? [...this.controlGroupNums] : undefined };
     if (this.execCmd) data.exec = this.execCmd;
     if (this.sessionId) data.session_id = this.sessionId;
     // Issue #151: persist rename, recovery, stable identity.
@@ -3920,9 +3964,46 @@ const CARD_UPDATED_FIELD_HANDLERS = {
       card.starred = !!value;
     }
   },
-  // To add a new field (e.g. `x`/`y`/`w`/`h`/`z_order` in Child 4): add
-  // another entry here — one line reference per field.
+  // Epic #236 child 4 (#240): position / size / z-order. The authoring
+  // device already rendered optimistically during the gesture, so applying
+  // the broadcast on the same device is a harmless no-op (values already
+  // match). On any other connected device, this branch teleports the card
+  // to its new geometry within 1 second of the originating ``pointerup``.
+  x(card, value) {
+    if (typeof value !== 'number') return;
+    card.x = value;
+    if (card.el) card.el.style.left = value + 'px';
+  },
+  y(card, value) {
+    if (typeof value !== 'number') return;
+    card.y = value;
+    if (card.el) card.el.style.top = value + 'px';
+  },
+  w(card, value) {
+    if (typeof value !== 'number') return;
+    card.w = value;
+    if (card.el) card.el.style.width = value + 'px';
+  },
+  h(card, value) {
+    if (typeof value !== 'number') return;
+    card.h = value;
+    if (card.el) card.el.style.height = value + 'px';
+  },
+  z_order(card, value) {
+    if (typeof value !== 'number') return;
+    card.zOrder = value;
+    if (card.el) card.el.style.zIndex = value;
+    // Keep ``Card.maxZ`` monotonic across clients so a subsequent local
+    // focus on this device does not produce a z_order lower than the
+    // one we just received from the authoring device.
+    if (value > Card.maxZ) Card.maxZ = value;
+  },
 };
+
+// Fields whose application requires a minimap redraw (geometry-affecting).
+// Listed explicitly rather than redrawing on every broadcast so cheap fields
+// like ``display_name`` don't trigger canvas work.
+const _GEOMETRY_FIELDS = new Set(['x', 'y', 'w', 'h']);
 
 function handleControlCardUpdated(msg) {
   const cardId = msg.card_id;
@@ -3933,12 +4014,19 @@ function handleControlCardUpdated(msg) {
   if (!card) return;
 
   let changed = false;
+  let geometryChanged = false;
   for (const [field, applier] of Object.entries(CARD_UPDATED_FIELD_HANDLERS)) {
     if (field in msg) {
       applier(card, msg[field]);
       changed = true;
+      if (_GEOMETRY_FIELDS.has(field)) geometryChanged = true;
     }
   }
+
+  // Epic #236 child 4 (#240): refresh the minimap when geometry changes
+  // (drag/resize broadcasts) so the non-authoring device's overview pane
+  // tracks card movement live.
+  if (geometryChanged && typeof drawMinimap === 'function') drawMinimap();
 
   if (changed) saveLayout();
 }
