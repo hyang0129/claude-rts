@@ -20,7 +20,10 @@ class TerminalCard(BaseCard):
 
     # Server-owned fields that ``PUT /api/cards/{id}/state`` may mutate.
     # See ``BaseCard.MUTABLE_FIELDS`` for the contract.
-    MUTABLE_FIELDS: frozenset[str] = frozenset({"display_name", "recovery_script"})
+    MUTABLE_FIELDS: frozenset[str] = frozenset({"display_name", "recovery_script", "starred"})
+    # Per-field expected type for ``CardRegistry.apply_state_patch`` validation.
+    # Fields not listed here default to ``str``. Child 3 adds ``starred: bool``.
+    MUTABLE_FIELD_TYPES: dict = {"starred": bool}
 
     def __init__(
         self,
@@ -32,6 +35,7 @@ class TerminalCard(BaseCard):
         layout: dict | None = None,
         display_name: str | None = None,
         recovery_script: str | None = None,
+        starred: bool = False,
     ):
         # card_id is set *after* start() when we know the session_id,
         # unless the caller supplies one (reconnect path).
@@ -44,6 +48,10 @@ class TerminalCard(BaseCard):
         self.layout = layout or {}  # optional {x, y, w, h} hints for frontend
         self.display_name = display_name or ""
         self.recovery_script = recovery_script or ""
+        # Epic #236 child 3: ``starred`` is server-owned (see docs/state-model.md).
+        # Mutated only through ``CardRegistry.apply_state_patch`` and broadcast
+        # via ``card_updated``; never assigned directly by the client.
+        self.starred = bool(starred)
 
     # ── Descriptor serialization ───────────────────────────────────────
 
@@ -56,6 +64,10 @@ class TerminalCard(BaseCard):
         desc: dict = {
             "type": self.card_type,
             "session_id": self.id,
+            # Epic #236 child 3: ``starred`` is always included — both True and
+            # False — so the client boot path can use it as the authoritative
+            # value without needing to fall back to a legacy default.
+            "starred": bool(self.starred),
         }
         if self.hub:
             desc["hub"] = self.hub
