@@ -73,36 +73,17 @@ def get_first_terminal_session_id(page):
 
 
 def reload_page(page, backend_port):
-    """Save layout, reload, and wait for cards to render.
+    """Reload and wait for cards to render.
 
-    Save via saveLayout() and poll the canvas JSON endpoint to confirm the
-    save has been persisted before reloading — this replaces a blind 500ms
-    sleep with a condition on the observable save completion.  After
-    reload, wait on ``window.__claudeRtsBootComplete`` (set at the end of
-    the boot IIFE) instead of a blind 3-second sleep.
+    Epic #236 child 5 (#241/#247) made canvas JSON server-authored via the
+    ``CardRegistry`` write-through hook, so the client no longer saves
+    layout before reload — every prior mutation (star click, drag, rename)
+    already round-tripped through ``PUT /api/cards/{id}/state`` and the
+    server has persisted the snapshot synchronously by the time this
+    helper runs. We wait on ``window.__claudeRtsBootComplete`` (set at the
+    end of the boot IIFE) to confirm the reloaded page has hydrated from
+    the server snapshot.
     """
-    # saveLayout() is fire-and-forget (returns void, catches fetch errors
-    # internally).  Call it directly here so the PUT request is awaited
-    # before we navigate away — this replaces a blind 500ms sleep that was
-    # intended to let the background PUT settle.
-    page.evaluate(
-        """async () => {
-        const data = {
-            name: currentCanvasName,
-            canvas_size: [CANVAS_W, CANVAS_H],
-            cards: cards.map(c => c.serialize()),
-        };
-        const resp = await fetch(
-            `/api/canvases/${encodeURIComponent(currentCanvasName)}`,
-            {
-                method: 'PUT',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(data),
-            }
-        );
-        if (!resp.ok) throw new Error(`saveLayout failed: ${resp.status}`);
-    }"""
-    )
     page.goto(f"http://localhost:{backend_port}")
     page.wait_for_load_state("networkidle")
     page.wait_for_selector("#canvas", timeout=15000)
@@ -182,31 +163,21 @@ def get_star_text(page, card_id):
 
 
 def save_layout_and_wait(page):
-    """Issue the canvas PUT directly and await the response.
+    """No-op after epic #236 child 5 — canvas JSON is server-authored.
 
-    ``saveLayout()`` in index.html is fire-and-forget; tests previously
-    slept 500ms to let the PUT settle.  Replicating the PUT here and
-    awaiting it is both faster and guarantees the server has persisted
-    the layout before the caller reads it back.
+    Every user-visible mutation (star click, drag, resize, rename) now
+    round-trips through ``PUT /api/cards/{id}/state`` and the server's
+    ``CardRegistry`` write-through hook rewrites the snapshot
+    synchronously before the HTTP response returns. Callers that
+    previously relied on this helper to force persistence no longer need
+    to — the mutation itself is the save.
+
+    The helper is retained (as a no-op) so existing call sites continue
+    to read clearly; the ``wait_for_*`` helpers that follow each call are
+    what actually guarantee the broadcast has reached the DOM before the
+    assertion runs.
     """
-    page.evaluate(
-        """async () => {
-        const data = {
-            name: currentCanvasName,
-            canvas_size: [CANVAS_W, CANVAS_H],
-            cards: cards.map(c => c.serialize()),
-        };
-        const resp = await fetch(
-            `/api/canvases/${encodeURIComponent(currentCanvasName)}`,
-            {
-                method: 'PUT',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(data),
-            }
-        );
-        if (!resp.ok) throw new Error(`save failed: ${resp.status}`);
-    }"""
-    )
+    return
 
 
 def wait_for_star_text(page, card_id, expected, timeout=3000):

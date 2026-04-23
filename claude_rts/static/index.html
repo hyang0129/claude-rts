@@ -1173,9 +1173,13 @@ class Card {
       // Epic #236 child 3: ``starred`` is server-owned. The click issues
       // PUT /api/cards/{id}/state and does NOT mutate ``this.starred`` or
       // the DOM synchronously — the server's ``card_updated`` broadcast
-      // (handled by applyStarredToCard) drives the re-render.
+      // (handled by applyStarredToCard) drives the re-render. The server
+      // registry keys terminals by ``session_id``, so we PUT against
+      // ``this.sessionId``, not the local numeric ``this.id``. Pre-handshake
+      // (sessionId still null) the click is a no-op.
+      if (!this.sessionId) return;
       const next = !this.starred;
-      putCardState(this.id, { starred: next }).catch(err => console.error('star put failed:', err));
+      putCardState(this.sessionId, { starred: next }).catch(err => console.error('star put failed:', err));
     });
     titlebar.appendChild(starBtn);
 
@@ -1762,7 +1766,11 @@ class TerminalCard extends Card {
       // round-trips through the server. The dormant→live transition
       // (clearing the body, initTerminal, connectWs, etc.) is performed in
       // applyStarredToCard when the ``card_updated`` broadcast arrives.
-      putCardState(this.id, { starred: true }).catch(err => console.error('resume put failed:', err));
+      // Uses ``this.sessionId`` to key the server registry, matching every
+      // other putCardState site. Dormant cards always have a sessionId
+      // (they've been through handshake + dormancy); guard defensively.
+      if (!this.sessionId) return;
+      putCardState(this.sessionId, { starred: true }).catch(err => console.error('resume put failed:', err));
     });
     body.appendChild(resumeBtn);
     this.updateState('dead');
