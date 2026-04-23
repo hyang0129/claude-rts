@@ -2537,6 +2537,14 @@ def create_app(
                     continue
                 if not hasattr(card, "to_descriptor"):
                     continue
+                # Issue #194 / epic #236: only starred cards persist across
+                # reload. Unstarred cards are ephemeral — they participate in
+                # broadcasts while live, but are excluded from the canvas
+                # JSON snapshot so a reload starts with a clean slate. The
+                # pre-#241 saveLayout() applied the same filter
+                # (``cards.filter(c => c.starred)``).
+                if not getattr(card, "starred", False):
+                    continue
                 try:
                     descriptors.append(card.to_descriptor())
                 except Exception:

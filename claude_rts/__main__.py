@@ -93,17 +93,10 @@ def main():
     else:
         app_config = config.load()
 
-    # File log handler (sidecar to the stderr handler set up above).
-    logger.add(
-        "supreme-claudemander.log",
-        rotation="10 MB",
-        retention="3 days",
-        level="DEBUG",
-        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
-    )
-
-    # Configure logging earlier so --migrate-canvases output uses the same
-    # format as the running server.
+    # Configure stderr handler early so --migrate-canvases output uses the
+    # same format as the running server. The file handler is added below,
+    # AFTER the migrate-canvases short-circuit, because the migration is a
+    # one-shot and shouldn't write to the production log.
     logger.remove()
     logger.add(
         sys.stderr,
@@ -127,6 +120,17 @@ def main():
         for path, msg in summary["errors"]:
             logger.error("  error: {} — {}", path, msg)
         sys.exit(1 if summary["errors"] else 0)
+
+    # File log handler (sidecar to the stderr handler above) for the running
+    # server. Add AFTER the migrate-canvases short-circuit so a migration run
+    # doesn't append to the production log file.
+    logger.add(
+        "supreme-claudemander.log",
+        rotation="10 MB",
+        retention="3 days",
+        level="DEBUG",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
+    )
 
     logger.info("supreme-claudemander starting on http://{}:{}", args.host, args.port)
 

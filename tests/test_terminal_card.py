@@ -533,3 +533,43 @@ async def test_terminal_card_descriptor_includes_card_id(monkeypatch):
     assert desc["card_id"] == card.id
     await card.stop()
     mgr.stop_all()
+
+
+async def test_persist_callback_only_includes_starred_cards(monkeypatch):
+    """Issue #194: only starred cards belong in the persisted snapshot.
+
+    The persist callback in ``server.on_startup`` filters out unstarred cards
+    so a reload starts with a clean slate. This test exercises the filter
+    semantics directly through the registry; the callback wiring is covered
+    end-to-end by the integration test.
+    """
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    reg = CardRegistry()
+    snapshot: list[list] = []
+
+    def _capture(canvas_name: str) -> None:
+        # Mirror server.on_startup's filter (starred + visible + has descriptor)
+        cards = [
+            c
+            for c in reg.cards_on_canvas(canvas_name)
+            if not getattr(c, "hidden", False) and hasattr(c, "to_descriptor") and getattr(c, "starred", False)
+        ]
+        snapshot.append([c.id for c in cards])
+
+    reg.set_persist_callback(_capture)
+
+    starred = TerminalCard(session_manager=mgr, cmd="bash", starred=True)
+    unstarred = TerminalCard(session_manager=mgr, cmd="bash", starred=False)
+    await starred.start()
+    await unstarred.start()
+    reg.register(starred, canvas_name="main")
+    reg.register(unstarred, canvas_name="main")
+
+    snapshot.clear()
+    reg.apply_state_patch(starred.id, {"display_name": "ok"})
+    assert snapshot == [[starred.id]]
+
+    await starred.stop()
+    await unstarred.stop()
+    mgr.stop_all()

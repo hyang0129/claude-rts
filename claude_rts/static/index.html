@@ -1801,10 +1801,14 @@ class TerminalCard extends Card {
       // Reconnect to existing persistent session
       wsUrl = `${wsProto}//${location.host}/ws/session/${this.sessionId}`;
     } else {
-      // Create new persistent session
+      // Create new persistent session. Epic #236 child 5 (#241): include
+      // canvas_name so the server can register the resulting card to the
+      // active canvas — required for the apply_state_patch write-through hook
+      // to know which snapshot file to rewrite on drag/resize/star.
       const _docker = 'docker';
       const cmd = this.execCmd || `${_docker} exec -it -u vscode -w /workspaces/${this.hub} ${this.container} bash -l`;
-      wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}`;
+      const cn = (typeof currentCanvasName === 'string' && currentCanvasName) ? currentCanvasName : '';
+      wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}&canvas_name=${encodeURIComponent(cn)}`;
     }
     this.ws = new WebSocket(wsUrl);
     this.ws.binaryType = 'arraybuffer';
