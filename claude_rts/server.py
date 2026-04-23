@@ -1137,6 +1137,17 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
     # value — the snapshot / preset fixture is. Absent or "false" → unstarred
     # (server default). Only the exact string "true" flips to starred.
     starred = request.query.get("starred", "").strip().lower() == "true"
+    # Stable identity UUID across reconnects. Client generates via
+    # ``crypto.randomUUID`` on first spawn and ships it here; the client is a
+    # courier, not the author. Server stores it and emits via ``to_descriptor``.
+    card_uid = request.query.get("card_uid", "").strip()
+    # Rehydrate display_name and recovery_script from the snapshot when the
+    # client is re-spawning a starred card on reload. Same courier pattern as
+    # ``starred`` and ``card_uid`` — the client carries the value from the
+    # snapshot into the new PTY session so the server registry (authoritative)
+    # is re-seeded from disk. On first spawn both are empty strings.
+    spawn_display_name = request.query.get("display_name", "")
+    spawn_recovery_script = request.query.get("recovery_script", "")
     if not cmd:
         raise web.HTTPBadRequest(text="Missing 'cmd' query parameter")
 
@@ -1153,6 +1164,9 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
             hub=hub or None,
             container=container or None,
             starred=starred,
+            card_uid=card_uid or None,
+            display_name=spawn_display_name or None,
+            recovery_script=spawn_recovery_script or None,
         )
         await card.start()
     except Exception:
@@ -1170,6 +1184,17 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
     # closes that race window.
     await ws.send_str(json.dumps({"session_id": session.session_id, "tmux": session.tmux_backed}))
     card_registry.register(card, canvas_name=canvas_name)
+    # Write-through on registration: epic #236 identity fields carried in via
+    # the WS spawn query (card_uid, display_name, recovery_script, starred)
+    # must land in the snapshot without waiting for a user-driven mutation.
+    # Funnel through ``apply_state_patch`` so the write-through hook runs
+    # exactly as it would for a PUT /api/cards/{id}/state (a no-op re-commit
+    # of ``starred`` suffices; the hook rewrites the full descriptor).
+    if canvas_name:
+        try:
+            card_registry.apply_state_patch(card.id, {"starred": bool(card.starred)})
+        except (LookupError, ValueError):
+            logger.exception("session_new_handler: post-register persist failed")
     await mgr.attach(session.session_id, ws)
 
     # Send resize if client sends it as first message
@@ -1295,6 +1320,34 @@ async def test_session_delete(request: web.Request) -> web.Response:
 async def test_sessions_list(request: web.Request) -> web.Response:
     mgr: SessionManager = request.app["session_manager"]
     return web.json_response(mgr.list_sessions())
+
+
+async def test_canvas_seed(request: web.Request) -> web.Response:
+    """POST /api/test/canvases/{name} — seed a canvas JSON fixture on disk.
+
+    Test-mode only. Replaces the pre-epic ``PUT /api/canvases/{name}`` that
+    E2E tests used to write fixtures before a reload (#247 removed the
+    public endpoint because canvas JSON is now server-authored via the
+    write-through hook). Accepts an arbitrary JSON body and writes it
+    directly to ``{canvases_dir}/{name}.json``. Validates ``name`` through
+    the same regex as the production canvas paths to keep this off the
+    filesystem-write attack surface even though test mode is opt-in.
+    """
+    from . import config as _cfg
+
+    name = request.match_info["name"]
+    if not _cfg._valid_canvas_name(name):
+        raise web.HTTPBadRequest(text="invalid canvas name")
+    try:
+        data = await request.json()
+    except Exception as exc:
+        raise web.HTTPBadRequest(text=f"invalid JSON: {exc}")
+
+    app_config: AppConfig = request.app["app_config"]
+    _cfg.ensure_dirs(app_config)
+    path = app_config.canvases_dir / f"{name}.json"
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return web.json_response({"status": "ok", "path": str(path)})
 
 
 async def test_containers_put(request: web.Request) -> web.Response:
@@ -2491,6 +2544,7 @@ def create_app(
         app.router.add_get("/api/test/sessions", test_sessions_list)
         app.router.add_put("/api/test/containers", test_containers_put)
         app.router.add_get("/api/test/containers", test_containers_get)
+        app.router.add_post("/api/test/canvases/{name}", test_canvas_seed)
 
     # Lifecycle hooks
     async def on_startup(app: web.Application) -> None:

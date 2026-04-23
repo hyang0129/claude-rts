@@ -1824,7 +1824,16 @@ class TerminalCard extends Card {
       const cmd = this.execCmd || `${_docker} exec -it -u vscode -w /workspaces/${this.hub} ${this.container} bash -l`;
       const cn = (typeof currentCanvasName === 'string' && currentCanvasName) ? currentCanvasName : '';
       const starredParam = this.starred ? 'true' : 'false';
-      wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}&canvas_name=${encodeURIComponent(cn)}&starred=${starredParam}`;
+      // Courier the client-generated stable-identity UUID to the server so
+      // ``TerminalCard.card_uid`` is populated and round-trips into snapshots
+      // and ``to_descriptor()``. The server authors; client ships the value.
+      const uidParam = this.cardUid ? `&card_uid=${encodeURIComponent(this.cardUid)}` : '';
+      // Courier display_name + recovery_script from the rehydrated snapshot
+      // so the server registry (authoritative) matches disk on reconnect. On
+      // first spawn both are empty strings and the server defaults apply.
+      const nameParam = this.displayName ? `&display_name=${encodeURIComponent(this.displayName)}` : '';
+      const recoveryParam = this.recoveryScript ? `&recovery_script=${encodeURIComponent(this.recoveryScript)}` : '';
+      wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}&canvas_name=${encodeURIComponent(cn)}&starred=${starredParam}${uidParam}${nameParam}${recoveryParam}`;
     }
     this.ws = new WebSocket(wsUrl);
     this.ws.binaryType = 'arraybuffer';
@@ -2017,9 +2026,9 @@ class TerminalCard extends Card {
       exec: data.exec || null,
       sessionId: data.session_id || null,
       starred: data.starred != null ? data.starred : true,
-      displayName: data.displayName || '',
-      recoveryScript: data.recoveryScript || '',
-      cardUid: data.cardUid || '',
+      displayName: data.display_name || data.displayName || '',
+      recoveryScript: data.recovery_script || data.recoveryScript || '',
+      cardUid: data.card_uid || data.cardUid || '',
     });
     if (Array.isArray(data.controlGroups)) {
       card.controlGroupNums = [...data.controlGroups];
@@ -3147,13 +3156,20 @@ function destroyCard(id) {
   const idx = cards.findIndex(c => c.id === id);
   if (idx === -1) return;
   const card = cards[idx];
+  // Epic #236 child 5 (#241): no client-authored canvas persist. Closing a
+  // terminal must DELETE on the server so ``CardRegistry.unregister`` fires
+  // and the write-through hook rewrites the snapshot without the closed
+  // card — otherwise a reload rehydrates it from the stale snapshot. WS
+  // close alone does NOT unregister (the session lives for the 5-minute
+  // orphan window to support reconnection). For non-terminal cards the
+  // server has no record to clean up.
+  const sessionId = card.type === 'terminal' ? card.sessionId : null;
   card.destroy();
   cards.splice(idx, 1);
-  // Epic #236 child 5 (#241): no client persist. The card_deleted broadcast
-  // (server-side: card unregister triggers the persist hook) keeps the canvas
-  // snapshot in sync; for terminals the WebSocket close path drives the
-  // unregister, for non-terminal cards the server side is unaware (those are
-  // ephemeral by design — see drag/resize handler comments).
+  if (sessionId) {
+    fetch(`/api/claude/terminal/${encodeURIComponent(sessionId)}`, { method: 'DELETE' })
+      .catch(err => console.error('terminal delete failed:', err));
+  }
   drawMinimap();
   updateHubCount();
 }
@@ -3205,9 +3221,12 @@ async function spawnFromSerialized(s) {
       sessionId: s.session_id,
       controlGroups: s.controlGroups,
       starred: s.starred != null ? s.starred : false,
-      displayName: s.displayName || '',
-      recoveryScript: s.recoveryScript || '',
-      cardUid: s.cardUid || '',
+      // Server-authored snapshots emit snake_case (``to_descriptor()``).
+      // Legacy client-authored snapshots used camelCase; fall back to those
+      // for files predating epic #236 child 5 (#241).
+      displayName: s.display_name || s.displayName || '',
+      recoveryScript: s.recovery_script || s.recoveryScript || '',
+      cardUid: s.card_uid || s.cardUid || '',
     });
   }
   if (typeName === 'widget') {
@@ -3897,7 +3916,7 @@ async function handleControlCardCreated(msg) {
       starred: desc.starred != null ? desc.starred : false,
       displayName: desc.display_name || '',
       recoveryScript: desc.recovery_script || '',
-      cardUid: desc.cardUid || '',
+      cardUid: desc.card_uid || desc.cardUid || '',
     });
     // Epic #236 child 5 (#241): server snapshot already reflects this card
     // (the broadcast is downstream of the server-side register).
