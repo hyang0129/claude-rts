@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from loguru import logger
 
@@ -24,16 +24,47 @@ class CardRegistry:
 
     When an ``EventBus`` is provided, the registry emits
     ``card:registered`` and ``card:unregistered`` events automatically.
+
+    Epic #236 child 5 (#241): the registry also tracks each card's canvas
+    membership (``card_id → canvas_name``) and exposes a
+    ``persist_callback`` hook called from ``apply_state_patch`` so the
+    server can rewrite the canvas JSON snapshot whenever a server-owned
+    field is mutated. The callback is the only path that touches disk —
+    callers never invoke ``write_state_snapshot`` directly.
     """
 
-    def __init__(self, bus: EventBus | None = None):
+    def __init__(
+        self,
+        bus: EventBus | None = None,
+        persist_callback: Callable[[str], None] | None = None,
+    ):
         self._cards: dict[str, BaseCard] = {}
+        # Canvas membership: card_id -> canvas_name. ``None`` is allowed (the
+        # card is registered but not yet associated with a canvas, e.g. a
+        # service card created before the user opens any canvas). The
+        # persistence hook silently no-ops for cards with no canvas.
+        self._canvas_map: dict[str, str | None] = {}
         self._bus = bus
+        self._persist_callback = persist_callback
 
-    def register(self, card: BaseCard) -> None:
-        """Add a card to the registry."""
+    def register(self, card: BaseCard, canvas_name: str | None = None) -> None:
+        """Add a card to the registry.
+
+        ``canvas_name`` records which canvas this card belongs to, so the
+        persistence hook in ``apply_state_patch`` can rewrite the right
+        on-disk snapshot. ``None`` means the card has no canvas yet — its
+        mutations will not trigger a write-through. Pass the active canvas
+        name from the spawn handler (it lives on the request as a query
+        parameter or in the canvas_claude card config).
+        """
         self._cards[card.id] = card
-        logger.debug("CardRegistry: registered {} '{}'", card.card_type, card.id)
+        self._canvas_map[card.id] = canvas_name
+        logger.debug(
+            "CardRegistry: registered {} '{}' on canvas '{}'",
+            card.card_type,
+            card.id,
+            canvas_name,
+        )
         if self._bus is not None:
             # Requires a running event loop — always true when called from aiohttp handlers.
             asyncio.ensure_future(self._bus.emit("card:registered", {"card_id": card.id, "card_type": card.card_type}))
@@ -41,13 +72,47 @@ class CardRegistry:
     def unregister(self, card_id: str) -> BaseCard | None:
         """Remove and return a card, or None if not found."""
         card = self._cards.pop(card_id, None)
+        canvas_name = self._canvas_map.pop(card_id, None)
         if card:
             logger.debug("CardRegistry: unregistered {} '{}'", card.card_type, card_id)
             if self._bus is not None:
                 asyncio.ensure_future(
                     self._bus.emit("card:unregistered", {"card_id": card.id, "card_type": card.card_type})
                 )
+            # Persist after removal so the snapshot reflects the new
+            # registry state. Empty canvases still get a write — the
+            # frontend will read an empty cards array and start fresh.
+            self._persist_canvas(canvas_name)
         return card
+
+    # ── Canvas membership / persistence ─────────────────────────────
+
+    def get_canvas_name(self, card_id: str) -> str | None:
+        """Return the canvas a card is registered under, or None."""
+        return self._canvas_map.get(card_id)
+
+    def cards_on_canvas(self, canvas_name: str) -> list[BaseCard]:
+        """Return every registered card belonging to ``canvas_name``."""
+        return [self._cards[cid] for cid, cn in self._canvas_map.items() if cn == canvas_name and cid in self._cards]
+
+    def set_persist_callback(self, callback: Callable[[str], None] | None) -> None:
+        """Wire (or clear) the write-through hook.
+
+        The callback receives one argument: the canvas name to persist. It
+        is invoked synchronously from ``apply_state_patch`` and from
+        ``unregister``. Callers are responsible for catching their own
+        exceptions; the registry only logs them.
+        """
+        self._persist_callback = callback
+
+    def _persist_canvas(self, canvas_name: str | None) -> None:
+        """Invoke the persist callback if one is wired and a canvas is set."""
+        if canvas_name is None or self._persist_callback is None:
+            return
+        try:
+            self._persist_callback(canvas_name)
+        except Exception:
+            logger.exception("CardRegistry: persist callback failed for canvas '{}'", canvas_name)
 
     def get(self, card_id: str) -> BaseCard | None:
         """Look up a card by id."""
@@ -114,6 +179,12 @@ class CardRegistry:
 
         if applied:
             logger.debug("CardRegistry: patched card '{}' fields={}", card_id, list(applied.keys()))
+            # Epic #236 child 5 (#241): write-through to canvas JSON. The
+            # snapshot rewrite is synchronous (per the TIMEBOX note in the
+            # decomposition — debounce is explicitly deferred). Errors are
+            # swallowed by ``_persist_canvas`` so a disk failure does not
+            # roll back the in-memory mutation; the broadcast still goes out.
+            self._persist_canvas(self._canvas_map.get(card_id))
         return applied
 
     def get_terminal(self, session_id: str) -> TerminalCard | None:

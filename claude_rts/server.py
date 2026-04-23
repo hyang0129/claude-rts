@@ -14,7 +14,16 @@ from .pty_compat import PtyProcess
 
 _start_time = time.monotonic()
 
-from .config import AppConfig, read_config, write_config, list_canvases, read_canvas, write_canvas, delete_canvas  # noqa: E402
+from .config import (  # noqa: E402
+    AppConfig,
+    read_config,
+    write_config,
+    list_canvases,
+    read_canvas,
+    write_state_snapshot,
+    delete_canvas,
+)
+from .migrations import canvas_236  # noqa: E402
 from .discovery import discover_hubs  # noqa: E402
 from .startup import run_startup  # noqa: E402
 from .util_container import ensure_util_container, discover_profiles, exec_in_util  # noqa: E402
@@ -99,18 +108,12 @@ async def canvas_get_handler(request: web.Request) -> web.Response:
     return web.json_response(data)
 
 
-async def canvas_put_handler(request: web.Request) -> web.Response:
-    name = request.match_info["name"]
-    logger.info("Canvas '{}' save requested by {}", name, request.remote)
-    app_config: AppConfig = request.app["app_config"]
-    try:
-        body = await request.json()
-    except json.JSONDecodeError:
-        raise web.HTTPBadRequest(text="Invalid JSON")
-    ok = write_canvas(app_config, name, body)
-    if not ok:
-        raise web.HTTPBadRequest(text=f"Invalid canvas name '{name}'")
-    return web.json_response({"status": "ok", "name": name})
+# Epic #236 child 5 (#241): the client-driven ``PUT /api/canvases/{name}`` was
+# the last surviving client-authored mutation path for canvas state. It is
+# retired here. Canvas JSON files are now server-authored — see
+# ``write_state_snapshot`` and the ``CardRegistry`` write-through hook in
+# ``on_startup`` below. ``GET`` and ``DELETE`` on canvases remain because they
+# are canvas lifecycle operations, not card-field mutations.
 
 
 async def canvas_delete_handler(request: web.Request) -> web.Response:
@@ -1125,6 +1128,9 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
     cmd = request.query.get("cmd", "").strip()
     hub = request.query.get("hub", "")
     container = request.query.get("container", "").strip()
+    # Epic #236 child 5 (#241): canvas_name records canvas membership for the
+    # write-through persistence hook; absent → no write-through.
+    canvas_name = request.query.get("canvas_name", "").strip() or None
     if not cmd:
         raise web.HTTPBadRequest(text="Missing 'cmd' query parameter")
 
@@ -1156,7 +1162,7 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
     # sessionId as null and spawns a ghost card.  Sending session_id first
     # closes that race window.
     await ws.send_str(json.dumps({"session_id": session.session_id, "tmux": session.tmux_backed}))
-    card_registry.register(card)
+    card_registry.register(card, canvas_name=canvas_name)
     await mgr.attach(session.session_id, ws)
 
     # Send resize if client sends it as first message
@@ -1587,6 +1593,13 @@ async def claude_terminal_create(request: web.Request) -> web.Response:
 
     ephemeral = request.query.get("ephemeral", "false").lower() in ("true", "1", "yes")
     spawner_id = request.query.get("spawner_id", "").strip() or None
+    # Epic #236 child 5 (#241): canvas_name records which canvas snapshot
+    # the new card belongs to so the write-through hook in
+    # ``CardRegistry.apply_state_patch`` can persist mutations to the
+    # right ``~/.supreme-claudemander/canvases/{name}.json`` file. The
+    # frontend passes the active canvas name; an absent value means the
+    # card is not tied to a canvas (no write-through).
+    canvas_name = request.query.get("canvas_name", "").strip() or None
 
     # Validate timeout.  Explicitly passing timeout without ephemeral=true is an
     # error — the parameter has no effect on non-ephemeral terminals and silently
@@ -1705,7 +1718,7 @@ async def claude_terminal_create(request: web.Request) -> web.Response:
                 )
                 try:
                     await card.start()
-                    card_registry.register(card)
+                    card_registry.register(card, canvas_name=canvas_name)
                 except Exception:
                     logger.exception("claude_terminal_create: failed for cmd={!r}", cmd)
                     return web.json_response({"error": "Failed to spawn terminal"}, status=500)
@@ -1735,7 +1748,7 @@ async def claude_terminal_create(request: web.Request) -> web.Response:
             )
             try:
                 await card.start()
-                card_registry.register(card)
+                card_registry.register(card, canvas_name=canvas_name)
             except Exception:
                 logger.exception("claude_terminal_create: failed for cmd={!r}", cmd)
                 return web.json_response({"error": "Failed to spawn terminal"}, status=500)
@@ -2077,7 +2090,7 @@ async def canvas_claude_create(request: web.Request) -> web.Response:
     )
     try:
         await card.start()
-        card_registry.register(card)
+        card_registry.register(card, canvas_name=canvas_name)
     except Exception:
         logger.exception("canvas_claude_create: failed to start card")
         return web.json_response({"error": "Failed to spawn Canvas Claude card"}, status=500)
@@ -2098,17 +2111,20 @@ async def canvas_claude_new_session(request: web.Request) -> web.Response:
     card = card_registry.get_canvas_claude(card_id)
     if not card:
         raise web.HTTPNotFound(text="Canvas Claude card not found")
+    # Preserve canvas membership across the restart so write-through still
+    # targets the right canvas snapshot after the new session_id is assigned.
+    canvas_name = card_registry.get_canvas_name(card_id)
     try:
         card_registry.unregister(card_id)
         await card.new_session()
-        card_registry.register(card)
+        card_registry.register(card, canvas_name=canvas_name)
     except Exception:
         logger.exception("canvas_claude_new_session: failed for {}", card_id)
         # Re-register the card so it is not orphaned — use whatever id it
         # currently has (may be the old one if new_session() failed before
         # allocating a new PTY).
         try:
-            card_registry.register(card)
+            card_registry.register(card, canvas_name=canvas_name)
         except Exception:
             logger.exception("canvas_claude_new_session: failed to re-register card {}", card_id)
         return web.json_response({"error": "Failed to restart session"}, status=500)
@@ -2368,10 +2384,18 @@ async def _broadcast_blueprint_event(app: web.Application, event_type: str, payl
                 logger.debug("Failed to send blueprint event to a client")
 
 
-def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Application:
+def create_app(
+    app_config: AppConfig,
+    test_mode: bool = False,
+    skip_canvas_schema_check: bool = False,
+) -> web.Application:
     app = web.Application()
     app["app_config"] = app_config
     app["test_mode"] = test_mode
+    # Epic #236 child 5 (#241): the canvas-schema check is opt-out at create
+    # time so test fixtures and dev-config mode don't trip it. The flag may
+    # also be set by ``__main__.main`` after ``create_app`` returns.
+    app["_skip_canvas_schema_check"] = skip_canvas_schema_check
     app["discovered_profiles"] = []
     app["control_ws_clients"] = []
     # Per-spawner live session tracking for Canvas Claude terminal cap
@@ -2392,7 +2416,7 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
     app.router.add_put("/api/config", config_put_handler)
     app.router.add_get("/api/canvases", canvases_list_handler)
     app.router.add_get("/api/canvases/{name}", canvas_get_handler)
-    app.router.add_put("/api/canvases/{name}", canvas_put_handler)
+    # Epic #236 child 5 (#241): no PUT — canvas JSON is server-authored.
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
 
     # Generic card state mutation (epic #236 / issue #238 — single mutation path)
@@ -2463,6 +2487,21 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
 
     # Lifecycle hooks
     async def on_startup(app: web.Application) -> None:
+        # Epic #236 child 5 (#241): refuse to boot when any canvas file is in
+        # the pre-epic schema and lacks a backup sidecar — the user must run
+        # ``python -m claude_rts --migrate-canvases`` first. The check is
+        # opt-out for ``--dev-config`` (preset canvases are wiped+rebuilt on
+        # every startup so they never carry old state) and the test-mode
+        # harness (which routinely instantiates servers with no canvases dir).
+        if not app.get("_skip_canvas_schema_check"):
+            blocking = canvas_236.check_canvas_dir(app_config.canvases_dir)
+            if blocking:
+                # Log every offending file then raise — aiohttp converts the
+                # exception into a startup failure with a non-zero exit code.
+                for path in blocking:
+                    logger.error(canvas_236.STARTUP_ERROR_TEMPLATE.format(path=path))
+                raise RuntimeError(canvas_236.STARTUP_ERROR_TEMPLATE.format(path=blocking[0]))
+
         config = read_config(app_config)
         session_config = config.get("sessions", {})
         mgr = SessionManager(
@@ -2476,7 +2515,43 @@ def create_app(app_config: AppConfig, test_mode: bool = False) -> web.Applicatio
         registry = ServiceCardRegistry(session_manager=mgr)
         registry.register_type("claude-usage", ClaudeUsageCard)
         app["service_card_registry"] = registry
-        app["card_registry"] = CardRegistry(bus=event_bus)
+
+        # Epic #236 child 5 (#241): wire the write-through persistence hook.
+        # Whenever ``apply_state_patch`` mutates a card belonging to a known
+        # canvas, the registry calls ``_persist_canvas(canvas_name)`` which
+        # rewrites ``~/.supreme-claudemander/canvases/{canvas_name}.json``
+        # from the live registry state. This is the single disk-write path
+        # for canvas snapshots — no other call site invokes
+        # ``write_state_snapshot`` directly.
+        card_registry = CardRegistry(bus=event_bus)
+        app["card_registry"] = card_registry
+
+        def _persist_canvas_snapshot(canvas_name: str) -> None:
+            cards = card_registry.cards_on_canvas(canvas_name)
+            descriptors = []
+            for card in cards:
+                # Hidden cards (ServiceCards) and any card whose subclass does
+                # not define ``to_descriptor`` are skipped — only visible
+                # cards belong in the canvas snapshot.
+                if getattr(card, "hidden", False):
+                    continue
+                if not hasattr(card, "to_descriptor"):
+                    continue
+                # Issue #194 / epic #236: only starred cards persist across
+                # reload. Unstarred cards are ephemeral — they participate in
+                # broadcasts while live, but are excluded from the canvas
+                # JSON snapshot so a reload starts with a clean slate. The
+                # pre-#241 saveLayout() applied the same filter
+                # (``cards.filter(c => c.starred)``).
+                if not getattr(card, "starred", False):
+                    continue
+                try:
+                    descriptors.append(card.to_descriptor())
+                except Exception:
+                    logger.exception("persist_callback: card '{}' to_descriptor failed", card.id)
+            write_state_snapshot(app_config, canvas_name, descriptors)
+
+        card_registry.set_persist_callback(_persist_canvas_snapshot)
 
         # Wire EventBus → /ws/control broadcast
         async def _on_card_event(event_type: str, payload: dict) -> None:

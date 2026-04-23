@@ -104,6 +104,11 @@ class TerminalCard(BaseCard):
         desc: dict = {
             "type": self.card_type,
             "session_id": self.id,
+            # Epic #236 child 5 (#241): every server-authored descriptor
+            # includes ``card_id`` — it is the schema discriminator for the
+            # canvas-snapshot file (no ``card_id`` on a card entry == old
+            # client-authored format). For terminals, ``card_id == session_id``.
+            "card_id": self.id,
             # Epic #236 child 3: ``starred`` is always included — both True and
             # False — so the client boot path can use it as the authoritative
             # value without needing to fall back to a legacy default.

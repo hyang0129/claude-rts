@@ -1210,7 +1210,13 @@ class Card {
         this.displayName = val;
         nameSpan.textContent = val || this.hub;
         if (input.parentNode) input.parentNode.replaceChild(nameSpan, input);
-        saveLayout();
+        // Epic #236 child 5 (#241): display_name is server-owned. Commit
+        // through the generic state endpoint; the broadcast teleports to
+        // every other connected client. saveLayout() no longer exists.
+        if (this.type === 'terminal' && this.sessionId) {
+          putCardState(this.sessionId, { display_name: val })
+            .catch(err => console.error('display_name put failed:', err));
+        }
       };
       input.addEventListener('blur', finish);
       input.addEventListener('keydown', (ke) => { if (ke.key === 'Enter') { ke.preventDefault(); finish(); } if (ke.key === 'Escape') { input.value = this.displayName || this.hub || ''; finish(); } });
@@ -1347,11 +1353,10 @@ class Card {
       if (this.type === 'terminal' && this.sessionId) {
         putCardState(this.sessionId, { x: Math.round(this.x), y: Math.round(this.y) })
           .catch(err => console.error('drag put failed:', err));
-      } else {
-        // Non-terminal cards (loader, blueprint, etc.) don't yet flow through
-        // the server-state path — fall back to layout JSON for those.
-        saveLayout();
       }
+      // Epic #236 child 5 (#241): non-terminal cards (loader, blueprint, etc.)
+      // are ephemeral and not persisted — saveLayout() no longer exists. Their
+      // local position remains in DOM until the card is destroyed.
     };
 
     titlebar.addEventListener('pointerdown', (e) => {
@@ -1392,9 +1397,9 @@ class Card {
       if (this.type === 'terminal' && this.sessionId) {
         putCardState(this.sessionId, { w: Math.round(this.w), h: Math.round(this.h) })
           .catch(err => console.error('resize put failed:', err));
-      } else {
-        saveLayout();
       }
+      // Epic #236 child 5 (#241): non-terminal cards do not persist; the
+      // resize stays on the client only.
     };
 
     handle.addEventListener('pointerdown', (e) => {
@@ -1796,10 +1801,14 @@ class TerminalCard extends Card {
       // Reconnect to existing persistent session
       wsUrl = `${wsProto}//${location.host}/ws/session/${this.sessionId}`;
     } else {
-      // Create new persistent session
+      // Create new persistent session. Epic #236 child 5 (#241): include
+      // canvas_name so the server can register the resulting card to the
+      // active canvas — required for the apply_state_patch write-through hook
+      // to know which snapshot file to rewrite on drag/resize/star.
       const _docker = 'docker';
       const cmd = this.execCmd || `${_docker} exec -it -u vscode -w /workspaces/${this.hub} ${this.container} bash -l`;
-      wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}`;
+      const cn = (typeof currentCanvasName === 'string' && currentCanvasName) ? currentCanvasName : '';
+      wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}&canvas_name=${encodeURIComponent(cn)}`;
     }
     this.ws = new WebSocket(wsUrl);
     this.ws.binaryType = 'arraybuffer';
@@ -1818,7 +1827,10 @@ class TerminalCard extends Card {
           const msg = JSON.parse(ev.data);
           if (msg.session_id) {
             this.sessionId = msg.session_id;
-            saveLayout();
+            // Epic #236 child 5 (#241): no client-side persist — the server
+            // already registered the card under this session_id when the WS
+            // handshake completed and any geometry committed via PUT
+            // /api/cards/{id}/state will trigger the write-through hook.
             if (msg.tmux === false && this.container) {
               this.term.write('\r\n\x1b[33m⚠ tmux not available in container — terminal will not persist across server restarts. Install tmux in the container to enable persistence.\x1b[0m\r\n');
             }
@@ -2145,7 +2157,8 @@ class CanvasClaudeCard extends TerminalCard {
       if (!resp.ok) throw new Error(await resp.text());
       const desc = await resp.json();
       this.sessionId = desc.session_id;
-      saveLayout();
+      // Epic #236 child 5 (#241): server already wrote the snapshot when it
+      // registered the new card; no client-side save needed.
 
       const overlay = this.el.querySelector(`[data-pending-overlay="${this.id}"]`);
       if (overlay) overlay.remove();
@@ -2184,7 +2197,7 @@ class CanvasClaudeCard extends TerminalCard {
           const msg = JSON.parse(ev.data);
           if (msg.session_id) {
             this.sessionId = msg.session_id;
-            saveLayout();
+            // Epic #236 child 5 (#241): no client persist — server-owned.
           }
           if (msg.error === 'session_not_found') {
             // Session died — recreate via the server API (writes MCP config + tmux).
@@ -2227,7 +2240,8 @@ class CanvasClaudeCard extends TerminalCard {
     // Show the overlay so the user can set up credentials explicitly.
     if (!this.profile) {
       this.sessionId = null;
-      saveLayout();
+      // Epic #236 child 5 (#241): no client persist — server snapshot will be
+      // re-written when the next session is registered.
       this._showNoPriorityOverlay();
       return;
     }
@@ -2245,7 +2259,7 @@ class CanvasClaudeCard extends TerminalCard {
       }
       const desc = await resp.json();
       this.sessionId = desc.session_id;
-      saveLayout();
+      // Epic #236 child 5 (#241): server-owned persistence.
       this._intentionalClose = false;
       this.connectWs();
     } catch (err) {
@@ -3119,7 +3133,11 @@ function destroyCard(id) {
   const card = cards[idx];
   card.destroy();
   cards.splice(idx, 1);
-  saveLayout();
+  // Epic #236 child 5 (#241): no client persist. The card_deleted broadcast
+  // (server-side: card unregister triggers the persist hook) keeps the canvas
+  // snapshot in sync; for terminals the WebSocket close path drives the
+  // unregister, for non-terminal cards the server side is unaware (those are
+  // ephemeral by design — see drag/resize handler comments).
   drawMinimap();
   updateHubCount();
 }
@@ -3264,7 +3282,8 @@ function assignControlGroup(groupNum) {
     updateControlGroupBadges(card);
     flashControlGroupBadges(card);
   }
-  saveLayout();
+  // Epic #236 child 5 (#241): control groups are per-device only (see
+  // docs/state-model.md per-device allowlist) — no server persist.
 }
 
 function recallControlGroup(groupNum, doubleTap) {
@@ -3566,20 +3585,12 @@ document.addEventListener('keydown', (e) => {
 let currentCanvasName = 'main';
 let canvasList = [];  // list of available canvas names
 
-function saveLayout() {
-  // Issue #194: only starred cards persist across reload — unstarred cards are
-  // ephemeral and excluded from the saved layout.
-  const data = {
-    name: currentCanvasName,
-    canvas_size: [CANVAS_W, CANVAS_H],
-    cards: cards.filter(c => c.starred).map(c => c.serialize()),
-  };
-  fetch(`/api/canvases/${encodeURIComponent(currentCanvasName)}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  }).catch(err => console.warn('Failed to save layout:', err));
-}
+// Epic #236 child 5 (#241): saveLayout() has been deleted. Canvas JSON on
+// disk is server-authored — every mutation flows through
+// PUT /api/cards/{id}/state, the server's CardRegistry write-through hook
+// rewrites the snapshot, and the card_updated broadcast carries the change
+// to every connected client. The endpoint PUT /api/canvases/{name} no longer
+// exists; calling it from the frontend is forbidden by review.
 
 async function loadLayout() {
   try {
@@ -3629,7 +3640,10 @@ function renderCanvasDropdown() {
   }
   html += '<div class="canvas-dropdown-sep"></div>';
   html += '<div class="canvas-dropdown-action" id="canvas-new-action">+ New canvas</div>';
-  html += '<div class="canvas-dropdown-action" id="canvas-rename-action">Rename current</div>';
+  // Epic #236 child 5 (#241): canvas rename is retired in this slice. The
+  // pre-epic implementation depended on a client-driven PUT /api/canvases/...
+  // which no longer exists. Rename can return as a server-side endpoint in a
+  // follow-up.
   canvasDropdown.innerHTML = html;
 
   // Switch handlers
@@ -3663,7 +3677,11 @@ function renderCanvasDropdown() {
     });
   });
 
-  // New canvas
+  // New canvas — Epic #236 child 5 (#241): a "new canvas" is now created
+  // implicitly the first time a card is registered to it (the server's
+  // write-through hook will create the JSON file on first persist). We
+  // simply switch to the name; the server responds 404 to GET on a missing
+  // canvas and switchCanvas treats that as an empty canvas.
   const newAction = canvasDropdown.querySelector('#canvas-new-action');
   if (newAction) {
     newAction.addEventListener('click', async () => {
@@ -3673,46 +3691,7 @@ function renderCanvasDropdown() {
         if (name !== null) alert('Invalid canvas name. Use only letters, numbers, hyphens, underscores.');
         return;
       }
-      // Save current canvas first, then switch to the new empty canvas
-      saveLayout();
-      // Create an empty canvas on the server
-      await fetch(`/api/canvases/${encodeURIComponent(name)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, canvas_size: [CANVAS_W, CANVAS_H], cards: [] }),
-      });
       await switchCanvas(name);
-    });
-  }
-
-  // Rename canvas
-  const renameAction = canvasDropdown.querySelector('#canvas-rename-action');
-  if (renameAction) {
-    renameAction.addEventListener('click', async () => {
-      hideCanvasDropdown();
-      const newName = prompt('Rename canvas to:', currentCanvasName);
-      if (!newName || newName === currentCanvasName || !/^[a-zA-Z0-9_-]+$/.test(newName)) {
-        if (newName !== null && newName !== currentCanvasName) alert('Invalid canvas name.');
-        return;
-      }
-      // Save current layout under the new name, delete the old one
-      const oldName = currentCanvasName;
-      const layoutData = {
-        name: newName,
-        canvas_size: [CANVAS_W, CANVAS_H],
-        cards: cards.map(c => c.serialize()),
-      };
-      await fetch(`/api/canvases/${encodeURIComponent(newName)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(layoutData),
-      });
-      if (oldName !== 'main') {
-        await fetch(`/api/canvases/${encodeURIComponent(oldName)}`, { method: 'DELETE' });
-      }
-      currentCanvasName = newName;
-      updateCanvasSwitcherLabel();
-      await refreshCanvasList();
     });
   }
 }
@@ -3739,10 +3718,9 @@ document.addEventListener('click', () => hideCanvasDropdown());
 canvasDropdown.addEventListener('click', (e) => e.stopPropagation());
 
 async function switchCanvas(name) {
-  // 1. Save current layout
-  saveLayout();
-
-  // 2. Destroy all current cards
+  // Epic #236 child 5 (#241): no client-side save before switching — every
+  // server-owned mutation has already been written through by CardRegistry.
+  // 1. Destroy all current cards
   while (cards.length > 0) {
     const card = cards.pop();
     card.destroy();
@@ -3900,7 +3878,8 @@ async function handleControlCardCreated(msg) {
       recoveryScript: desc.recovery_script || '',
       cardUid: desc.cardUid || '',
     });
-    saveLayout();
+    // Epic #236 child 5 (#241): server snapshot already reflects this card
+    // (the broadcast is downstream of the server-side register).
   }
 }
 
@@ -3916,7 +3895,7 @@ function handleControlCardDeleted(msg) {
   const card = cards[idx];
   card.destroy();
   cards.splice(idx, 1);
-  saveLayout();
+  // Epic #236 child 5 (#241): server snapshot already reflects the removal.
   drawMinimap();
   updateHubCount();
 }
@@ -4028,7 +4007,8 @@ function handleControlCardUpdated(msg) {
   // tracks card movement live.
   if (geometryChanged && typeof drawMinimap === 'function') drawMinimap();
 
-  if (changed) saveLayout();
+  // Epic #236 child 5 (#241): no client-side persist on broadcast — the
+  // server has already written the snapshot via apply_state_patch.
 }
 
 // ════════════════════════════════════════════
