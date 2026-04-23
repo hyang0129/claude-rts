@@ -1,10 +1,14 @@
 {
   "name": "human-qa",
-  "canvas_size": [3840, 2160],
+  "canvas_size": [
+    3840,
+    2160
+  ],
   "cards": [
     {
       "type": "terminal",
       "hub": "supreme-claudemander-util",
+      "starred": true,
       "x": 50,
       "y": 50,
       "w": 800,
@@ -13,6 +17,7 @@
     {
       "type": "widget",
       "widgetType": "container-manager",
+      "starred": true,
       "x": 900,
       "y": 50,
       "w": 520,
@@ -21,6 +26,7 @@
     {
       "type": "widget",
       "widgetType": "profiles",
+      "starred": true,
       "x": 50,
       "y": 620,
       "w": 620,
@@ -28,6 +34,7 @@
     },
     {
       "type": "canvas_claude",
+      "starred": true,
       "x": 900,
       "y": 640,
       "w": 960,

@@ -1813,10 +1813,18 @@ class TerminalCard extends Card {
       // canvas_name so the server can register the resulting card to the
       // active canvas — required for the apply_state_patch write-through hook
       // to know which snapshot file to rewrite on drag/resize/star.
+      //
+      // Epic #236 follow-up (#254): forward the card's ``starred`` value so
+      // the server's initial registry state matches the snapshot the client
+      // is spawning from. The client is NOT authoring the value — the
+      // snapshot (or preset fixture) is. The client is a courier. When the
+      // snapshot has no ``starred`` field, ``this.starred`` is ``false`` by
+      // default (per spawnFromSerialized), which the server also defaults to.
       const _docker = 'docker';
       const cmd = this.execCmd || `${_docker} exec -it -u vscode -w /workspaces/${this.hub} ${this.container} bash -l`;
       const cn = (typeof currentCanvasName === 'string' && currentCanvasName) ? currentCanvasName : '';
-      wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}&canvas_name=${encodeURIComponent(cn)}`;
+      const starredParam = this.starred ? 'true' : 'false';
+      wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}&canvas_name=${encodeURIComponent(cn)}&starred=${starredParam}`;
     }
     this.ws = new WebSocket(wsUrl);
     this.ws.binaryType = 'arraybuffer';
@@ -3179,6 +3187,14 @@ async function spawnFromSerialized(s) {
     console.warn('spawnFromSerialized: entry has no type and no hub, skipping', s);
     return null;
   }
+  // Epic #236 follow-up (#254): client must not invent a starred default.
+  // The snapshot / preset is the authoritative source — if it omits
+  // ``starred``, the card is unstarred. Any canvas file that relies on the
+  // pre-#254 "absent = starred" fallback must be updated to include
+  // ``"starred": true`` explicitly (see dev_presets/*/canvases/*.json).
+  // The old fallback was a DP-1 violation: a client-authored default that
+  // the server silently mirrored. Setting ``false`` here keeps the client
+  // from inventing authoritative state.
   if (typeName === 'terminal') {
     const hub = hubs.find(h => h.hub === s.hub);
     if (!hub) return null; // undiscovered hub — skip, like the old ladder did
@@ -3188,7 +3204,7 @@ async function spawnFromSerialized(s) {
       exec: s.exec,
       sessionId: s.session_id,
       controlGroups: s.controlGroups,
-      starred: s.starred != null ? s.starred : true,
+      starred: s.starred != null ? s.starred : false,
       displayName: s.displayName || '',
       recoveryScript: s.recoveryScript || '',
       cardUid: s.cardUid || '',
@@ -3200,10 +3216,7 @@ async function spawnFromSerialized(s) {
       widgetType: s.widgetType,
       x: s.x, y: s.y, w: s.w, h: s.h,
       refreshInterval: s.refreshInterval,
-      // Issue #194: reload path must default to starred=true so cards saved
-      // before the "unstarred by default" flip are not filtered out by the
-      // next saveLayout(). Matches the terminal branch above.
-      starred: s.starred != null ? s.starred : true,
+      starred: s.starred != null ? s.starred : false,
     });
   }
   if (typeName === 'canvas_claude') {
@@ -3212,17 +3225,17 @@ async function spawnFromSerialized(s) {
       sessionId: s.session_id,
       profile: s.profile,
       canvasName: s.canvasName,
-      starred: s.starred != null ? s.starred : true,
+      starred: s.starred != null ? s.starred : false,
     });
   }
   // Unknown type: fall back to the registry so any future card type that
-  // registers itself is handled automatically. Default starred=true on the
-  // reload path (issue #194) so cards saved before the default-flip are
-  // not filtered out by the next saveLayout().
+  // registers itself is handled automatically. Starred default mirrors the
+  // terminal / widget / canvas_claude branches above — ``false`` when the
+  // snapshot does not specify.
   return CARD_TYPE_REGISTRY.spawn(typeName, {
     ...s,
     sessionId: s.session_id,
-    starred: s.starred != null ? s.starred : true,
+    starred: s.starred != null ? s.starred : false,
   });
 }
 

@@ -1131,6 +1131,12 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
     # Epic #236 child 5 (#241): canvas_name records canvas membership for the
     # write-through persistence hook; absent → no write-through.
     canvas_name = request.query.get("canvas_name", "").strip() or None
+    # Epic #236 follow-up (#254): the client forwards the snapshot's
+    # ``starred`` field so the server's initial registry state matches the
+    # canvas the card is spawning from. The client is not authoring the
+    # value — the snapshot / preset fixture is. Absent or "false" → unstarred
+    # (server default). Only the exact string "true" flips to starred.
+    starred = request.query.get("starred", "").strip().lower() == "true"
     if not cmd:
         raise web.HTTPBadRequest(text="Missing 'cmd' query parameter")
 
@@ -1146,6 +1152,7 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
             cmd=cmd,
             hub=hub or None,
             container=container or None,
+            starred=starred,
         )
         await card.start()
     except Exception:

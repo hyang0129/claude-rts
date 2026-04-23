@@ -1,7 +1,18 @@
 {
   "name": "profiles-dev",
-  "canvas_size": [3840, 2160],
+  "canvas_size": [
+    3840,
+    2160
+  ],
   "cards": [
-    {"type": "widget", "widgetType": "profiles", "x": 100, "y": 100, "w": 600, "h": 400}
+    {
+      "type": "widget",
+      "widgetType": "profiles",
+      "starred": true,
+      "x": 100,
+      "y": 100,
+      "w": 600,
+      "h": 400
+    }
   ]
 }
