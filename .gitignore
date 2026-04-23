@@ -29,3 +29,6 @@ supreme-claudemander.*.log
 
 # local launch scripts (per-user, not checked in)
 scripts/launch-prod.sh
+
+# CPU poller logs (workspace-persistent, per-session)
+.cpu-logs/
