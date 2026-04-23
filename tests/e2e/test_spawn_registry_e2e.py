@@ -463,11 +463,12 @@ class TestSpawnFromSerializedMixedCanvas:
             })"""
         )
 
-        # PUT the mixed canvas payload and capture the response status
+        # Seed the fixture on disk via the test-mode-only endpoint (epic
+        # #236 child 5 / #247 removed the public PUT /api/canvases/{name}).
         put_status = page.evaluate(
             f"""async () => {{
-                const r = await fetch('/api/canvases/mixed-restore', {{
-                    method: 'PUT',
+                const r = await fetch('/api/test/canvases/mixed-restore', {{
+                    method: 'POST',
                     headers: {{'Content-Type': 'application/json'}},
                     body: JSON.stringify({{
                         cards: [
@@ -580,8 +581,8 @@ class TestSpawnFromSerializedMixedCanvas:
 
         page.evaluate(
             f"""async () => {{
-                await fetch('/api/canvases/mixed-restore-clean', {{
-                    method: 'PUT',
+                await fetch('/api/test/canvases/mixed-restore-clean', {{
+                    method: 'POST',
                     headers: {{'Content-Type': 'application/json'}},
                     body: JSON.stringify({{
                         cards: [
@@ -621,8 +622,8 @@ class TestCanvasClaudeStalenessCheck:
 
         page.evaluate(
             f"""async () => {{
-                await fetch('/api/canvases/cc-stale-test', {{
-                    method: 'PUT',
+                await fetch('/api/test/canvases/cc-stale-test', {{
+                    method: 'POST',
                     headers: {{'Content-Type': 'application/json'}},
                     body: JSON.stringify({{
                         cards: [

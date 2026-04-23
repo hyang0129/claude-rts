@@ -57,6 +57,7 @@ class TerminalCard(BaseCard):
         display_name: str | None = None,
         recovery_script: str | None = None,
         starred: bool = False,
+        card_uid: str | None = None,
     ):
         # card_id is set *after* start() when we know the session_id,
         # unless the caller supplies one (reconnect path).
@@ -92,6 +93,12 @@ class TerminalCard(BaseCard):
         # Mutated only through ``CardRegistry.apply_state_patch`` and broadcast
         # via ``card_updated``; never assigned directly by the client.
         self.starred = bool(starred)
+        # Stable identity UUID across reconnects/reloads. Client generates it
+        # on first spawn (``crypto.randomUUID``) and ships it via the WS spawn
+        # query (?card_uid=...) — the client is a courier, not the author. The
+        # server stores it and emits it in ``to_descriptor`` as ``card_uid``;
+        # it is immutable for the lifetime of the card (no MUTABLE_FIELDS entry).
+        self.card_uid = (card_uid or "").strip()
 
     # ── Descriptor serialization ───────────────────────────────────────
 
@@ -114,6 +121,8 @@ class TerminalCard(BaseCard):
             # value without needing to fall back to a legacy default.
             "starred": bool(self.starred),
         }
+        if self.card_uid:
+            desc["card_uid"] = self.card_uid
         if self.hub:
             desc["hub"] = self.hub
         if self.container:

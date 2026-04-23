@@ -1,10 +1,14 @@
 {
   "name": "container-qa",
-  "canvas_size": [3840, 2160],
+  "canvas_size": [
+    3840,
+    2160
+  ],
   "cards": [
     {
       "type": "widget",
       "widgetType": "container-manager",
+      "starred": true,
       "x": 100,
       "y": 100,
       "w": 500,

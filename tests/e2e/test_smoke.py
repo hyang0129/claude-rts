@@ -396,27 +396,18 @@ class TestCanvasSaveReload:
     """Canvas layout persistence across reload."""
 
     def test_canvas_save_reload(self, page, backend_port):
-        """Save canvas, reload app, verify card positions are restored."""
-        # Get current card count
+        """Reload app, verify cards are restored from server-authored snapshot.
+
+        Epic #236 child 5 (#241/#247) made canvas JSON server-authored via
+        the ``CardRegistry`` write-through hook and deleted
+        ``saveLayout()``/``PUT /api/canvases/{name}``. Any mutation the
+        preset performed at startup has already been persisted by the time
+        this test runs, so there is nothing to trigger — we go straight to
+        reload and verify the cards come back.
+        """
         cards_before = page.locator("[data-card-id]").count()
         if cards_before == 0:
             pytest.skip("No cards to verify persistence")
-
-        # Trigger a save by calling the API directly and wait for the
-        # canvas PUT to complete — avoids sleeping 1 s regardless of
-        # whether saveLayout actually fired.
-        import re as _re
-
-        with page.expect_response(
-            lambda r: _re.search(r"/api/canvases/", r.url) is not None and r.request.method == "PUT",
-            timeout=10000,
-        ):
-            page.evaluate(
-                """async () => {
-                // saveLayout is a global function in index.html
-                if (typeof saveLayout === 'function') saveLayout();
-            }"""
-            )
 
         # Reload the page
         page.goto(f"http://localhost:{backend_port}")

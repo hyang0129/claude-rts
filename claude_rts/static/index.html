@@ -1173,9 +1173,13 @@ class Card {
       // Epic #236 child 3: ``starred`` is server-owned. The click issues
       // PUT /api/cards/{id}/state and does NOT mutate ``this.starred`` or
       // the DOM synchronously — the server's ``card_updated`` broadcast
-      // (handled by applyStarredToCard) drives the re-render.
+      // (handled by applyStarredToCard) drives the re-render. The server
+      // registry keys terminals by ``session_id``, so we PUT against
+      // ``this.sessionId``, not the local numeric ``this.id``. Pre-handshake
+      // (sessionId still null) the click is a no-op.
+      if (!this.sessionId) return;
       const next = !this.starred;
-      putCardState(this.id, { starred: next }).catch(err => console.error('star put failed:', err));
+      putCardState(this.sessionId, { starred: next }).catch(err => console.error('star put failed:', err));
     });
     titlebar.appendChild(starBtn);
 
@@ -1762,7 +1766,11 @@ class TerminalCard extends Card {
       // round-trips through the server. The dormant→live transition
       // (clearing the body, initTerminal, connectWs, etc.) is performed in
       // applyStarredToCard when the ``card_updated`` broadcast arrives.
-      putCardState(this.id, { starred: true }).catch(err => console.error('resume put failed:', err));
+      // Uses ``this.sessionId`` to key the server registry, matching every
+      // other putCardState site. Dormant cards always have a sessionId
+      // (they've been through handshake + dormancy); guard defensively.
+      if (!this.sessionId) return;
+      putCardState(this.sessionId, { starred: true }).catch(err => console.error('resume put failed:', err));
     });
     body.appendChild(resumeBtn);
     this.updateState('dead');
@@ -1805,10 +1813,27 @@ class TerminalCard extends Card {
       // canvas_name so the server can register the resulting card to the
       // active canvas — required for the apply_state_patch write-through hook
       // to know which snapshot file to rewrite on drag/resize/star.
+      //
+      // Epic #236 follow-up (#254): forward the card's ``starred`` value so
+      // the server's initial registry state matches the snapshot the client
+      // is spawning from. The client is NOT authoring the value — the
+      // snapshot (or preset fixture) is. The client is a courier. When the
+      // snapshot has no ``starred`` field, ``this.starred`` is ``false`` by
+      // default (per spawnFromSerialized), which the server also defaults to.
       const _docker = 'docker';
       const cmd = this.execCmd || `${_docker} exec -it -u vscode -w /workspaces/${this.hub} ${this.container} bash -l`;
       const cn = (typeof currentCanvasName === 'string' && currentCanvasName) ? currentCanvasName : '';
-      wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}&canvas_name=${encodeURIComponent(cn)}`;
+      const starredParam = this.starred ? 'true' : 'false';
+      // Courier the client-generated stable-identity UUID to the server so
+      // ``TerminalCard.card_uid`` is populated and round-trips into snapshots
+      // and ``to_descriptor()``. The server authors; client ships the value.
+      const uidParam = this.cardUid ? `&card_uid=${encodeURIComponent(this.cardUid)}` : '';
+      // Courier display_name + recovery_script from the rehydrated snapshot
+      // so the server registry (authoritative) matches disk on reconnect. On
+      // first spawn both are empty strings and the server defaults apply.
+      const nameParam = this.displayName ? `&display_name=${encodeURIComponent(this.displayName)}` : '';
+      const recoveryParam = this.recoveryScript ? `&recovery_script=${encodeURIComponent(this.recoveryScript)}` : '';
+      wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}&canvas_name=${encodeURIComponent(cn)}&starred=${starredParam}${uidParam}${nameParam}${recoveryParam}`;
     }
     this.ws = new WebSocket(wsUrl);
     this.ws.binaryType = 'arraybuffer';
@@ -2001,9 +2026,9 @@ class TerminalCard extends Card {
       exec: data.exec || null,
       sessionId: data.session_id || null,
       starred: data.starred != null ? data.starred : true,
-      displayName: data.displayName || '',
-      recoveryScript: data.recoveryScript || '',
-      cardUid: data.cardUid || '',
+      displayName: data.display_name || data.displayName || '',
+      recoveryScript: data.recovery_script || data.recoveryScript || '',
+      cardUid: data.card_uid || data.cardUid || '',
     });
     if (Array.isArray(data.controlGroups)) {
       card.controlGroupNums = [...data.controlGroups];
@@ -3131,13 +3156,20 @@ function destroyCard(id) {
   const idx = cards.findIndex(c => c.id === id);
   if (idx === -1) return;
   const card = cards[idx];
+  // Epic #236 child 5 (#241): no client-authored canvas persist. Closing a
+  // terminal must DELETE on the server so ``CardRegistry.unregister`` fires
+  // and the write-through hook rewrites the snapshot without the closed
+  // card — otherwise a reload rehydrates it from the stale snapshot. WS
+  // close alone does NOT unregister (the session lives for the 5-minute
+  // orphan window to support reconnection). For non-terminal cards the
+  // server has no record to clean up.
+  const sessionId = card.type === 'terminal' ? card.sessionId : null;
   card.destroy();
   cards.splice(idx, 1);
-  // Epic #236 child 5 (#241): no client persist. The card_deleted broadcast
-  // (server-side: card unregister triggers the persist hook) keeps the canvas
-  // snapshot in sync; for terminals the WebSocket close path drives the
-  // unregister, for non-terminal cards the server side is unaware (those are
-  // ephemeral by design — see drag/resize handler comments).
+  if (sessionId) {
+    fetch(`/api/claude/terminal/${encodeURIComponent(sessionId)}`, { method: 'DELETE' })
+      .catch(err => console.error('terminal delete failed:', err));
+  }
   drawMinimap();
   updateHubCount();
 }
@@ -3171,6 +3203,14 @@ async function spawnFromSerialized(s) {
     console.warn('spawnFromSerialized: entry has no type and no hub, skipping', s);
     return null;
   }
+  // Epic #236 follow-up (#254): client must not invent a starred default.
+  // The snapshot / preset is the authoritative source — if it omits
+  // ``starred``, the card is unstarred. Any canvas file that relies on the
+  // pre-#254 "absent = starred" fallback must be updated to include
+  // ``"starred": true`` explicitly (see dev_presets/*/canvases/*.json).
+  // The old fallback was a DP-1 violation: a client-authored default that
+  // the server silently mirrored. Setting ``false`` here keeps the client
+  // from inventing authoritative state.
   if (typeName === 'terminal') {
     const hub = hubs.find(h => h.hub === s.hub);
     if (!hub) return null; // undiscovered hub — skip, like the old ladder did
@@ -3180,10 +3220,13 @@ async function spawnFromSerialized(s) {
       exec: s.exec,
       sessionId: s.session_id,
       controlGroups: s.controlGroups,
-      starred: s.starred != null ? s.starred : true,
-      displayName: s.displayName || '',
-      recoveryScript: s.recoveryScript || '',
-      cardUid: s.cardUid || '',
+      starred: s.starred != null ? s.starred : false,
+      // Server-authored snapshots emit snake_case (``to_descriptor()``).
+      // Legacy client-authored snapshots used camelCase; fall back to those
+      // for files predating epic #236 child 5 (#241).
+      displayName: s.display_name || s.displayName || '',
+      recoveryScript: s.recovery_script || s.recoveryScript || '',
+      cardUid: s.card_uid || s.cardUid || '',
     });
   }
   if (typeName === 'widget') {
@@ -3192,10 +3235,7 @@ async function spawnFromSerialized(s) {
       widgetType: s.widgetType,
       x: s.x, y: s.y, w: s.w, h: s.h,
       refreshInterval: s.refreshInterval,
-      // Issue #194: reload path must default to starred=true so cards saved
-      // before the "unstarred by default" flip are not filtered out by the
-      // next saveLayout(). Matches the terminal branch above.
-      starred: s.starred != null ? s.starred : true,
+      starred: s.starred != null ? s.starred : false,
     });
   }
   if (typeName === 'canvas_claude') {
@@ -3204,17 +3244,17 @@ async function spawnFromSerialized(s) {
       sessionId: s.session_id,
       profile: s.profile,
       canvasName: s.canvasName,
-      starred: s.starred != null ? s.starred : true,
+      starred: s.starred != null ? s.starred : false,
     });
   }
   // Unknown type: fall back to the registry so any future card type that
-  // registers itself is handled automatically. Default starred=true on the
-  // reload path (issue #194) so cards saved before the default-flip are
-  // not filtered out by the next saveLayout().
+  // registers itself is handled automatically. Starred default mirrors the
+  // terminal / widget / canvas_claude branches above — ``false`` when the
+  // snapshot does not specify.
   return CARD_TYPE_REGISTRY.spawn(typeName, {
     ...s,
     sessionId: s.session_id,
-    starred: s.starred != null ? s.starred : true,
+    starred: s.starred != null ? s.starred : false,
   });
 }
 
@@ -3876,7 +3916,7 @@ async function handleControlCardCreated(msg) {
       starred: desc.starred != null ? desc.starred : false,
       displayName: desc.display_name || '',
       recoveryScript: desc.recovery_script || '',
-      cardUid: desc.cardUid || '',
+      cardUid: desc.card_uid || desc.cardUid || '',
     });
     // Epic #236 child 5 (#241): server snapshot already reflects this card
     // (the broadcast is downstream of the server-side register).
