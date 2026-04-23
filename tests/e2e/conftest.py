@@ -147,6 +147,77 @@ def page(backend_server, backend_port):
     pw.stop()
 
 
+@pytest.fixture(scope="module")
+def two_pages(backend_server, backend_port):
+    """Launch Chromium with two independent pages on the same server URL.
+
+    Epic #236 child 6 (#242): used by ``test_cross_browser_sync.py`` to
+    falsify the I-5 1-second cross-browser sync invariant.  Both pages
+    connect to the same backend / same canvas, but each has its own
+    browser context (independent cookies, independent ``/ws/control``
+    socket, independent ``cards`` array).  This is what makes the
+    ``card_updated`` broadcast path observable end-to-end: an action on
+    page A must reach page B via the server, not via shared in-process
+    state.
+
+    Each page waits for ``window.__claudeRtsBootComplete`` so the
+    control-WS handshake has completed before the test mutates anything.
+    """
+    headed = os.environ.get("HEADED", "").lower() in ("1", "true")
+
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(headless=not headed)
+    pages = []
+    for _ in range(2):
+        pg = browser.new_page()
+        pg.goto(f"http://localhost:{backend_port}")
+        pg.wait_for_load_state("networkidle")
+        pg.wait_for_selector("#canvas", timeout=15000)
+        pg.wait_for_function(
+            "() => window.__claudeRtsBootComplete === true",
+            timeout=15000,
+        )
+        pages.append(pg)
+
+    # Wait until each page has at least one terminal card with a populated
+    # session id AND there is at least one session_id present on BOTH pages.
+    # The boot-complete signal only guarantees the canvas snapshot has been
+    # parsed; PTY sessions attach over /ws/session/... asynchronously, and
+    # cross-page overlap depends on /ws/control card_created broadcasts
+    # propagating one page's spawned sessions to the other. Without this
+    # warmup, the first test in the suite races the WebSocket handshake.
+    for pg in pages:
+        pg.wait_for_function(
+            "() => cards.filter(c => c.sessionId).length >= 1",
+            timeout=20000,
+        )
+    # Cross-page overlap: page B's spawned sessions propagate to page A via
+    # card_created broadcast. Wait until at least one session id is visible
+    # on both pages so cross-browser sync tests can pick a shared target.
+    deadline_ms = 20000
+    poll_ms = 100
+    waited = 0
+    while waited < deadline_ms:
+        a_sessions = pages[0].evaluate("() => cards.filter(c => c.sessionId).map(c => c.sessionId)")
+        b_sessions = set(pages[1].evaluate("() => cards.filter(c => c.sessionId).map(c => c.sessionId)"))
+        if any(sid in b_sessions for sid in a_sessions):
+            break
+        import time as _t
+
+        _t.sleep(poll_ms / 1000.0)
+        waited += poll_ms
+
+    yield pages[0], pages[1]
+
+    for pg in pages:
+        try:
+            pg.close()
+        except Exception:
+            pass
+    browser.close()
+    pw.stop()
+
+
 # ── Shared helpers (single source of truth — see issue #165) ─────────────────
 
 

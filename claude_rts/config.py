@@ -190,6 +190,35 @@ def write_canvas(app_config: AppConfig, name: str, data: dict) -> bool:
         return False
 
 
+def write_state_snapshot(
+    app_config: AppConfig,
+    name: str,
+    cards: list[dict],
+    canvas_size: tuple[int, int] | list[int] = (3840, 2160),
+) -> bool:
+    """Write a server-authored canvas snapshot.
+
+    Epic #236 child 5 (#241): the on-disk canvas JSON is no longer authored by
+    the browser via ``PUT /api/canvases/{name}`` — it is a server-written
+    snapshot derived from ``CardRegistry`` state. ``write_canvas`` is retained
+    for direct schema-aware writes (e.g. fixtures, migration tests); this
+    helper composes the canonical snapshot envelope around a list of card
+    descriptors and is the function called by the ``apply_state_patch``
+    write-through hook.
+
+    Each entry in ``cards`` should be the output of ``card.to_descriptor()``
+    on a registered card — it carries ``card_id``, ``type``, all server-owned
+    state fields, and the type-specific extras the frontend's
+    ``spawnFromSerialized`` path expects.
+    """
+    snapshot = {
+        "name": name,
+        "canvas_size": list(canvas_size),
+        "cards": cards,
+    }
+    return write_canvas(app_config, name, snapshot)
+
+
 def delete_canvas(app_config: AppConfig, name: str) -> bool:
     """Delete a canvas layout. Returns True if it existed and was deleted."""
     if not _valid_canvas_name(name):

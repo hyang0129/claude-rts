@@ -1119,10 +1119,15 @@ class Card {
     this.type = type || 'base';
     this.hub = hub;
     this.container = container;
-    this.x = x;
-    this.y = y;
+    // Epic #236 child 4 (#240): position is server-owned. Defaults guard
+    // against deserialised entries that omit ``x``/``y`` (post-strip canvas
+    // JSON). The server's ``card_updated`` broadcast will overwrite these
+    // with the authoritative geometry shortly after construction.
+    this.x = (typeof x === 'number') ? x : 0;
+    this.y = (typeof y === 'number') ? y : 0;
     this.w = w || CARD_W;
     this.h = h || CARD_H;
+    this.zOrder = 0; // updated by focus-click and ``card_updated`` broadcasts
     this.symbol = symbol;
     this.execCmd = null; // overridden by subclasses if needed
     this.state = 'connecting';
@@ -1165,11 +1170,16 @@ class Card {
     starBtn.style.cssText = 'background:none;border:none;cursor:pointer;font-size:14px;padding:0 4px;color:' + (this.starred ? '#f9e2af' : '#585b70');
     starBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      this.starred = !this.starred;
-      starBtn.textContent = this.starred ? '\u2605' : '\u2606';
-      starBtn.style.color = this.starred ? '#f9e2af' : '#585b70';
-      starBtn.title = this.starred ? 'Starred — will persist across reload' : 'Unstarred — will not persist across reload';
-      saveLayout();
+      // Epic #236 child 3: ``starred`` is server-owned. The click issues
+      // PUT /api/cards/{id}/state and does NOT mutate ``this.starred`` or
+      // the DOM synchronously — the server's ``card_updated`` broadcast
+      // (handled by applyStarredToCard) drives the re-render. The server
+      // registry keys terminals by ``session_id``, so we PUT against
+      // ``this.sessionId``, not the local numeric ``this.id``. Pre-handshake
+      // (sessionId still null) the click is a no-op.
+      if (!this.sessionId) return;
+      const next = !this.starred;
+      putCardState(this.sessionId, { starred: next }).catch(err => console.error('star put failed:', err));
     });
     titlebar.appendChild(starBtn);
 
@@ -1204,7 +1214,13 @@ class Card {
         this.displayName = val;
         nameSpan.textContent = val || this.hub;
         if (input.parentNode) input.parentNode.replaceChild(nameSpan, input);
-        saveLayout();
+        // Epic #236 child 5 (#241): display_name is server-owned. Commit
+        // through the generic state endpoint; the broadcast teleports to
+        // every other connected client. saveLayout() no longer exists.
+        if (this.type === 'terminal' && this.sessionId) {
+          putCardState(this.sessionId, { display_name: val })
+            .catch(err => console.error('display_name put failed:', err));
+        }
       };
       input.addEventListener('blur', finish);
       input.addEventListener('keydown', (ke) => { if (ke.key === 'Enter') { ke.preventDefault(); finish(); } if (ke.key === 'Escape') { input.value = this.displayName || this.hub || ''; finish(); } });
@@ -1266,10 +1282,24 @@ class Card {
 
     this.el = el;
 
-    // Focus on click
+    // Focus on click. Epic #236 child 4 (#240): z-order is server-owned.
+    // We render optimistically (++Card.maxZ + zIndex) so focus feels instant,
+    // then PUT the new z_order through the generic state endpoint. The
+    // ``card_updated`` broadcast confirms on the authoring device (no-op
+    // because the local value already matches) and teleports on every other
+    // connected client.
     el.addEventListener('pointerdown', () => {
       focusCard(this.id);
-      el.style.zIndex = ++Card.maxZ;
+      const nextZ = ++Card.maxZ;
+      el.style.zIndex = nextZ;
+      this.zOrder = nextZ;
+      // Only TerminalCards currently flow through the server-state path
+      // (sessionId is set after the WS handshake). Skip the PUT before the
+      // session has registered, and for non-terminal cards (loader, blueprint).
+      if (this.type === 'terminal' && this.sessionId) {
+        putCardState(this.sessionId, { z_order: nextZ }).catch(err =>
+          console.error('z_order put failed:', err));
+      }
     });
 
     // Double-click anywhere on card to zoom-to-fill
@@ -1320,7 +1350,17 @@ class Card {
       [this.x, this.y] = snapPos(this.x, this.y, this.w, this.h, this.id);
       this.el.style.left = this.x + 'px';
       this.el.style.top = this.y + 'px';
-      saveLayout();
+      // Epic #236 child 4 (#240): commit position to the server on mouseup
+      // (DP-4 — single PUT per gesture). The authoring device already
+      // rendered the final position optimistically during ``onMove``; the
+      // ``card_updated`` broadcast teleports the non-authoring devices.
+      if (this.type === 'terminal' && this.sessionId) {
+        putCardState(this.sessionId, { x: Math.round(this.x), y: Math.round(this.y) })
+          .catch(err => console.error('drag put failed:', err));
+      }
+      // Epic #236 child 5 (#241): non-terminal cards (loader, blueprint, etc.)
+      // are ephemeral and not persisted — saveLayout() no longer exists. Their
+      // local position remains in DOM until the card is destroyed.
     };
 
     titlebar.addEventListener('pointerdown', (e) => {
@@ -1355,7 +1395,15 @@ class Card {
     const onUp = () => {
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
-      saveLayout();
+      // Epic #236 child 4 (#240): commit size to the server on mouseup.
+      // Same pattern as drag — optimistic during gesture, single PUT on
+      // pointerup, broadcast teleports non-authoring devices.
+      if (this.type === 'terminal' && this.sessionId) {
+        putCardState(this.sessionId, { w: Math.round(this.w), h: Math.round(this.h) })
+          .catch(err => console.error('resize put failed:', err));
+      }
+      // Epic #236 child 5 (#241): non-terminal cards do not persist; the
+      // resize stays on the client only.
     };
 
     handle.addEventListener('pointerdown', (e) => {
@@ -1384,11 +1432,20 @@ class Card {
   }
 
   serialize() {
-    const data = { hub: this.hub, x: this.x, y: this.y, w: this.w, h: this.h, type: this.type, controlGroups: this.controlGroupNums.length > 0 ? [...this.controlGroupNums] : undefined };
+    // Epic #236 child 4 (#240): ``x``/``y``/``w``/``h`` are server-owned and
+    // are NOT serialised into canvas JSON. The authoritative values live in
+    // ``CardRegistry`` and are surfaced through ``to_descriptor()`` on boot
+    // (and through ``card_updated`` thereafter). After this slice
+    // ``saveLayout()`` writes only layout-neutral metadata; child 5 will
+    // delete ``saveLayout()`` outright.
+    const data = { hub: this.hub, type: this.type, controlGroups: this.controlGroupNums.length > 0 ? [...this.controlGroupNums] : undefined };
     if (this.execCmd) data.exec = this.execCmd;
     if (this.sessionId) data.session_id = this.sessionId;
-    // Issue #151: persist starring, rename, recovery, stable identity
-    if (!this.starred) data.starred = false;
+    // Issue #151: persist rename, recovery, stable identity.
+    // Epic #236 child 3 (#239): ``starred`` is server-owned — it is NOT
+    // serialised into canvas JSON. The ``cards.filter(c => c.starred)`` in
+    // saveLayout() still filters correctly because ``c.starred`` now reads
+    // from server-pushed state.
     if (this.displayName) data.displayName = this.displayName;
     if (this.recoveryScript) data.recoveryScript = this.recoveryScript;
     if (this.cardUid) data.cardUid = this.cardUid;
@@ -1629,11 +1686,68 @@ class TerminalCard extends Card {
       this._renderDormant();
       return;
     }
+    this._activate();
+  }
+
+  // Live-terminal init path. Called from onInit() for starred cards and
+  // from _applyStarredBroadcast() when a dormant card is starred from
+  // another client. Idempotent guard via ``this.term``.
+  _activate() {
+    if (this.term) return; // already live
+    const body = this.el.querySelector(`[data-body="${this.id}"]`);
+    if (body) {
+      body.innerHTML = '';
+      body.style.cssText = '';
+    }
     this.initTerminal();
     this.connectWs();
     this.setupInput();
     this.setupResizeObserver();
     this.setupClaudeBtn();
+  }
+
+  // Apply a server-pushed ``starred`` update (from card_updated). Updates
+  // ``this.starred``, the star-glyph DOM, and drives the dormant↔live
+  // transition. This is the ONLY place outside the constructor /
+  // deserialiser where ``this.starred`` is assigned (epic #236 I-1).
+  _applyStarredBroadcast(next) {
+    const wasStarred = this.starred;
+    this.starred = !!next;
+
+    // Update star-button glyph / colour / tooltip.
+    const starBtn = this.el ? this.el.querySelector(`[data-star="${this.id}"]`) : null;
+    if (starBtn) {
+      starBtn.textContent = this.starred ? '\u2605' : '\u2606';
+      starBtn.style.color = this.starred ? '#f9e2af' : '#585b70';
+      starBtn.title = this.starred
+        ? 'Starred — will persist across reload'
+        : 'Unstarred — will not persist across reload';
+    }
+
+    // Drive dormant↔live transition.
+    if (this.starred && !wasStarred) {
+      this._activate();
+    } else if (!this.starred && wasStarred) {
+      this._deactivate();
+    }
+  }
+
+  // Live→dormant transition for remote un-star events.
+  _deactivate() {
+    // Tear down the live terminal, preserving the session on the server
+    // (kill_tmux=False default). The dormant placeholder is re-rendered
+    // so the card UI matches the fresh-load dormant look.
+    this._intentionalClose = true;
+    if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try { this.ws.close(); } catch (e) { /* ignore */ }
+    }
+    this.ws = null;
+    if (this.ro) { try { this.ro.disconnect(); } catch (e) { /* ignore */ } this.ro = null; }
+    if (this.term) { try { this.term.dispose(); } catch (e) { /* ignore */ } this.term = null; }
+    this.fitAddon = null;
+    this._intentionalClose = false;
+    this._renderDormant();
   }
 
   _renderDormant() {
@@ -1648,19 +1762,15 @@ class TerminalCard extends Card {
     resumeBtn.style.cssText = 'background:#313244;color:#cdd6f4;border:1px solid #585b70;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:13px;';
     resumeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      this.starred = true;
-      // Update star button
-      const starBtn = this.el.querySelector(`[data-star="${this.id}"]`);
-      if (starBtn) { starBtn.textContent = '\u2605'; starBtn.style.color = '#f9e2af'; starBtn.title = 'Starred — will persist across reload'; }
-      // Clear dormant body and init live terminal
-      body.innerHTML = '';
-      body.style.cssText = '';
-      this.initTerminal();
-      this.connectWs();
-      this.setupInput();
-      this.setupResizeObserver();
-      this.setupClaudeBtn();
-      saveLayout();
+      // Epic #236 child 3: Resume is a ``starred = true`` mutation — it
+      // round-trips through the server. The dormant→live transition
+      // (clearing the body, initTerminal, connectWs, etc.) is performed in
+      // applyStarredToCard when the ``card_updated`` broadcast arrives.
+      // Uses ``this.sessionId`` to key the server registry, matching every
+      // other putCardState site. Dormant cards always have a sessionId
+      // (they've been through handshake + dormancy); guard defensively.
+      if (!this.sessionId) return;
+      putCardState(this.sessionId, { starred: true }).catch(err => console.error('resume put failed:', err));
     });
     body.appendChild(resumeBtn);
     this.updateState('dead');
@@ -1699,10 +1809,31 @@ class TerminalCard extends Card {
       // Reconnect to existing persistent session
       wsUrl = `${wsProto}//${location.host}/ws/session/${this.sessionId}`;
     } else {
-      // Create new persistent session
+      // Create new persistent session. Epic #236 child 5 (#241): include
+      // canvas_name so the server can register the resulting card to the
+      // active canvas — required for the apply_state_patch write-through hook
+      // to know which snapshot file to rewrite on drag/resize/star.
+      //
+      // Epic #236 follow-up (#254): forward the card's ``starred`` value so
+      // the server's initial registry state matches the snapshot the client
+      // is spawning from. The client is NOT authoring the value — the
+      // snapshot (or preset fixture) is. The client is a courier. When the
+      // snapshot has no ``starred`` field, ``this.starred`` is ``false`` by
+      // default (per spawnFromSerialized), which the server also defaults to.
       const _docker = 'docker';
       const cmd = this.execCmd || `${_docker} exec -it -u vscode -w /workspaces/${this.hub} ${this.container} bash -l`;
-      wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}`;
+      const cn = (typeof currentCanvasName === 'string' && currentCanvasName) ? currentCanvasName : '';
+      const starredParam = this.starred ? 'true' : 'false';
+      // Courier the client-generated stable-identity UUID to the server so
+      // ``TerminalCard.card_uid`` is populated and round-trips into snapshots
+      // and ``to_descriptor()``. The server authors; client ships the value.
+      const uidParam = this.cardUid ? `&card_uid=${encodeURIComponent(this.cardUid)}` : '';
+      // Courier display_name + recovery_script from the rehydrated snapshot
+      // so the server registry (authoritative) matches disk on reconnect. On
+      // first spawn both are empty strings and the server defaults apply.
+      const nameParam = this.displayName ? `&display_name=${encodeURIComponent(this.displayName)}` : '';
+      const recoveryParam = this.recoveryScript ? `&recovery_script=${encodeURIComponent(this.recoveryScript)}` : '';
+      wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}&canvas_name=${encodeURIComponent(cn)}&starred=${starredParam}${uidParam}${nameParam}${recoveryParam}`;
     }
     this.ws = new WebSocket(wsUrl);
     this.ws.binaryType = 'arraybuffer';
@@ -1721,7 +1852,10 @@ class TerminalCard extends Card {
           const msg = JSON.parse(ev.data);
           if (msg.session_id) {
             this.sessionId = msg.session_id;
-            saveLayout();
+            // Epic #236 child 5 (#241): no client-side persist — the server
+            // already registered the card under this session_id when the WS
+            // handshake completed and any geometry committed via PUT
+            // /api/cards/{id}/state will trigger the write-through hook.
             if (msg.tmux === false && this.container) {
               this.term.write('\r\n\x1b[33m⚠ tmux not available in container — terminal will not persist across server restarts. Install tmux in the container to enable persistence.\x1b[0m\r\n');
             }
@@ -1892,9 +2026,9 @@ class TerminalCard extends Card {
       exec: data.exec || null,
       sessionId: data.session_id || null,
       starred: data.starred != null ? data.starred : true,
-      displayName: data.displayName || '',
-      recoveryScript: data.recoveryScript || '',
-      cardUid: data.cardUid || '',
+      displayName: data.display_name || data.displayName || '',
+      recoveryScript: data.recovery_script || data.recoveryScript || '',
+      cardUid: data.card_uid || data.cardUid || '',
     });
     if (Array.isArray(data.controlGroups)) {
       card.controlGroupNums = [...data.controlGroups];
@@ -2048,7 +2182,8 @@ class CanvasClaudeCard extends TerminalCard {
       if (!resp.ok) throw new Error(await resp.text());
       const desc = await resp.json();
       this.sessionId = desc.session_id;
-      saveLayout();
+      // Epic #236 child 5 (#241): server already wrote the snapshot when it
+      // registered the new card; no client-side save needed.
 
       const overlay = this.el.querySelector(`[data-pending-overlay="${this.id}"]`);
       if (overlay) overlay.remove();
@@ -2087,7 +2222,7 @@ class CanvasClaudeCard extends TerminalCard {
           const msg = JSON.parse(ev.data);
           if (msg.session_id) {
             this.sessionId = msg.session_id;
-            saveLayout();
+            // Epic #236 child 5 (#241): no client persist — server-owned.
           }
           if (msg.error === 'session_not_found') {
             // Session died — recreate via the server API (writes MCP config + tmux).
@@ -2130,7 +2265,8 @@ class CanvasClaudeCard extends TerminalCard {
     // Show the overlay so the user can set up credentials explicitly.
     if (!this.profile) {
       this.sessionId = null;
-      saveLayout();
+      // Epic #236 child 5 (#241): no client persist — server snapshot will be
+      // re-written when the next session is registered.
       this._showNoPriorityOverlay();
       return;
     }
@@ -2148,7 +2284,7 @@ class CanvasClaudeCard extends TerminalCard {
       }
       const desc = await resp.json();
       this.sessionId = desc.session_id;
-      saveLayout();
+      // Epic #236 child 5 (#241): server-owned persistence.
       this._intentionalClose = false;
       this.connectWs();
     } catch (err) {
@@ -3020,9 +3156,20 @@ function destroyCard(id) {
   const idx = cards.findIndex(c => c.id === id);
   if (idx === -1) return;
   const card = cards[idx];
+  // Epic #236 child 5 (#241): no client-authored canvas persist. Closing a
+  // terminal must DELETE on the server so ``CardRegistry.unregister`` fires
+  // and the write-through hook rewrites the snapshot without the closed
+  // card — otherwise a reload rehydrates it from the stale snapshot. WS
+  // close alone does NOT unregister (the session lives for the 5-minute
+  // orphan window to support reconnection). For non-terminal cards the
+  // server has no record to clean up.
+  const sessionId = card.type === 'terminal' ? card.sessionId : null;
   card.destroy();
   cards.splice(idx, 1);
-  saveLayout();
+  if (sessionId) {
+    fetch(`/api/claude/terminal/${encodeURIComponent(sessionId)}`, { method: 'DELETE' })
+      .catch(err => console.error('terminal delete failed:', err));
+  }
   drawMinimap();
   updateHubCount();
 }
@@ -3056,6 +3203,14 @@ async function spawnFromSerialized(s) {
     console.warn('spawnFromSerialized: entry has no type and no hub, skipping', s);
     return null;
   }
+  // Epic #236 follow-up (#254): client must not invent a starred default.
+  // The snapshot / preset is the authoritative source — if it omits
+  // ``starred``, the card is unstarred. Any canvas file that relies on the
+  // pre-#254 "absent = starred" fallback must be updated to include
+  // ``"starred": true`` explicitly (see dev_presets/*/canvases/*.json).
+  // The old fallback was a DP-1 violation: a client-authored default that
+  // the server silently mirrored. Setting ``false`` here keeps the client
+  // from inventing authoritative state.
   if (typeName === 'terminal') {
     const hub = hubs.find(h => h.hub === s.hub);
     if (!hub) return null; // undiscovered hub — skip, like the old ladder did
@@ -3065,10 +3220,13 @@ async function spawnFromSerialized(s) {
       exec: s.exec,
       sessionId: s.session_id,
       controlGroups: s.controlGroups,
-      starred: s.starred != null ? s.starred : true,
-      displayName: s.displayName || '',
-      recoveryScript: s.recoveryScript || '',
-      cardUid: s.cardUid || '',
+      starred: s.starred != null ? s.starred : false,
+      // Server-authored snapshots emit snake_case (``to_descriptor()``).
+      // Legacy client-authored snapshots used camelCase; fall back to those
+      // for files predating epic #236 child 5 (#241).
+      displayName: s.display_name || s.displayName || '',
+      recoveryScript: s.recovery_script || s.recoveryScript || '',
+      cardUid: s.card_uid || s.cardUid || '',
     });
   }
   if (typeName === 'widget') {
@@ -3077,10 +3235,7 @@ async function spawnFromSerialized(s) {
       widgetType: s.widgetType,
       x: s.x, y: s.y, w: s.w, h: s.h,
       refreshInterval: s.refreshInterval,
-      // Issue #194: reload path must default to starred=true so cards saved
-      // before the "unstarred by default" flip are not filtered out by the
-      // next saveLayout(). Matches the terminal branch above.
-      starred: s.starred != null ? s.starred : true,
+      starred: s.starred != null ? s.starred : false,
     });
   }
   if (typeName === 'canvas_claude') {
@@ -3089,17 +3244,17 @@ async function spawnFromSerialized(s) {
       sessionId: s.session_id,
       profile: s.profile,
       canvasName: s.canvasName,
-      starred: s.starred != null ? s.starred : true,
+      starred: s.starred != null ? s.starred : false,
     });
   }
   // Unknown type: fall back to the registry so any future card type that
-  // registers itself is handled automatically. Default starred=true on the
-  // reload path (issue #194) so cards saved before the default-flip are
-  // not filtered out by the next saveLayout().
+  // registers itself is handled automatically. Starred default mirrors the
+  // terminal / widget / canvas_claude branches above — ``false`` when the
+  // snapshot does not specify.
   return CARD_TYPE_REGISTRY.spawn(typeName, {
     ...s,
     sessionId: s.session_id,
-    starred: s.starred != null ? s.starred : true,
+    starred: s.starred != null ? s.starred : false,
   });
 }
 
@@ -3167,7 +3322,8 @@ function assignControlGroup(groupNum) {
     updateControlGroupBadges(card);
     flashControlGroupBadges(card);
   }
-  saveLayout();
+  // Epic #236 child 5 (#241): control groups are per-device only (see
+  // docs/state-model.md per-device allowlist) — no server persist.
 }
 
 function recallControlGroup(groupNum, doubleTap) {
@@ -3469,20 +3625,12 @@ document.addEventListener('keydown', (e) => {
 let currentCanvasName = 'main';
 let canvasList = [];  // list of available canvas names
 
-function saveLayout() {
-  // Issue #194: only starred cards persist across reload — unstarred cards are
-  // ephemeral and excluded from the saved layout.
-  const data = {
-    name: currentCanvasName,
-    canvas_size: [CANVAS_W, CANVAS_H],
-    cards: cards.filter(c => c.starred).map(c => c.serialize()),
-  };
-  fetch(`/api/canvases/${encodeURIComponent(currentCanvasName)}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  }).catch(err => console.warn('Failed to save layout:', err));
-}
+// Epic #236 child 5 (#241): saveLayout() has been deleted. Canvas JSON on
+// disk is server-authored — every mutation flows through
+// PUT /api/cards/{id}/state, the server's CardRegistry write-through hook
+// rewrites the snapshot, and the card_updated broadcast carries the change
+// to every connected client. The endpoint PUT /api/canvases/{name} no longer
+// exists; calling it from the frontend is forbidden by review.
 
 async function loadLayout() {
   try {
@@ -3532,7 +3680,10 @@ function renderCanvasDropdown() {
   }
   html += '<div class="canvas-dropdown-sep"></div>';
   html += '<div class="canvas-dropdown-action" id="canvas-new-action">+ New canvas</div>';
-  html += '<div class="canvas-dropdown-action" id="canvas-rename-action">Rename current</div>';
+  // Epic #236 child 5 (#241): canvas rename is retired in this slice. The
+  // pre-epic implementation depended on a client-driven PUT /api/canvases/...
+  // which no longer exists. Rename can return as a server-side endpoint in a
+  // follow-up.
   canvasDropdown.innerHTML = html;
 
   // Switch handlers
@@ -3566,7 +3717,11 @@ function renderCanvasDropdown() {
     });
   });
 
-  // New canvas
+  // New canvas — Epic #236 child 5 (#241): a "new canvas" is now created
+  // implicitly the first time a card is registered to it (the server's
+  // write-through hook will create the JSON file on first persist). We
+  // simply switch to the name; the server responds 404 to GET on a missing
+  // canvas and switchCanvas treats that as an empty canvas.
   const newAction = canvasDropdown.querySelector('#canvas-new-action');
   if (newAction) {
     newAction.addEventListener('click', async () => {
@@ -3576,46 +3731,7 @@ function renderCanvasDropdown() {
         if (name !== null) alert('Invalid canvas name. Use only letters, numbers, hyphens, underscores.');
         return;
       }
-      // Save current canvas first, then switch to the new empty canvas
-      saveLayout();
-      // Create an empty canvas on the server
-      await fetch(`/api/canvases/${encodeURIComponent(name)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, canvas_size: [CANVAS_W, CANVAS_H], cards: [] }),
-      });
       await switchCanvas(name);
-    });
-  }
-
-  // Rename canvas
-  const renameAction = canvasDropdown.querySelector('#canvas-rename-action');
-  if (renameAction) {
-    renameAction.addEventListener('click', async () => {
-      hideCanvasDropdown();
-      const newName = prompt('Rename canvas to:', currentCanvasName);
-      if (!newName || newName === currentCanvasName || !/^[a-zA-Z0-9_-]+$/.test(newName)) {
-        if (newName !== null && newName !== currentCanvasName) alert('Invalid canvas name.');
-        return;
-      }
-      // Save current layout under the new name, delete the old one
-      const oldName = currentCanvasName;
-      const layoutData = {
-        name: newName,
-        canvas_size: [CANVAS_W, CANVAS_H],
-        cards: cards.map(c => c.serialize()),
-      };
-      await fetch(`/api/canvases/${encodeURIComponent(newName)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(layoutData),
-      });
-      if (oldName !== 'main') {
-        await fetch(`/api/canvases/${encodeURIComponent(oldName)}`, { method: 'DELETE' });
-      }
-      currentCanvasName = newName;
-      updateCanvasSwitcherLabel();
-      await refreshCanvasList();
     });
   }
 }
@@ -3642,10 +3758,9 @@ document.addEventListener('click', () => hideCanvasDropdown());
 canvasDropdown.addEventListener('click', (e) => e.stopPropagation());
 
 async function switchCanvas(name) {
-  // 1. Save current layout
-  saveLayout();
-
-  // 2. Destroy all current cards
+  // Epic #236 child 5 (#241): no client-side save before switching — every
+  // server-owned mutation has already been written through by CardRegistry.
+  // 1. Destroy all current cards
   while (cards.length > 0) {
     const card = cards.pop();
     card.destroy();
@@ -3795,12 +3910,16 @@ async function handleControlCardCreated(msg) {
       x, y,
       w: desc.w || CARD_W,
       h: desc.h || CARD_H,
-      starred: desc.starred != null ? desc.starred : true,
+      // Epic #236 child 3: ``to_descriptor()`` always includes ``starred``
+      // (both True and False). The ``!= null`` fallback remains only for
+      // pre-epic descriptors that may predate the server-side field.
+      starred: desc.starred != null ? desc.starred : false,
       displayName: desc.display_name || '',
       recoveryScript: desc.recovery_script || '',
-      cardUid: desc.cardUid || '',
+      cardUid: desc.card_uid || desc.cardUid || '',
     });
-    saveLayout();
+    // Epic #236 child 5 (#241): server snapshot already reflects this card
+    // (the broadcast is downstream of the server-side register).
   }
 }
 
@@ -3816,10 +3935,94 @@ function handleControlCardDeleted(msg) {
   const card = cards[idx];
   card.destroy();
   cards.splice(idx, 1);
-  saveLayout();
+  // Epic #236 child 5 (#241): server snapshot already reflects the removal.
   drawMinimap();
   updateHubCount();
 }
+
+// PUT /api/cards/{id}/state — the single server-owned-state mutation path
+// (epic #236 / issue #238). Every user action that mutates a server-owned
+// card field MUST round-trip through here; direct assignment to card
+// properties followed by local rendering is forbidden (see docs/state-model.md).
+async function putCardState(cardId, fields) {
+  const resp = await fetch(`/api/cards/${encodeURIComponent(cardId)}/state`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`putCardState ${cardId} failed: ${resp.status} ${text}`);
+  }
+  return resp.json();
+}
+
+// Field-dispatch table for card_updated broadcasts.
+//
+// To add a new server-owned field: add one entry here mapping the field name
+// to a (card, value) => void applier. Keep each applier self-contained — the
+// dispatcher below iterates every known field in the incoming message.
+const CARD_UPDATED_FIELD_HANDLERS = {
+  display_name(card, value) {
+    card.displayName = value;
+    const nameSpan = card.el ? card.el.querySelector(`[data-display-name="${card.id}"]`) : null;
+    if (nameSpan) nameSpan.textContent = value || card.hub;
+  },
+  recovery_script(card, value) {
+    card.recoveryScript = value;
+    const recoveryBtn = card.el ? card.el.querySelector(`[data-recovery="${card.id}"]`) : null;
+    if (recoveryBtn) recoveryBtn.style.display = value ? 'inline' : 'none';
+  },
+  // Epic #236 child 3 (#239): ``starred`` is server-owned. The applier
+  // updates the star glyph and drives the dormant↔live terminal transition.
+  starred(card, value) {
+    if (typeof card._applyStarredBroadcast === 'function') {
+      card._applyStarredBroadcast(value);
+    } else {
+      // Non-terminal cards: just mirror the field; no transition logic.
+      card.starred = !!value;
+    }
+  },
+  // Epic #236 child 4 (#240): position / size / z-order. The authoring
+  // device already rendered optimistically during the gesture, so applying
+  // the broadcast on the same device is a harmless no-op (values already
+  // match). On any other connected device, this branch teleports the card
+  // to its new geometry within 1 second of the originating ``pointerup``.
+  x(card, value) {
+    if (typeof value !== 'number') return;
+    card.x = value;
+    if (card.el) card.el.style.left = value + 'px';
+  },
+  y(card, value) {
+    if (typeof value !== 'number') return;
+    card.y = value;
+    if (card.el) card.el.style.top = value + 'px';
+  },
+  w(card, value) {
+    if (typeof value !== 'number') return;
+    card.w = value;
+    if (card.el) card.el.style.width = value + 'px';
+  },
+  h(card, value) {
+    if (typeof value !== 'number') return;
+    card.h = value;
+    if (card.el) card.el.style.height = value + 'px';
+  },
+  z_order(card, value) {
+    if (typeof value !== 'number') return;
+    card.zOrder = value;
+    if (card.el) card.el.style.zIndex = value;
+    // Keep ``Card.maxZ`` monotonic across clients so a subsequent local
+    // focus on this device does not produce a z_order lower than the
+    // one we just received from the authoring device.
+    if (value > Card.maxZ) Card.maxZ = value;
+  },
+};
+
+// Fields whose application requires a minimap redraw (geometry-affecting).
+// Listed explicitly rather than redrawing on every broadcast so cheap fields
+// like ``display_name`` don't trigger canvas work.
+const _GEOMETRY_FIELDS = new Set(['x', 'y', 'w', 'h']);
 
 function handleControlCardUpdated(msg) {
   const cardId = msg.card_id;
@@ -3829,21 +4032,23 @@ function handleControlCardUpdated(msg) {
   const card = cards.find(c => c.sessionId === cardId);
   if (!card) return;
 
-  // Update display_name if present
-  if ('display_name' in msg) {
-    card.displayName = msg.display_name;
-    const nameSpan = card.el ? card.el.querySelector(`[data-display-name="${card.id}"]`) : null;
-    if (nameSpan) nameSpan.textContent = msg.display_name || card.hub;
+  let changed = false;
+  let geometryChanged = false;
+  for (const [field, applier] of Object.entries(CARD_UPDATED_FIELD_HANDLERS)) {
+    if (field in msg) {
+      applier(card, msg[field]);
+      changed = true;
+      if (_GEOMETRY_FIELDS.has(field)) geometryChanged = true;
+    }
   }
 
-  // Update recovery_script if present
-  if ('recovery_script' in msg) {
-    card.recoveryScript = msg.recovery_script;
-    const recoveryBtn = card.el ? card.el.querySelector(`[data-recovery="${card.id}"]`) : null;
-    if (recoveryBtn) recoveryBtn.style.display = msg.recovery_script ? 'inline' : 'none';
-  }
+  // Epic #236 child 4 (#240): refresh the minimap when geometry changes
+  // (drag/resize broadcasts) so the non-authoring device's overview pane
+  // tracks card movement live.
+  if (geometryChanged && typeof drawMinimap === 'function') drawMinimap();
 
-  saveLayout();
+  // Epic #236 child 5 (#241): no client-side persist on broadcast — the
+  // server has already written the snapshot via apply_state_patch.
 }
 
 // ════════════════════════════════════════════

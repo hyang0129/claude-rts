@@ -47,17 +47,27 @@ def count_cards_by_type(page, card_type):
 
 
 def put_canvas(page, canvas_name, payload):
-    """PUT a canvas layout via the REST API."""
-    payload_json = json.dumps(payload)
-    page.evaluate(
-        f"""async () => {{
-            await fetch('/api/canvases/{canvas_name}', {{
-                method: 'PUT',
-                headers: {{'Content-Type': 'application/json'}},
-                body: {json.dumps(payload_json)},
-            }});
-        }}"""
-    )
+    """Seed a canvas layout by writing the JSON file directly to the dev-config
+    canvases dir on disk.
+
+    Epic #241 deleted the legacy ``PUT /api/canvases/{name}`` REST route; the
+    new state model routes all card-state mutations through
+    ``PUT /api/cards/{id}/state`` and offers no whole-canvas write API. For
+    test fixtures that need to seed an entire canvas (including legacy /
+    unknown ``type`` values for backward-compat tests), the cleanest path is
+    to write the canvas JSON file directly to the isolated dev-config
+    canvases dir before navigation triggers ``switchCanvas`` (which fetches
+    the layout via ``GET /api/canvases/{name}``).
+
+    The ``page`` arg is unused but retained so the helper signature matches
+    the original caller sites.
+    """
+    del page  # unused — kept for signature compat
+    from claude_rts.dev_config import DEV_CONFIG_DIR
+
+    canvases_dir = DEV_CONFIG_DIR / "canvases"
+    canvases_dir.mkdir(parents=True, exist_ok=True)
+    (canvases_dir / f"{canvas_name}.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 # ── Module fixture: use start-claude preset ──────────────────────────────────

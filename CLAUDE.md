@@ -23,6 +23,12 @@ Verify the port is free before starting. Running multiple instances on the **sam
 
 **Use `--electron` for manual/QA testing.** Launch via `python -m claude_rts --electron` to run in the Electron shell instead of a browser tab.
 
+## State ownership
+
+All card state mutations must go through `PUT /api/cards/{id}/state`. Client-owned authoritative state is an anti-pattern; fields that only affect local rendering (pan/zoom, focus, minimap, control groups) are the documented exception and must be listed in `docs/state-model.md`. Code review rejects any new field that diverges from this rule without updating the doc.
+
+See [`docs/state-model.md`](docs/state-model.md) for the server-owned list, the per-device allowlist, and the review checklist. The `PUT /api/cards/{id}/state` endpoint is specified by epic #236 child 2 (#238) and is the single mutation path every card-state change flows through.
+
 ## Key Design Decisions
 
 - **ptyprocess for POSIX PTY**: `ptyprocess` is the PTY backend on Linux/macOS. The Windows ConPTY branch (`pywinpty`) was removed — Windows is community-supported best-effort only.

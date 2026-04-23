@@ -16,9 +16,37 @@ class BaseCard(abc.ABC):
     card_type: str = "base"
     hidden: bool = False  # ServiceCard overrides to True
 
+    # Allowlist of attribute names that may be mutated through
+    # ``CardRegistry.apply_state_patch`` (the single server-owned mutation path
+    # defined by epic #236 / issue #238). Subclasses extend this set with any
+    # additional server-owned fields. Fields outside this set are rejected with
+    # HTTP 400 by ``PUT /api/cards/{id}/state``.
+    #
+    # To add a new server-owned field: add its name here (or on a subclass),
+    # ensure it is a plain ``str`` attribute on the card instance, and add a
+    # one-line dispatch entry in ``handleControlCardUpdated`` in
+    # ``static/index.html``.
+    MUTABLE_FIELDS: frozenset[str] = frozenset()
+
     def __init__(self, card_id: str | None = None, bus: EventBus | None = None):
         self._id = card_id or uuid.uuid4().hex[:8]
         self._bus = bus
+        # Server-owned state (epic #236). Every field listed here must appear
+        # in ``MUTABLE_FIELDS`` on the subclass that wants it mutable through
+        # ``PUT /api/cards/{id}/state`` (see docs/state-model.md).
+        self.starred: bool = False
+        # Epic #236 child 4 (#240): position / size / z-order are server-owned.
+        # Mutated only through ``CardRegistry.apply_state_patch`` (drag/resize/
+        # focus all PUT to ``/api/cards/{id}/state`` on ``pointerup``); the
+        # ``card_updated`` broadcast carries them to every connected client.
+        # Defaults are 0; the spawn handler back-fills real values from the
+        # query params, and the client renders optimistically during the
+        # gesture and only commits on mouseup (DP-4).
+        self.x: int = 0
+        self.y: int = 0
+        self.w: int = 0
+        self.h: int = 0
+        self.z_order: int = 0
 
     @property
     def id(self) -> str:

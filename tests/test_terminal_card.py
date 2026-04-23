@@ -344,8 +344,38 @@ async def test_terminal_card_descriptor_omits_empty_display_name(monkeypatch):
     desc = card.to_descriptor()
     assert "display_name" not in desc
     assert "recovery_script" not in desc
+    # Epic #236 child 3 (#239): ``starred`` is always present in the
+    # descriptor — both ``True`` and ``False`` — so the client boot path
+    # reads the server's authoritative value instead of defaulting.
+    assert desc["starred"] is False
 
     await card.stop()
+    mgr.stop_all()
+
+
+async def test_terminal_card_starred_descriptor_round_trip(monkeypatch):
+    """``starred`` round-trips through ``to_descriptor`` in both states."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+
+    # Default (unstarred)
+    card = TerminalCard(session_manager=mgr, cmd="bash")
+    await card.start()
+    desc = card.to_descriptor()
+    assert desc["starred"] is False
+
+    # Mutated to starred (simulating apply_state_patch)
+    card.starred = True
+    desc = card.to_descriptor()
+    assert desc["starred"] is True
+
+    # Constructed as starred
+    card2 = TerminalCard(session_manager=mgr, cmd="bash", starred=True)
+    await card2.start()
+    assert card2.to_descriptor()["starred"] is True
+
+    await card.stop()
+    await card2.stop()
     mgr.stop_all()
 
 
@@ -364,4 +394,182 @@ async def test_terminal_card_mutable_display_name(monkeypatch):
     assert desc["recovery_script"] == "npm start"
 
     await card.stop()
+    mgr.stop_all()
+
+
+# ── Epic #236 child 5 (#241) — canvas-membership + persistence hook ────────
+
+
+async def test_card_registry_register_with_canvas_name(monkeypatch):
+    """register(card, canvas_name=...) records the card's canvas membership."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    reg = CardRegistry()
+
+    card = TerminalCard(session_manager=mgr, cmd="bash")
+    await card.start()
+    reg.register(card, canvas_name="main")
+    try:
+        assert reg.get_canvas_name(card.id) == "main"
+        assert reg.cards_on_canvas("main") == [card]
+        assert reg.cards_on_canvas("other") == []
+    finally:
+        reg.unregister(card.id)
+        await card.stop()
+        mgr.stop_all()
+
+
+async def test_card_registry_register_without_canvas_name_defaults_none(monkeypatch):
+    """Backward compat: register(card) without canvas_name records None membership."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    reg = CardRegistry()
+
+    card = TerminalCard(session_manager=mgr, cmd="bash")
+    await card.start()
+    reg.register(card)
+    try:
+        assert reg.get_canvas_name(card.id) is None
+    finally:
+        reg.unregister(card.id)
+        await card.stop()
+        mgr.stop_all()
+
+
+async def test_apply_state_patch_triggers_persist_callback(monkeypatch):
+    """apply_state_patch invokes the persist hook with the card's canvas name."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    reg = CardRegistry()
+    invocations: list[str] = []
+
+    reg.set_persist_callback(invocations.append)
+
+    card = TerminalCard(session_manager=mgr, cmd="bash")
+    await card.start()
+    reg.register(card, canvas_name="canvas-A")
+
+    reg.apply_state_patch(card.id, {"starred": True})
+    assert invocations == ["canvas-A"]
+
+    # Subsequent patch on the same card hits the same canvas.
+    reg.apply_state_patch(card.id, {"display_name": "Dev"})
+    assert invocations == ["canvas-A", "canvas-A"]
+
+    await card.stop()
+    mgr.stop_all()
+
+
+async def test_apply_state_patch_no_persist_when_canvas_unset(monkeypatch):
+    """Cards with no canvas membership do not trigger the persist hook."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    reg = CardRegistry()
+    invocations: list[str] = []
+    reg.set_persist_callback(invocations.append)
+
+    card = TerminalCard(session_manager=mgr, cmd="bash")
+    await card.start()
+    reg.register(card)  # no canvas_name
+
+    reg.apply_state_patch(card.id, {"starred": True})
+    assert invocations == []
+
+    await card.stop()
+    mgr.stop_all()
+
+
+async def test_unregister_triggers_persist_callback(monkeypatch):
+    """Removing a card persists the canvas so the snapshot reflects the deletion."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    reg = CardRegistry()
+    invocations: list[str] = []
+    reg.set_persist_callback(invocations.append)
+
+    card = TerminalCard(session_manager=mgr, cmd="bash")
+    await card.start()
+    reg.register(card, canvas_name="main")
+    invocations.clear()
+
+    reg.unregister(card.id)
+    assert invocations == ["main"]
+
+    await card.stop()
+    mgr.stop_all()
+
+
+async def test_persist_callback_swallows_exceptions(monkeypatch):
+    """A failing persist callback must not roll back the in-memory mutation."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    reg = CardRegistry()
+
+    def boom(_canvas_name: str) -> None:
+        raise RuntimeError("disk full")
+
+    reg.set_persist_callback(boom)
+
+    card = TerminalCard(session_manager=mgr, cmd="bash")
+    await card.start()
+    reg.register(card, canvas_name="main")
+
+    # Must not raise — the in-memory mutation already happened.
+    reg.apply_state_patch(card.id, {"starred": True})
+    assert card.starred is True
+
+    await card.stop()
+    mgr.stop_all()
+
+
+async def test_terminal_card_descriptor_includes_card_id(monkeypatch):
+    """to_descriptor() emits card_id (epic #236 child 5 schema discriminator)."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    card = TerminalCard(session_manager=mgr, cmd="bash")
+    await card.start()
+    desc = card.to_descriptor()
+    assert "card_id" in desc
+    assert desc["card_id"] == card.id
+    await card.stop()
+    mgr.stop_all()
+
+
+async def test_persist_callback_only_includes_starred_cards(monkeypatch):
+    """Issue #194: only starred cards belong in the persisted snapshot.
+
+    The persist callback in ``server.on_startup`` filters out unstarred cards
+    so a reload starts with a clean slate. This test exercises the filter
+    semantics directly through the registry; the callback wiring is covered
+    end-to-end by the integration test.
+    """
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    reg = CardRegistry()
+    snapshot: list[list] = []
+
+    def _capture(canvas_name: str) -> None:
+        # Mirror server.on_startup's filter (starred + visible + has descriptor)
+        cards = [
+            c
+            for c in reg.cards_on_canvas(canvas_name)
+            if not getattr(c, "hidden", False) and hasattr(c, "to_descriptor") and getattr(c, "starred", False)
+        ]
+        snapshot.append([c.id for c in cards])
+
+    reg.set_persist_callback(_capture)
+
+    starred = TerminalCard(session_manager=mgr, cmd="bash", starred=True)
+    unstarred = TerminalCard(session_manager=mgr, cmd="bash", starred=False)
+    await starred.start()
+    await unstarred.start()
+    reg.register(starred, canvas_name="main")
+    reg.register(unstarred, canvas_name="main")
+
+    snapshot.clear()
+    reg.apply_state_patch(starred.id, {"display_name": "ok"})
+    assert snapshot == [[starred.id]]
+
+    await starred.stop()
+    await unstarred.stop()
     mgr.stop_all()
