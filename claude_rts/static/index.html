@@ -1672,6 +1672,9 @@ class TerminalCard extends Card {
     if (opts.recoveryScript) this.recoveryScript = opts.recoveryScript;
     if (opts.cardUid) this.cardUid = opts.cardUid;
     if (!this.cardUid) this.cardUid = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).slice(2) + Date.now().toString(36));
+    // Epic #254 child 3 (#258): render distinct error UI for cards hydrated
+    // by Child #2 into ``error_state`` (e.g. container unavailable at boot).
+    this.errorState = opts.errorState || null;
   }
 
   createBody() {
@@ -1681,12 +1684,78 @@ class TerminalCard extends Card {
   }
 
   onInit() {
+    // Epic #254 child 3 (#258): error_state takes priority over dormant.
+    if (this.errorState) {
+      this._renderErrorState();
+      return;
+    }
     if (!this.starred) {
       // Dormant card: show placeholder instead of live terminal
       this._renderDormant();
       return;
     }
     this._activate();
+  }
+
+  // Epic #254 child 3 (#258): error-state UI. Hydrated cards whose container
+  // was unreachable after the bounded retry ceiling render here with a
+  // manual retry button. Clicking retry posts ``PUT /api/cards/{id}/state``
+  // with ``{action: "retry_pty"}``, routed through the single DP-1 mutation
+  // path per Q3-a.
+  _renderErrorState() {
+    const body = this.el.querySelector(`[data-body="${this.id}"]`);
+    if (!body) return;
+    body.style.cssText = 'display:flex;align-items:center;justify-content:center;flex-direction:column;opacity:0.9;';
+    body.innerHTML = '';
+    const kind = (this.errorState && this.errorState.kind) || 'unknown';
+    const label = document.createElement('div');
+    label.className = 'terminal-error-label';
+    label.style.cssText = 'color:#f38ba8;font-size:13px;margin-bottom:10px;text-align:center;max-width:90%;';
+    label.textContent = kind === 'container_unavailable'
+      ? 'Unable to connect to container - retry'
+      : `Error: ${kind} - retry`;
+    body.appendChild(label);
+    const detail = document.createElement('div');
+    detail.style.cssText = 'color:#585b70;font-size:11px;margin-bottom:12px;text-align:center;max-width:90%;word-break:break-word;';
+    if (this.errorState && this.errorState.last_error) detail.textContent = String(this.errorState.last_error).slice(0, 200);
+    body.appendChild(detail);
+    const retryBtn = document.createElement('button');
+    retryBtn.className = 'terminal-error-retry';
+    retryBtn.setAttribute('data-retry', this.id);
+    retryBtn.textContent = 'Retry';
+    retryBtn.style.cssText = 'background:#313244;color:#f38ba8;border:1px solid #f38ba8;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:13px;';
+    retryBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!this.sessionId) return;
+      retryBtn.disabled = true;
+      retryBtn.textContent = 'Retrying...';
+      putCardState(this.sessionId, { action: 'retry_pty' }).catch(err => {
+        console.error('retry_pty failed:', err);
+        retryBtn.disabled = false;
+        retryBtn.textContent = 'Retry';
+      });
+    });
+    body.appendChild(retryBtn);
+    this.updateState('dead');
+  }
+
+  // Apply a server-pushed ``error_state`` update (from card_updated). When
+  // the server clears error_state after a successful retry, transition into
+  // the normal live/dormant flow.
+  _applyErrorStateBroadcast(next) {
+    const hadError = !!this.errorState;
+    this.errorState = next || null;
+    if (this.errorState) {
+      this._renderErrorState();
+    } else if (hadError) {
+      const body = this.el.querySelector(`[data-body="${this.id}"]`);
+      if (body) { body.innerHTML = ''; body.style.cssText = ''; }
+      if (this.starred) {
+        this._activate();
+      } else {
+        this._renderDormant();
+      }
+    }
   }
 
   // Live-terminal init path. Called from onInit() for starred cards and
@@ -1809,31 +1878,19 @@ class TerminalCard extends Card {
       // Reconnect to existing persistent session
       wsUrl = `${wsProto}//${location.host}/ws/session/${this.sessionId}`;
     } else {
-      // Create new persistent session. Epic #236 child 5 (#241): include
-      // canvas_name so the server can register the resulting card to the
-      // active canvas — required for the apply_state_patch write-through hook
-      // to know which snapshot file to rewrite on drag/resize/star.
-      //
-      // Epic #236 follow-up (#254): forward the card's ``starred`` value so
-      // the server's initial registry state matches the snapshot the client
-      // is spawning from. The client is NOT authoring the value — the
-      // snapshot (or preset fixture) is. The client is a courier. When the
-      // snapshot has no ``starred`` field, ``this.starred`` is ``false`` by
-      // default (per spawnFromSerialized), which the server also defaults to.
+      // Epic #254 child 3 (#258): user-initiated spawn only. Boot and
+      // switchCanvas now render from server-registry descriptors (see
+      // ``renderFromDescriptor`` + ``fetchCanvasDescriptors``) and always
+      // take the reconnect branch above. Reaching this branch means the
+      // user explicitly spawned a new terminal (sidebar / context menu),
+      // so we carry only functional params — never courier snapshot state
+      // (``starred``, ``card_uid``, ``display_name``, ``recovery_script``)
+      // into a server-authoritative field. DP-1 invariant: the server
+      // authors defaults; the client is not a courier on first spawn.
       const _docker = 'docker';
       const cmd = this.execCmd || `${_docker} exec -it -u vscode -w /workspaces/${this.hub} ${this.container} bash -l`;
       const cn = (typeof currentCanvasName === 'string' && currentCanvasName) ? currentCanvasName : '';
-      const starredParam = this.starred ? 'true' : 'false';
-      // Courier the client-generated stable-identity UUID to the server so
-      // ``TerminalCard.card_uid`` is populated and round-trips into snapshots
-      // and ``to_descriptor()``. The server authors; client ships the value.
-      const uidParam = this.cardUid ? `&card_uid=${encodeURIComponent(this.cardUid)}` : '';
-      // Courier display_name + recovery_script from the rehydrated snapshot
-      // so the server registry (authoritative) matches disk on reconnect. On
-      // first spawn both are empty strings and the server defaults apply.
-      const nameParam = this.displayName ? `&display_name=${encodeURIComponent(this.displayName)}` : '';
-      const recoveryParam = this.recoveryScript ? `&recovery_script=${encodeURIComponent(this.recoveryScript)}` : '';
-      wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}&canvas_name=${encodeURIComponent(cn)}&starred=${starredParam}${uidParam}${nameParam}${recoveryParam}`;
+      wsUrl = `${wsProto}//${location.host}/ws/session/new?cmd=${encodeURIComponent(cmd)}&hub=${encodeURIComponent(this.hub)}&container=${encodeURIComponent(this.container || '')}&canvas_name=${encodeURIComponent(cn)}`;
     }
     this.ws = new WebSocket(wsUrl);
     this.ws.binaryType = 'arraybuffer';
@@ -3189,13 +3246,80 @@ function updateHubCount() {
   document.getElementById('hub-count').textContent = parts.join(' | ');
 }
 
+// Epic #254 child 3 (#258): render a server-registry descriptor returned by
+// ``GET /api/cards?canvas=X``. Dispatches on ``descriptor.type`` to the
+// appropriate client-side constructor. Terminal cards are constructed with
+// ``sessionId = descriptor.session_id`` so ``connectWs`` takes the reconnect
+// branch (``/ws/session/{id}``) and never calls ``/ws/session/new`` — the
+// server has already registered the card at startup, the client is a pure
+// view/input surface.
+//
+// Widget and canvas_claude branches are stubs in this child — Children #5
+// and #6 extend them with their own hydration paths.
+async function renderFromDescriptor(descriptor) {
+  if (!descriptor || !descriptor.type) {
+    console.warn('renderFromDescriptor: descriptor missing type, skipping', descriptor);
+    return null;
+  }
+  const t = descriptor.type;
+  if (t === 'terminal') {
+    const hubName = descriptor.hub || descriptor.exec || 'api-terminal';
+    const container = descriptor.container || '';
+    let hub = hubs.find(h => h.hub === hubName);
+    if (!hub) {
+      hub = { hub: hubName, container: container, exec: descriptor.exec || null };
+      hubs.push(hub);
+      hubSymbolMap[hubName] = HUB_SYMBOLS[hubs.length % HUB_SYMBOLS.length];
+    }
+    return CARD_TYPE_REGISTRY.spawn('terminal', {
+      hub,
+      container: container,
+      exec: descriptor.exec || null,
+      sessionId: descriptor.session_id,
+      x: descriptor.x, y: descriptor.y, w: descriptor.w, h: descriptor.h,
+      starred: descriptor.starred != null ? descriptor.starred : false,
+      displayName: descriptor.display_name || '',
+      recoveryScript: descriptor.recovery_script || '',
+      cardUid: descriptor.card_uid || '',
+      errorState: descriptor.error_state || null,
+      controlGroups: descriptor.controlGroups,
+    });
+  }
+  if (t === 'widget') {
+    // TODO Child #5 (#260): widget hydration via renderFromDescriptor.
+    return spawnFromSerialized(descriptor);
+  }
+  if (t === 'canvas_claude') {
+    // TODO Child #6 (#261): canvas_claude hydration via renderFromDescriptor.
+    return spawnFromSerialized(descriptor);
+  }
+  return spawnFromSerialized(descriptor);
+}
+
+// Fetch server-registry descriptors for a canvas (one request). The server's
+// ``GET /api/cards?canvas=X`` endpoint returns the live CardRegistry state
+// — the authoritative source after epic #254. Returns ``[]`` on any error.
+async function fetchCanvasDescriptors(canvasName) {
+  try {
+    const resp = await fetch(`/api/cards?canvas=${encodeURIComponent(canvasName)}`);
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    return Array.isArray(data) ? data : [];
+  } catch (err) {
+    console.warn('fetchCanvasDescriptors failed:', err);
+    return [];
+  }
+}
+
 // Dispatch a saved layout entry through CARD_TYPE_REGISTRY.spawn so the full
 // type-specific prep (symbol lookup, canvas-claude session probe, profile
-// resolution) runs uniformly. Used by switchCanvas and the boot loader.
-// Terminals resolve their hub from `hubs[]` when possible; if the hub is not
-// currently discovered the entry is skipped (matching legacy behaviour).
-// Entries without a `type` but with a `hub` field are treated as terminals
-// (pre-type-field compatibility).
+// resolution) runs uniformly.
+//
+// Epic #254 child 3 (#258): DEPRECATED for terminal boot / switchCanvas. The
+// terminal call sites at boot and switchCanvas have been replaced with
+// ``renderFromDescriptor``. This function survives only as a fallback for
+// widget and canvas_claude entries in preset canvases until Children #5 and
+// #6 add their renderFromDescriptor branches.
 async function spawnFromSerialized(s) {
   let typeName = s.type;
   if (!typeName && s.hub) typeName = 'terminal';
@@ -3773,14 +3897,17 @@ async function switchCanvas(name) {
   await refreshCanvasList();
 
   // 4. Load the new canvas layout
-  const saved = await loadLayout();
-  if (saved && saved.length > 0) {
-    for (const s of saved) {
-      // Isolate per-entry failures so one bad entry cannot abort the rest.
+  // Epic #254 child 3 (#258): fetch live server-registry descriptors from
+  // ``GET /api/cards?canvas=X`` instead of reading the on-disk snapshot and
+  // re-spawning via ``/ws/session/new``. The server has already hydrated the
+  // canvas into ``CardRegistry`` (Child #2 / #257); the client only renders.
+  const descriptors = await fetchCanvasDescriptors(currentCanvasName);
+  if (descriptors.length > 0) {
+    for (const d of descriptors) {
       try {
-        await spawnFromSerialized(s);
+        await renderFromDescriptor(d);
       } catch (err) {
-        console.warn('switchCanvas: restore entry failed, skipping:', s, err);
+        console.warn('switchCanvas: render entry failed, skipping:', d, err);
       }
     }
     rebuildControlGroupsFromCards();
@@ -3972,6 +4099,16 @@ const CARD_UPDATED_FIELD_HANDLERS = {
     card.recoveryScript = value;
     const recoveryBtn = card.el ? card.el.querySelector(`[data-recovery="${card.id}"]`) : null;
     if (recoveryBtn) recoveryBtn.style.display = value ? 'inline' : 'none';
+  },
+  // Epic #254 child 3 (#258): ``error_state`` is server-computed recovery
+  // metadata. The applier drives the error-UI <-> live-terminal transition
+  // when the server clears error_state after a successful retry_pty.
+  error_state(card, value) {
+    if (typeof card._applyErrorStateBroadcast === 'function') {
+      card._applyErrorStateBroadcast(value);
+    } else {
+      card.errorState = value || null;
+    }
   },
   // Epic #236 child 3 (#239): ``starred`` is server-owned. The applier
   // updates the star glyph and drives the dormant↔live terminal transition.
@@ -4202,26 +4339,24 @@ async function handleBlueprintOpenWidget(msg) {
     hubSymbolMap[h.hub] = HUB_SYMBOLS[i % HUB_SYMBOLS.length];
   });
 
-  // Restore saved layout or use default grid
-  const saved = await loadLayout();
-  if (saved && saved.length > 0) {
-    // Spawn cards from saved layout
-    for (const s of saved) {
-      await spawnFromSerialized(s);
-    }
-    // Spawn any new hubs not in saved layout. Treat layout entries as
-    // "terminal for hub" when type is absent (pre-type-field compat).
-    for (const hub of hubs) {
-      const alreadySaved = saved.some(s => {
-        const asTerminal = (s.type === 'terminal') || (!s.type && s.hub);
-        return asTerminal && s.hub === hub.hub;
-      });
-      if (!alreadySaved) {
-        await CARD_TYPE_REGISTRY.spawn('terminal', {
-          hub,
-          x: 100 + Math.random() * 200,
-          y: 100 + Math.random() * 200,
-        });
+  // Restore layout from the server's live registry.
+  // Epic #254 child 3 (#258): boot path inversion. The browser no longer
+  // reads the canvas JSON and re-spawns via ``/ws/session/new``. Instead it
+  // fetches descriptors from ``GET /api/cards?canvas=X`` (single request)
+  // and renders each one via ``renderFromDescriptor``.
+  //
+  // The "new hubs not in saved layout" fallback is intentionally removed:
+  // the server registry is the authoritative source of card existence; the
+  // client does not auto-spawn cards for discovered hubs that the server
+  // did not register. New hubs appear via user-initiated spawn (sidebar /
+  // context menu) post-inversion.
+  const descriptors = await fetchCanvasDescriptors(currentCanvasName);
+  if (descriptors.length > 0) {
+    for (const d of descriptors) {
+      try {
+        await renderFromDescriptor(d);
+      } catch (err) {
+        console.warn('boot: render entry failed, skipping:', d, err);
       }
     }
     rebuildControlGroupsFromCards();
