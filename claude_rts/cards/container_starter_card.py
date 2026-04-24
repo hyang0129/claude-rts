@@ -43,6 +43,15 @@ class ContainerStarterCard(BaseCard):
         self._timeout = timeout or self.DEFAULT_TIMEOUT
         self._task: asyncio.Task | None = None
 
+    @classmethod
+    def from_descriptor(cls, data: dict, **kwargs) -> "ContainerStarterCard":
+        """ContainerStarterCards are transient and not hydrated from canvas snapshots.
+
+        Epic #254 child 2 (#257): the abstract ``BaseCard.from_descriptor``
+        contract is satisfied with a stub that raises ``NotImplementedError``.
+        """
+        raise NotImplementedError("ContainerStarterCard is not hydrated from canvas snapshots")
+
     async def start(self) -> None:
         """Start the container and begin readiness probing."""
         self._task = asyncio.create_task(self._run())
