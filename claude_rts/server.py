@@ -2557,34 +2557,42 @@ async def hydrate_canvas_into_registry(
             )
             continue
 
+        # Register the card immediately so it is visible to observers (MCP,
+        # GET /api/cards) before the PTY starts. Q1 from the #257 intent
+        # interview: ``start()`` runs as a background task so ``on_startup``
+        # does not block the event loop for up to ~130s while retries proceed.
+        card_registry.register(card, canvas_name=canvas_name)
+        hydrated += 1
+
         # On retry-ceiling error, emit a card_updated broadcast so any
         # observer (Child #3 client, MCP probe) sees the new error_state.
         def _on_error_state(c: BaseCard, _app=app) -> "object":
             return _broadcast_card_updated(_app, c.id, {"error_state": c.error_state})
 
-        try:
-            await card.start(retry_delays=retry_delays, on_error_state=_on_error_state)
-        except TypeError:
-            # Cards whose ``start`` signature does not accept retry kwargs
-            # (e.g. non-TerminalCard hydration targets added by Children #5/#6
-            # before they gain the retry contract) fall back to a bare start.
+        async def _start_card_bg(_card=card, _idx=idx, _cn=canvas_name) -> None:
             try:
-                await card.start()
+                await _card.start(retry_delays=retry_delays, on_error_state=_on_error_state)
+            except TypeError:
+                # Cards whose ``start`` signature does not accept retry
+                # kwargs (e.g. non-TerminalCard hydration targets added by
+                # Children #5/#6 before they gain the retry contract) fall
+                # back to a bare start.
+                try:
+                    await _card.start()
+                except Exception:
+                    logger.exception(
+                        "hydrate_canvas_into_registry: canvas '{}' entry #{} start() failed",
+                        _cn,
+                        _idx,
+                    )
             except Exception:
                 logger.exception(
                     "hydrate_canvas_into_registry: canvas '{}' entry #{} start() failed",
-                    canvas_name,
-                    idx,
+                    _cn,
+                    _idx,
                 )
-        except Exception:
-            logger.exception(
-                "hydrate_canvas_into_registry: canvas '{}' entry #{} start() failed",
-                canvas_name,
-                idx,
-            )
 
-        card_registry.register(card, canvas_name=canvas_name)
-        hydrated += 1
+        asyncio.create_task(_start_card_bg())
 
     logger.info("hydrate_canvas_into_registry: canvas '{}' hydrated {} card(s)", canvas_name, hydrated)
     return hydrated

@@ -9,6 +9,7 @@ Covers:
   - ``session_new_handler`` attach-vs-create deduplication
 """
 
+import asyncio
 import json
 
 import pytest
@@ -155,6 +156,8 @@ async def test_hydrate_canvas_populates_registry(tmp_path, monkeypatch):
     # Make retries near-zero for tests
     app["_hydrate_retry_delays"] = [0, 0, 0]
     async with _running_app(app):
+        # Give background start() tasks a chance to run.
+        await asyncio.sleep(0.1)
         registry: CardRegistry = app["card_registry"]
         terminals = registry.cards_on_canvas("probe-qa")
         assert len(terminals) == 2
@@ -183,6 +186,7 @@ async def test_hydrate_skips_unknown_type_without_crash(tmp_path, monkeypatch):
     app = create_app(app_config, test_mode=True, skip_canvas_schema_check=True)
     app["_hydrate_retry_delays"] = [0]
     async with _running_app(app):
+        await asyncio.sleep(0.1)
         registry: CardRegistry = app["card_registry"]
         terminals = registry.cards_on_canvas("mixed")
         assert len(terminals) == 1
@@ -209,6 +213,8 @@ async def test_api_cards_returns_hydrated_descriptors(tmp_path, aiohttp_client, 
     app["_hydrate_retry_delays"] = [0]
     client = await aiohttp_client(app)
 
+    # Give the background start() task a moment.
+    await asyncio.sleep(0.1)
     resp = await client.get("/api/cards?canvas=live")
     assert resp.status == 200
     data = await resp.json()
