@@ -47,6 +47,18 @@ class ServiceCard(BaseCard):
         self._last_result: dict | None = None
         self._interval_seconds: int = interval_seconds
 
+    @classmethod
+    def from_descriptor(cls, data: dict, **kwargs) -> "ServiceCard":
+        """ServiceCards are not hydrated from canvas snapshots (hidden=True).
+
+        Epic #254 child 2 (#257): the abstract ``BaseCard.from_descriptor``
+        contract is satisfied with a stub that raises ``NotImplementedError``;
+        hidden service cards never appear in canvas JSON and are not hydration
+        targets. Children #5/#6 add real implementations for Widget and
+        CanvasClaude cards.
+        """
+        raise NotImplementedError("ServiceCard subclasses are not hydrated from canvas snapshots")
+
     @abc.abstractmethod
     def probe_command(self) -> str:
         """Return the shell command to run for this probe."""

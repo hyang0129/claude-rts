@@ -67,6 +67,17 @@ class BlueprintCard(BaseCard):
             desc.update(self.layout)
         return desc
 
+    @classmethod
+    def from_descriptor(cls, data: dict, **kwargs) -> "BlueprintCard":
+        """BlueprintCards are not hydrated from canvas snapshots in Child #2.
+
+        Epic #254 child 2 (#257): the abstract ``BaseCard.from_descriptor``
+        contract is satisfied with a stub that raises ``NotImplementedError``.
+        BlueprintCard hydration is out of scope for this slice — blueprint
+        execution is one-shot and the card unregisters itself on completion.
+        """
+        raise NotImplementedError("BlueprintCard is not hydrated from canvas snapshots")
+
     async def start(self) -> None:
         """Begin blueprint execution in a background task."""
         # Initialize variables from context/defaults
