@@ -25,6 +25,7 @@ import pytest
 pw = pytest.importorskip("playwright")
 
 # Shared helpers live in conftest (single source of truth — see issue #165).
+from tests.conftest import docker_run  # noqa: E402
 from tests.e2e.conftest import cleanup_non_container_cards, refresh_container_card  # noqa: E402
 
 
@@ -63,11 +64,7 @@ def dev_config_preset():
 def running_container():
     """Create a real running Alpine container for the test module."""
     name = f"e2e-vm-running-{uuid.uuid4().hex[:8]}"
-    subprocess.run(
-        ["docker", "run", "-d", "--name", name, "alpine:latest", "sleep", "3600"],
-        check=True,
-        capture_output=True,
-    )
+    docker_run(name, "alpine:latest", ["sleep", "3600"], detach=True)
     yield name
     subprocess.run(
         ["docker", "rm", "-f", name],
@@ -83,11 +80,7 @@ def stopped_container():
     which normalizes to 'offline'.
     """
     name = f"e2e-vm-stopped-{uuid.uuid4().hex[:8]}"
-    subprocess.run(
-        ["docker", "run", "--name", name, "alpine:latest", "echo", "done"],
-        check=True,
-        capture_output=True,
-    )
+    docker_run(name, "alpine:latest", ["echo", "done"])
     yield name
     subprocess.run(
         ["docker", "rm", "-f", name],
@@ -111,11 +104,7 @@ def startable_container():
     After the test, the container is force-removed regardless of state.
     """
     name = f"e2e-vm-startable-{uuid.uuid4().hex[:8]}"
-    subprocess.run(
-        ["docker", "run", "-d", "--name", name, "alpine:latest", "sleep", "3600"],
-        check=True,
-        capture_output=True,
-    )
+    docker_run(name, "alpine:latest", ["sleep", "3600"], detach=True)
     subprocess.run(
         ["docker", "stop", name],
         check=True,
@@ -136,11 +125,7 @@ def bash_container():
     Uses the bash:latest image which includes bash.
     """
     name = f"e2e-vm-bash-{uuid.uuid4().hex[:8]}"
-    subprocess.run(
-        ["docker", "run", "-d", "--name", name, "bash:latest", "sleep", "3600"],
-        check=True,
-        capture_output=True,
-    )
+    docker_run(name, "bash:latest", ["sleep", "3600"], detach=True)
     yield name
     subprocess.run(
         ["docker", "rm", "-f", name],
@@ -517,20 +502,7 @@ class TestRealStatusAccuracy:
         """Stop a running container externally, re-render, verify status flips."""
         # We need a dedicated container for this test since we'll stop it
         name = f"e2e-vm-stoppable-{uuid.uuid4().hex[:8]}"
-        subprocess.run(
-            [
-                "docker",
-                "run",
-                "-d",
-                "--name",
-                name,
-                "alpine:latest",
-                "sleep",
-                "3600",
-            ],
-            check=True,
-            capture_output=True,
-        )
+        docker_run(name, "alpine:latest", ["sleep", "3600"], detach=True)
 
         try:
             # Add the container to favorites

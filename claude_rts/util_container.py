@@ -9,6 +9,7 @@ It stays alive via `sleep infinity` and commands are executed via `docker exec`.
 import asyncio
 import json
 import pathlib
+import re
 import time
 
 _DOCKER = "docker"
@@ -36,13 +37,17 @@ def _get_config(app_config: AppConfig) -> dict:
         "auto_stop": util.get("auto_stop", False),
         "mounts": util.get("mounts", {}),
         "volumes": util.get("volumes", {}),
+        "cpu_limit": util.get("cpu_limit", 2.0),
+        "cpu_shares": util.get("cpu_shares", 64),
+        "memory_limit": util.get("memory_limit", "8g"),
+        "pids_limit": util.get("pids_limit", 512),
     }
 
 
-async def _run(cmd: str, timeout: float = 30) -> tuple[int, str, str]:
-    """Run a shell command and return (returncode, stdout, stderr)."""
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
+async def _run(cmd: list[str], timeout: float = 30) -> tuple[int, str, str]:
+    """Run a command (exec-form) and return (returncode, stdout, stderr)."""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -57,7 +62,7 @@ async def _run(cmd: str, timeout: float = 30) -> tuple[int, str, str]:
 async def is_util_running(app_config: AppConfig) -> bool:
     """Check if the utility container is running."""
     cfg = _get_config(app_config)
-    rc, stdout, _ = await _run(f'{_DOCKER} ps --filter "name=^/{cfg["name"]}$" --format "{{{{.Status}}}}"')
+    rc, stdout, _ = await _run([_DOCKER, "ps", "--filter", f"name=^/{cfg['name']}$", "--format", "{{.Status}}"])
     return rc == 0 and "Up" in stdout
 
 
@@ -71,17 +76,17 @@ async def build_image(app_config: AppConfig) -> bool:
     """
     cfg = _get_config(app_config)
     # Check if image exists locally
-    rc, stdout, _ = await _run(f"{_DOCKER} images -q {cfg['image']}")
+    rc, stdout, _ = await _run([_DOCKER, "images", "-q", cfg["image"]])
     if rc == 0 and stdout.strip():
         logger.debug("Utility image {} already exists", cfg["image"])
         return True
 
     # Try pulling the prebuilt image from GHCR
     logger.info("Pulling prebuilt utility image from {}...", GHCR_IMAGE)
-    rc, _, stderr = await _run(f"{_DOCKER} pull {GHCR_IMAGE}", timeout=120)
+    rc, _, stderr = await _run([_DOCKER, "pull", GHCR_IMAGE], timeout=120)
     if rc == 0:
         # Tag as the local image name so subsequent checks find it
-        tag_rc, _, tag_err = await _run(f"{_DOCKER} tag {GHCR_IMAGE} {cfg['image']}")
+        tag_rc, _, tag_err = await _run([_DOCKER, "tag", GHCR_IMAGE, cfg["image"]])
         if tag_rc == 0:
             logger.info("Pulled and tagged prebuilt utility image as {}", cfg["image"])
             return True
@@ -92,7 +97,7 @@ async def build_image(app_config: AppConfig) -> bool:
     # Fall back to local build
     logger.info("Building utility container image {}...", cfg["image"])
     rc, stdout, stderr = await _run(
-        f'{_DOCKER} build -t {cfg["image"]} -f "{DOCKERFILE}" "{DOCKERFILE.parent}"',
+        [_DOCKER, "build", "-t", cfg["image"], "-f", str(DOCKERFILE), str(DOCKERFILE.parent)],
         timeout=300,
     )
     if rc != 0:
@@ -100,6 +105,9 @@ async def build_image(app_config: AppConfig) -> bool:
         return False
     logger.info("Utility image built successfully")
     return True
+
+
+_MEMORY_LIMIT_RE = re.compile(r"^\d+[kmgKMG]?$")
 
 
 async def start_container(app_config: AppConfig) -> bool:
@@ -114,11 +122,30 @@ async def start_container(app_config: AppConfig) -> bool:
     if not await build_image(app_config):
         return False
 
+    # Validate resource limit config values before interpolating into Docker flags.
+    try:
+        cpu_limit_f = float(cfg["cpu_limit"])
+    except (ValueError, TypeError):
+        logger.error("Invalid cpu_limit={!r} — must be a number; not starting util container", cfg["cpu_limit"])
+        return False
+    try:
+        pids_limit_i = int(cfg["pids_limit"])
+    except (ValueError, TypeError):
+        logger.error("Invalid pids_limit={!r} — must be an integer; not starting util container", cfg["pids_limit"])
+        return False
+    memory_limit_s = str(cfg["memory_limit"])
+    if not _MEMORY_LIMIT_RE.match(memory_limit_s):
+        logger.error(
+            "Invalid memory_limit={!r} — must match ^\\d+[kmgKMG]?$; not starting util container",
+            memory_limit_s,
+        )
+        return False
+
     # mcp_server.py is synced into the container via `docker cp` in
     # CanvasClaudeCard._sync_mcp_server on each card start — not bind-mounted.
     # A bind mount on a single file caused a WSL/Docker Desktop quirk where
     # docker cp against the mount point turned it into a directory.
-    mount_args = ""
+    mount_args: list[str] = []
 
     for host_path, container_path in cfg["mounts"].items():
         # Expand ~ in host path and normalize to forward slashes for Docker
@@ -126,21 +153,33 @@ async def start_container(app_config: AppConfig) -> bool:
         if expanded_path.exists():
             # Use POSIX-style path (forward slashes) — Docker rejects mixed-slash paths
             mount_src = expanded_path.as_posix()
-            mount_args += f' -v "{mount_src}:{container_path}"'
+            mount_args.extend(["-v", f"{mount_src}:{container_path}"])
             logger.info("Mounting {} -> {}", mount_src, container_path)
         else:
             logger.warning("Mount source does not exist, skipping: {}", expanded_path)
 
     for vol_name, container_path in cfg["volumes"].items():
-        mount_args += f" --mount type=volume,source={vol_name},target={container_path}"
+        mount_args.extend(["--mount", f"type=volume,source={vol_name},target={container_path}"])
         logger.info("Mounting volume {} -> {}", vol_name, container_path)
 
     # Remove old stopped container if exists
-    await _run(f"{_DOCKER} rm -f {cfg['name']}")
+    await _run([_DOCKER, "rm", "-f", cfg["name"]])
 
     # Start container
-    cmd = f"{_DOCKER} run -d --name {cfg['name']}{mount_args} {cfg['image']}"
-    logger.info("Starting utility container: {}", cmd)
+    cmd = [
+        _DOCKER,
+        "run",
+        "-d",
+        "--name",
+        cfg["name"],
+        f"--cpus={cpu_limit_f}",
+        f"--cpu-shares={cfg['cpu_shares']}",
+        f"--memory={memory_limit_s}",
+        f"--pids-limit={pids_limit_i}",
+        *mount_args,
+        cfg["image"],
+    ]
+    logger.info("Starting utility container: {}", " ".join(cmd))
     rc, stdout, stderr = await _run(cmd, timeout=60)
     if rc != 0:
         logger.error("Failed to start utility container: {}", stderr)
@@ -153,11 +192,11 @@ async def start_container(app_config: AppConfig) -> bool:
 async def stop_container(app_config: AppConfig) -> bool:
     """Stop the utility container."""
     cfg = _get_config(app_config)
-    rc, _, stderr = await _run(f"{_DOCKER} stop {cfg['name']}")
+    rc, _, stderr = await _run([_DOCKER, "stop", cfg["name"]])
     if rc != 0:
         logger.warning("Failed to stop utility container: {}", stderr)
         return False
-    await _run(f"{_DOCKER} rm {cfg['name']}")
+    await _run([_DOCKER, "rm", cfg["name"]])
     logger.info("Utility container '{}' stopped", cfg["name"])
     return True
 
@@ -172,7 +211,7 @@ async def exec_in_util(app_config: AppConfig, cmd: str, timeout: float = 60) -> 
     if not await is_util_running(app_config):
         raise RuntimeError(f"Utility container '{cfg['name']}' is not running")
 
-    full_cmd = f"{_DOCKER} exec {cfg['name']} {cmd}"
+    full_cmd = [_DOCKER, "exec", cfg["name"], "sh", "-c", cmd]
     logger.debug("exec_in_util: {}", cmd)
     rc, stdout, stderr = await _run(full_cmd, timeout=timeout)
     if rc != 0:
@@ -265,7 +304,7 @@ async def discover_profiles(app_config: AppConfig) -> list[str]:
         )
     excluded = _METADATA_DIRS | {main_name}
     try:
-        cmd = f"{_DOCKER} exec {cfg['name']} find /profiles -mindepth 1 -maxdepth 1 -type d"
+        cmd = [_DOCKER, "exec", cfg["name"], "find", "/profiles", "-mindepth", "1", "-maxdepth", "1", "-type", "d"]
         rc, stdout, _ = await _run(cmd, timeout=10)
         if rc != 0:
             logger.warning("discover_profiles: failed to list /profiles (rc={})", rc)
@@ -286,7 +325,7 @@ async def discover_profiles(app_config: AppConfig) -> list[str]:
 async def _mounts_match(app_config: AppConfig) -> bool:
     """Return True if the running container's bind mounts match the configured mounts."""
     cfg = _get_config(app_config)
-    rc, stdout, _ = await _run(f'{_DOCKER} inspect {cfg["name"]} --format "{{{{json .Mounts}}}}"')
+    rc, stdout, _ = await _run([_DOCKER, "inspect", cfg["name"], "--format", "{{json .Mounts}}"])
     if rc != 0:
         return False
     mounts = json.loads(stdout or "[]")
@@ -345,6 +384,6 @@ async def ensure_util_container(app_config: AppConfig) -> bool:
             logger.info("Utility container '{}' already running", cfg["name"])
             return True
         logger.warning("Utility container '{}' running with stale mounts, recreating", cfg["name"])
-        await _run(f"{_DOCKER} rm -f {cfg['name']}")
+        await _run([_DOCKER, "rm", "-f", cfg["name"]])
 
     return await start_container(app_config)

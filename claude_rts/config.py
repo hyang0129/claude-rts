@@ -58,6 +58,10 @@ DEFAULT_CONFIG = {
         "auto_start": True,
         "auto_stop": False,
         "mounts": {},
+        "cpu_limit": 2.0,
+        "cpu_shares": 64,
+        "memory_limit": "8g",
+        "pids_limit": 512,
     },
     "sessions": {
         "orphan_timeout": 300,
