@@ -387,6 +387,120 @@ class CanvasClaudeCard(TerminalCard):
             )
             logger.info("CanvasClaudeCard: creating new tmux session {}", TMUX_SESSION_NAME)
 
+    # ── Hydration ──────────────────────────────────────────────────────
+
+    @classmethod
+    def from_descriptor(
+        cls,
+        data: dict,
+        session_manager=None,
+        api_base_url: str = "http://host.docker.internal:3000",
+        **kwargs,
+    ) -> "CanvasClaudeCard":
+        """Reconstruct a CanvasClaudeCard from a canvas-JSON snapshot entry.
+
+        Epic #254 child 6 (#261): the hydration entry point for canvas_claude
+        card types. Reconstructs the card from the on-disk snapshot without
+        starting the PTY — the caller invokes ``attach()`` separately so the
+        attach-vs-new-session decision and error-state handling apply uniformly.
+
+        Unlike ``start()`` (the full-creation path used by
+        ``/api/canvas-claude/create``), the hydrated card is expected to
+        attach to the already-running tmux session seeded at initial spawn
+        time. ``attach()`` trusts the existing tmux session as-is and does
+        NOT re-seed MCP config or trust settings.
+        """
+        if session_manager is None:
+            raise TypeError("CanvasClaudeCard.from_descriptor requires session_manager=")
+        layout = {
+            k: data[k]
+            for k in ("x", "y", "w", "h", "z_order")
+            if isinstance(data.get(k), int) and not isinstance(data.get(k), bool)
+        }
+        card = cls(
+            session_manager=session_manager,
+            hub=data.get("hub") or None,
+            container=data.get("container") or None,
+            card_id=data.get("card_id") or data.get("session_id"),
+            layout=layout or None,
+            api_base_url=api_base_url,
+            profile=data.get("profile") or None,
+            canvas_name=data.get("canvas_name") or None,
+        )
+        # Seed server-owned state from the snapshot (matches TerminalCard.from_descriptor).
+        card.starred = bool(data.get("starred", False))
+        if data.get("display_name"):
+            card.display_name = data["display_name"]
+        if data.get("recovery_script"):
+            card.recovery_script = data["recovery_script"]
+        if data.get("card_uid"):
+            card.card_uid = data["card_uid"]
+        return card
+
+    async def attach(
+        self,
+        retry_delays: tuple[float, ...] | list[float] | None = None,
+        on_error_state: "object" = None,
+    ) -> None:
+        """Attach to an existing tmux session without creating a new one.
+
+        Epic #254 child 6 (#261): the hydration-only lifecycle. Verifies the
+        stable ``canvas-claude`` tmux session is alive inside the target
+        container; if so, sets ``self.cmd`` to the attach variant and invokes
+        ``super().start()`` to allocate a PTY bound to it. If the tmux session
+        is missing (e.g. the container was killed / pruned while the server
+        was down), sets ``self.error_state = {"kind": "tmux_session_missing",
+        ...}`` and marks the card ``starred=True`` so the user sees a visible
+        error with a retry button — it does NOT silently auto-recreate the
+        session (that is reserved for the explicit user-click retry path).
+
+        Notes on intentional omissions vs ``start()``:
+          - No ``_sync_mcp_server()`` call — the already-running claude
+            process inside tmux uses whatever config snapshot it booted with;
+            mutating files on disk would not retroactively fix it.
+          - No ``_seed_claude_settings()`` call — same reasoning.
+
+        ``retry_delays`` and ``on_error_state`` are accepted so this method
+        plugs into ``hydrate_canvas_into_registry``'s uniform ``start()``
+        call shape; only ``on_error_state`` is used today.
+        """
+        loop = _asyncio.get_running_loop()
+        alive = await loop.run_in_executor(None, self._has_tmux_session)
+        if not alive:
+            self.error_state = {
+                "kind": "tmux_session_missing",
+                "attempts": 1,
+                "last_error": (
+                    f"tmux session {TMUX_SESSION_NAME!r} not found in container {self._effective_container!r}"
+                ),
+            }
+            # Hydrate-as-starred: the user should see the card and manually
+            # retry, not have it silently disappear.
+            self.starred = True
+            logger.warning(
+                "CanvasClaudeCard.attach: tmux session {} missing in {} — landed in error_state",
+                TMUX_SESSION_NAME,
+                self._effective_container,
+            )
+            if on_error_state is not None:
+                try:
+                    result = on_error_state(self)
+                    if _asyncio.iscoroutine(result):
+                        await result
+                except Exception:
+                    logger.exception("CanvasClaudeCard on_error_state callback failed")
+            return
+
+        # Session is alive — bind PTY via the attach command.
+        docker_bin = _DOCKER
+        self.cmd = f"{docker_bin} exec -it {self._effective_container} tmux attach-session -t {TMUX_SESSION_NAME}"
+        logger.info(
+            "CanvasClaudeCard.attach: attaching to existing tmux session {} in {}",
+            TMUX_SESSION_NAME,
+            self._effective_container,
+        )
+        await super().start(retry_delays=retry_delays, on_error_state=on_error_state)
+
     async def start(self) -> None:
         """Sync mcp_server.py, write MCP config, resolve tmux state, then start the PTY.
 

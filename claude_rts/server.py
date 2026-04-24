@@ -2540,8 +2540,16 @@ async def hydrate_canvas_into_registry(
         try:
             if card_type == "terminal":
                 card = TerminalCard.from_descriptor(entry, session_manager=session_manager)
+            elif card_type == "canvas_claude":
+                # Epic #254 child 6 (#261): hydrate canvas_claude cards by
+                # attaching to their already-running tmux session. The
+                # ``from_descriptor`` path does NOT call ``start()``; the
+                # background task below invokes ``attach()`` which verifies
+                # the tmux session and either attaches (success) or lands the
+                # card in ``error_state`` (``tmux_session_missing``).
+                card = CanvasClaudeCard.from_descriptor(entry, session_manager=session_manager)
             else:
-                # Children #5/#6 extend dispatch here for widget / canvas-claude.
+                # Child #5 extends dispatch here for widget.
                 logger.debug(
                     "hydrate_canvas_into_registry: canvas '{}' entry #{} type '{}' has no hydrator, skipping",
                     canvas_name,
@@ -2569,8 +2577,15 @@ async def hydrate_canvas_into_registry(
         def _on_error_state(c: BaseCard, _app=app) -> "object":
             return _broadcast_card_updated(_app, c.id, {"error_state": c.error_state})
 
-        async def _start_card_bg(_card=card, _idx=idx, _cn=canvas_name) -> None:
+        async def _start_card_bg(_card=card, _idx=idx, _cn=canvas_name, _ct=card_type) -> None:
             try:
+                # Epic #254 child 6 (#261): canvas_claude hydration uses
+                # ``attach()`` (verify + PTY-bind) rather than ``start()``
+                # (MCP seed + tmux new-session). ``attach()`` accepts the
+                # same retry / error-state kwargs as ``TerminalCard.start()``.
+                if _ct == "canvas_claude":
+                    await _card.attach(retry_delays=retry_delays, on_error_state=_on_error_state)
+                    return
                 await _card.start(retry_delays=retry_delays, on_error_state=_on_error_state)
             except TypeError:
                 # Cards whose ``start`` signature does not accept retry

@@ -479,3 +479,114 @@ def test_canvas_claude_card_mcp_args_include_spawner_id(monkeypatch):
     # The value must match the card's own id
     assert mcp_args[idx + 1] == card.id
     mgr.stop_all()
+    mgr.stop_all()
+
+
+# ── Epic #254 child 6 (#261): from_descriptor + attach hydration ──────────
+
+
+async def test_canvas_claude_from_descriptor_builds_card_without_starting(monkeypatch):
+    """from_descriptor() builds a CanvasClaudeCard with fields set and no PTY."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    data = {
+        "type": "canvas_claude",
+        "card_id": "cc-stable-001",
+        "container": "test-container",
+        "profile": "test-profile",
+        "canvas_name": "canvas-claude-qa",
+        "starred": True,
+        "x": 100,
+        "y": 200,
+        "w": 960,
+        "h": 640,
+    }
+    card = CanvasClaudeCard.from_descriptor(data, session_manager=mgr)
+    assert card.session is None  # PTY not started yet
+    assert card.id == "cc-stable-001"
+    assert card._effective_container == "test-container"
+    assert card.profile == "test-profile"
+    assert card.canvas_name == "canvas-claude-qa"
+    assert card.starred is True
+    assert card.x == 100 and card.y == 200
+    mgr.stop_all()
+
+
+async def test_canvas_claude_from_descriptor_requires_session_manager():
+    """from_descriptor() without session_manager raises TypeError."""
+    with pytest.raises(TypeError):
+        CanvasClaudeCard.from_descriptor({"type": "canvas_claude"})
+
+
+async def test_canvas_claude_to_descriptor_emits_card_id(monkeypatch):
+    """to_descriptor() always emits card_id (inherited from TerminalCard)."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    card = CanvasClaudeCard(
+        session_manager=mgr,
+        container="my-container",
+        card_id="fixed-id-xyz",
+    )
+    desc = card.to_descriptor()
+    assert desc["card_id"] == "fixed-id-xyz"
+    assert desc["card_id"] == card.id
+    mgr.stop_all()
+
+
+async def test_canvas_claude_attach_uses_attach_command_when_tmux_alive(monkeypatch):
+    """attach() verifies tmux session, sets cmd to attach variant, starts PTY."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+
+    # Track all subprocess.run calls so we can assert new-session was never invoked.
+    calls = []
+
+    def fake_run(args, *a, **kw):
+        calls.append(list(args))
+        # tmux has-session -> returncode 0 (alive)
+        if "has-session" in args:
+            return type("R", (), {"returncode": 0, "stderr": b""})()
+        return type("R", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", fake_run)
+    mgr = SessionManager()
+    card = CanvasClaudeCard.from_descriptor(
+        {"type": "canvas_claude", "container": "test-container"},
+        session_manager=mgr,
+    )
+    await card.attach(retry_delays=[])
+    assert card.error_state is None
+    assert "tmux attach-session" in card.cmd
+    assert "tmux new-session" not in card.cmd
+    # No subprocess.run call should contain "new-session" (attach-only path).
+    for args in calls:
+        assert "new-session" not in args, f"new-session issued during attach: {args}"
+    await card.stop()
+    mgr.stop_all()
+
+
+async def test_canvas_claude_attach_missing_tmux_lands_in_error_state(monkeypatch):
+    """attach() on a dead tmux session lands the card in error_state with starred=True."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    # has-session returns non-zero -> tmux session missing
+    monkeypatch.setattr(
+        "claude_rts.cards.canvas_claude_card._subprocess.run",
+        _mock_subprocess_run_no_tmux,
+    )
+    mgr = SessionManager()
+    card = CanvasClaudeCard.from_descriptor(
+        {"type": "canvas_claude", "container": "test-container", "starred": False},
+        session_manager=mgr,
+    )
+    broadcasts = []
+
+    def _on_error(c):
+        broadcasts.append(c.error_state)
+
+    await card.attach(retry_delays=[], on_error_state=_on_error)
+    assert card.session is None  # no PTY created
+    assert card.error_state is not None
+    assert card.error_state["kind"] == "tmux_session_missing"
+    # Hydrate-as-starred so the user sees the error and can click retry.
+    assert card.starred is True
+    assert broadcasts == [card.error_state]
+    mgr.stop_all()

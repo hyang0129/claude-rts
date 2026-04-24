@@ -3858,9 +3858,13 @@ async function handleControlCardCreated(msg) {
   const desc = msg.descriptor;
   if (!desc) return;
 
-  // canvas_claude cards always self-create via _createAndConnect() — never spawn from
-  // the control event, which would race with the in-flight fetch and create duplicate cards.
-  if (desc.type === 'canvas_claude') return;
+  // Epic #254 child 6 (#261): canvas_claude cards now flow through the
+  // server-authored hydration + broadcast path. The old early-exit here was
+  // the pre-hydration workaround (the client used to own canvas_claude
+  // existence via ``_createAndConnect``). Post-migration we render from the
+  // broadcast descriptor like terminals; the branch below dispatches the
+  // render with ``sessionId = desc.session_id`` so ``connectWs`` takes the
+  // reconnect path instead of hitting ``/api/canvas-claude/create``.
 
   // Blueprint cards are spawned directly from context menu — skip the control event
   // to avoid duplicates. Also skip container_starter (hidden cards).
@@ -3920,6 +3924,23 @@ async function handleControlCardCreated(msg) {
     });
     // Epic #236 child 5 (#241): server snapshot already reflects this card
     // (the broadcast is downstream of the server-side register).
+  } else if (desc.type === 'canvas_claude') {
+    // Epic #254 child 6 (#261): server is authoritative over canvas_claude
+    // card existence. Render the client-side card with
+    // ``sessionId = desc.session_id`` so ``connectWs`` uses the reconnect
+    // path (never ``/api/canvas-claude/create`` — the server already did that).
+    await CARD_TYPE_REGISTRY.spawn('canvas_claude', {
+      hub: desc.hub || 'canvas-claude',
+      container: desc.container || 'supreme-claudemander-util',
+      exec: desc.exec || null,
+      sessionId: desc.session_id,
+      x: desc.x, y: desc.y,
+      w: desc.w || 960,
+      h: desc.h || 640,
+      profile: desc.profile || null,
+      canvasName: desc.canvas_name || desc.canvasName || null,
+      starred: desc.starred != null ? desc.starred : false,
+    });
   }
 }
 

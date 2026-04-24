@@ -323,3 +323,106 @@ class _running_app:
                 await hook(self.app)
             except Exception:
                 pass
+                pass
+
+
+# ── Epic #254 child 6 (#261): canvas_claude hydration dispatch ────────────
+
+
+async def test_hydrate_canvas_claude_attaches_without_new_session(tmp_path, monkeypatch):
+    """Canvas with a canvas_claude entry hydrates via attach() — no tmux new-session."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+
+    # Mock _subprocess.run to report tmux session alive and never allow new-session.
+    calls = []
+
+    def fake_run(args, *a, **kw):
+        calls.append(list(args))
+        if "has-session" in args:
+            return type("R", (), {"returncode": 0, "stderr": b""})()
+        return type("R", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", fake_run)
+
+    app_config = config.load(tmp_path / ".sc")
+    app_config.canvases_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = {
+        "name": "canvas-claude-qa",
+        "canvas_size": [3840, 2160],
+        "cards": [
+            {
+                "type": "canvas_claude",
+                "card_id": "cc-hyd-001",
+                "container": "test-container",
+                "starred": True,
+                "x": 100,
+                "y": 100,
+                "w": 960,
+                "h": 640,
+            },
+        ],
+    }
+    (app_config.canvases_dir / "canvas-claude-qa.json").write_text(json.dumps(snapshot))
+
+    app = create_app(app_config, test_mode=True, skip_canvas_schema_check=True)
+    app["_hydrate_retry_delays"] = [0]
+    async with _running_app(app):
+        await asyncio.sleep(0.1)
+        from claude_rts.cards.canvas_claude_card import CanvasClaudeCard
+
+        registry: CardRegistry = app["card_registry"]
+        cards = registry.cards_on_canvas("canvas-claude-qa")
+        assert len(cards) == 1
+        cc = cards[0]
+        assert isinstance(cc, CanvasClaudeCard)
+        assert cc.session_id is not None
+        assert cc.error_state is None
+        # Attach path set the attach cmd, not new-session.
+        assert "tmux attach-session" in cc.cmd
+        # No subprocess.run call should contain "new-session" during hydration.
+        for args in calls:
+            assert "new-session" not in args, f"new-session called during hydration: {args}"
+
+
+async def test_hydrate_canvas_claude_missing_tmux_error_state(tmp_path, monkeypatch):
+    """Canvas hydration with dead tmux session lands canvas_claude in error_state."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+
+    def fake_run_dead(args, *a, **kw):
+        if "has-session" in args:
+            return type("R", (), {"returncode": 1, "stderr": b"no session"})()
+        return type("R", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", fake_run_dead)
+
+    app_config = config.load(tmp_path / ".sc")
+    app_config.canvases_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = {
+        "name": "cc-dead",
+        "canvas_size": [3840, 2160],
+        "cards": [
+            {
+                "type": "canvas_claude",
+                "card_id": "cc-dead-001",
+                "container": "test-container",
+                "starred": False,  # explicitly false — attach() must flip to True
+            },
+        ],
+    }
+    (app_config.canvases_dir / "cc-dead.json").write_text(json.dumps(snapshot))
+
+    app = create_app(app_config, test_mode=True, skip_canvas_schema_check=True)
+    app["_hydrate_retry_delays"] = [0]
+    async with _running_app(app):
+        await asyncio.sleep(0.1)
+        from claude_rts.cards.canvas_claude_card import CanvasClaudeCard
+
+        registry: CardRegistry = app["card_registry"]
+        cards = registry.cards_on_canvas("cc-dead")
+        assert len(cards) == 1
+        cc = cards[0]
+        assert isinstance(cc, CanvasClaudeCard)
+        assert cc.error_state is not None
+        assert cc.error_state["kind"] == "tmux_session_missing"
+        # Hydrate-as-starred override kicks in.
+        assert cc.starred is True

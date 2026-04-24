@@ -7,6 +7,7 @@
   "cards": [
     {
       "type": "canvas_claude",
+      "card_id": "canvas-claude-qa-001",
       "starred": true,
       "x": 100,
       "y": 100,
