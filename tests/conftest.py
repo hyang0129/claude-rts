@@ -3,8 +3,10 @@
 Plain classes (not fixtures) so that test files can import them directly:
 
     from tests.conftest import ProbeCard, MockScrollback, MockSession, MockSessionManager
+    from tests.conftest import docker_run
 """
 
+import subprocess
 from unittest.mock import patch
 
 import pytest
@@ -24,6 +26,31 @@ def _clear_probe_cooldowns():
     ServiceCard._probe_cooldowns.clear()
     yield
     ServiceCard._probe_cooldowns.clear()
+
+
+# ── Docker test helper ──────────────────────────────────────────────────────
+
+
+def docker_run(
+    name: str,
+    image: str,
+    cmd_args: list[str],
+    *,
+    detach: bool = False,
+    check: bool = True,
+    capture_output: bool = True,
+    **kwargs,
+) -> subprocess.CompletedProcess:
+    """Run a docker container with conservative test-scoped resource caps.
+
+    Injects --cpus=0.5 --memory=512m --pids-limit=64 automatically so test
+    fixtures cannot accidentally create unbounded containers.
+    """
+    args = ["docker", "run", "--cpus=0.5", "--memory=512m", "--pids-limit=64", "--name", name]
+    if detach:
+        args.append("-d")
+    args.extend([image, *cmd_args])
+    return subprocess.run(args, check=check, capture_output=capture_output, **kwargs)
 
 
 # ── Concrete test subclass ───────────────────────────────────────────────────
