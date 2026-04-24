@@ -2025,7 +2025,7 @@ class TerminalCard extends Card {
       symbol: (typeof hubSymbolMap !== 'undefined' && hubSymbolMap[data.hub]) || '?',
       exec: data.exec || null,
       sessionId: data.session_id || null,
-      starred: data.starred != null ? data.starred : true,
+      starred: data.starred != null ? data.starred : false,
       displayName: data.display_name || data.displayName || '',
       recoveryScript: data.recovery_script || data.recoveryScript || '',
       cardUid: data.card_uid || data.cardUid || '',
