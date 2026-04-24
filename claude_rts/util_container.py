@@ -36,6 +36,10 @@ def _get_config(app_config: AppConfig) -> dict:
         "auto_stop": util.get("auto_stop", False),
         "mounts": util.get("mounts", {}),
         "volumes": util.get("volumes", {}),
+        "cpu_limit": util.get("cpu_limit", 2.0),
+        "cpu_shares": util.get("cpu_shares", 64),
+        "memory_limit": util.get("memory_limit", "8g"),
+        "pids_limit": util.get("pids_limit", 512),
     }
 
 
@@ -139,7 +143,14 @@ async def start_container(app_config: AppConfig) -> bool:
     await _run(f"{_DOCKER} rm -f {cfg['name']}")
 
     # Start container
-    cmd = f"{_DOCKER} run -d --name {cfg['name']}{mount_args} {cfg['image']}"
+    cmd = (
+        f"{_DOCKER} run -d --name {cfg['name']}"
+        f" --cpus={cfg['cpu_limit']}"
+        f" --cpu-shares={cfg['cpu_shares']}"
+        f" --memory={cfg['memory_limit']}"
+        f" --pids-limit={cfg['pids_limit']}"
+        f"{mount_args} {cfg['image']}"
+    )
     logger.info("Starting utility container: {}", cmd)
     rc, stdout, stderr = await _run(cmd, timeout=60)
     if rc != 0:
