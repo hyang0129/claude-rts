@@ -798,6 +798,66 @@ async def test_cards_state_put_empty_patch_is_noop(aiohttp_client, app_factory):
     assert result["status"] == "ok"
 
 
+# ── Epic #254 child 3 (#258): retry_pty action dispatch ──────────────────
+
+
+async def test_cards_state_put_retry_pty_clears_error_state_on_success(aiohttp_client, app_factory):
+    """``{"action": "retry_pty"}`` re-runs TerminalCard.start() and clears error_state."""
+    client = await aiohttp_client(app_factory())
+    async with client.ws_connect("/ws/control") as ws:
+        resp = await client.post("/api/claude/terminal/create?cmd=bash")
+        sid = (await resp.json())["session_id"]
+        await ws.receive_json(timeout=2)  # drain card_created
+
+        # Simulate a hydrated card that landed in error_state.
+        card = client.app["card_registry"].get_terminal(sid)
+        card.error_state = {
+            "kind": "container_unavailable",
+            "attempts": 4,
+            "last_error": "boom",
+        }
+
+        resp = await client.put(f"/api/cards/{sid}/state", json={"action": "retry_pty"})
+        assert resp.status == 200
+        result = await resp.json()
+        assert result["status"] == "ok"
+        assert result["action"] == "retry_pty"
+
+        # The immediate "clear error_state" broadcast must arrive.
+        msg = await ws.receive_json(timeout=2)
+        assert msg["type"] == "card_updated"
+        assert msg["card_id"] == sid
+        assert "error_state" in msg
+        assert msg["error_state"] is None
+
+
+async def test_cards_state_put_retry_pty_404_for_unknown_card(aiohttp_client, app_factory):
+    """retry_pty on a missing card id returns 404."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.put("/api/cards/does-not-exist/state", json={"action": "retry_pty"})
+    assert resp.status == 404
+
+
+async def test_cards_state_put_rejects_unknown_action(aiohttp_client, app_factory):
+    """Unknown ``action`` strings are rejected with HTTP 400."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    sid = (await resp.json())["session_id"]
+
+    resp = await client.put(f"/api/cards/{sid}/state", json={"action": "nope"})
+    assert resp.status == 400
+
+
+async def test_cards_state_put_rejects_non_string_action(aiohttp_client, app_factory):
+    """Non-string ``action`` values are rejected with HTTP 400."""
+    client = await aiohttp_client(app_factory())
+    resp = await client.post("/api/claude/terminal/create?cmd=bash")
+    sid = (await resp.json())["session_id"]
+
+    resp = await client.put(f"/api/cards/{sid}/state", json={"action": 42})
+    assert resp.status == 400
+
+
 # ── Epic #236 child 4 (#240): position / size / z-order migration ────────
 
 

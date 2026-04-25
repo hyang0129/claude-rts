@@ -1196,6 +1196,23 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
     if not cmd:
         raise web.HTTPBadRequest(text="Missing 'cmd' query parameter")
 
+    # Epic #254 child 3 (#258): deprecation warning for courier query params.
+    # Post-migration the client boot and switchCanvas paths render from the
+    # server registry via ``GET /api/cards?canvas=X``; ``/ws/session/new`` is
+    # reserved for user-initiated spawn which never forwards snapshot state.
+    # Per resolved U3, this PR logs (no hard reject) so orphan call sites
+    # surface before enforcement lands in a follow-up.
+    _deprecated_courier = [
+        name for name in ("starred", "card_uid", "display_name", "recovery_script") if request.query.get(name, "") != ""
+    ]
+    if _deprecated_courier:
+        logger.warning(
+            "session_new_handler: deprecated courier query params {} - boot and "
+            "switchCanvas should use GET /api/cards?canvas=X; only user-initiated "
+            "spawn is valid for /ws/session/new",
+            _deprecated_courier,
+        )
+
     mgr: SessionManager = request.app["session_manager"]
     card_registry: CardRegistry = request.app["card_registry"]
 
@@ -2080,9 +2097,66 @@ async def cards_state_put(request: web.Request) -> web.Response:
     if not isinstance(body, dict):
         raise web.HTTPBadRequest(text="Body must be a JSON object")
 
-    applied = await _apply_card_state_patch(request, card_id, body)
-    logger.info("cards_state_put: {} patched fields={}", card_id, list(applied.keys()))
+    # Epic #254 child 3 (#258): the ``action`` key is a command dispatch, not
+    # a field-store mutation. Resolved from open question Q3-a: route retry
+    # through the single DP-1 mutation path instead of a dedicated endpoint.
+    action = body.pop("action", None)
+    applied: dict = {}
+    if action is not None:
+        if not isinstance(action, str):
+            raise web.HTTPBadRequest(text="'action' must be a string")
+        action_result = await _dispatch_card_action(request, card_id, action)
+        applied.update(action_result)
+
+    if body:
+        field_applied = await _apply_card_state_patch(request, card_id, body)
+        applied.update(field_applied)
+
+    logger.info(
+        "cards_state_put: {} patched fields={}{}",
+        card_id,
+        list(applied.keys()),
+        f" action={action!r}" if action else "",
+    )
     return web.json_response({"status": "ok", **applied})
+
+
+async def _dispatch_card_action(request: web.Request, card_id: str, action: str) -> dict:
+    """Dispatch a server-side command action for ``PUT /api/cards/{id}/state``.
+
+    Epic #254 child 3 (#258): implements ``retry_pty`` for hydrated
+    TerminalCards in ``error_state``. Clears the error, re-runs
+    ``TerminalCard.start()`` with the default retry schedule, and broadcasts
+    ``card_updated`` on success (error_state cleared) or exhaustion
+    (error_state re-armed). Returns a dict describing the action outcome.
+    """
+    card_registry: CardRegistry = request.app["card_registry"]
+    card = card_registry.get(card_id)
+    if card is None:
+        raise web.HTTPNotFound(text="Card not found")
+
+    if action == "retry_pty":
+        if not isinstance(card, TerminalCard):
+            raise web.HTTPBadRequest(text="retry_pty is only valid on terminal cards")
+        # Clear prior error_state and broadcast the clear immediately so the
+        # client transitions out of the error UI without waiting for the
+        # (possibly long) start() attempt to complete. The subsequent
+        # on_error_state callback will re-arm error_state if retry exhausts.
+        card.error_state = None
+        await _broadcast_card_updated(request.app, card_id, {"error_state": None})
+
+        def _on_error_state(c: BaseCard, _app=request.app) -> "object":
+            return _broadcast_card_updated(_app, c.id, {"error_state": c.error_state})
+
+        try:
+            await card.start(on_error_state=_on_error_state)
+        except Exception:
+            logger.exception("cards_state_put retry_pty: start() failed for {}", card_id)
+            raise web.HTTPInternalServerError(text="retry_pty failed")
+
+        return {"action": "retry_pty", "ok": card.error_state is None}
+
+    raise web.HTTPBadRequest(text=f"Unknown action: {action!r}")
 
 
 async def claude_terminal_rename(request: web.Request) -> web.Response:
