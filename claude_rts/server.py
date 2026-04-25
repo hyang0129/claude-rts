@@ -2889,8 +2889,19 @@ async def hydrate_canvas_into_registry(
                 # ``_persist_canvas_snapshot`` with only registered (terminal)
                 # cards in the registry.
                 card = WidgetCard.from_descriptor(entry)
+            elif card_type == "canvas_claude":
+                # Child #6 (#261): canvas-claude hydration. ``from_descriptor``
+                # reconstructs the card with ``_hydrated=True`` so the
+                # subsequent ``start()`` call (issued by the
+                # ``_start_card_bg`` task below) dispatches to ``attach()``
+                # — verifying the existing tmux session and never seeding a
+                # new one. If the tmux session is gone, ``attach()`` lands
+                # the card in ``error_state`` (kind="tmux_session_missing")
+                # rather than auto-recreating; the user clicks Retry to
+                # invoke the full create path through
+                # ``/api/canvas-claude/create``.
+                card = CanvasClaudeCard.from_descriptor(entry, session_manager=session_manager)
             else:
-                # Child #6 extends dispatch here for canvas-claude.
                 logger.debug(
                     "hydrate_canvas_into_registry: canvas '{}' entry #{} type '{}' has no hydrator, skipping",
                     canvas_name,

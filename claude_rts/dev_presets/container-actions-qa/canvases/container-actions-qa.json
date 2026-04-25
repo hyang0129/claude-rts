@@ -17,6 +17,7 @@
     },
     {
       "type": "canvas_claude",
+      "card_id": "container-actions-qa-cc",
       "starred": true,
       "x": 660,
       "y": 100,
