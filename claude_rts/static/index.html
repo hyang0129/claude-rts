@@ -925,12 +925,30 @@ function showContextMenu(sx, sy) {
     }
     pendingHandlers.push({
       selector: '.ctx-item[data-widget]',
-      handler: (item) => {
-        CARD_TYPE_REGISTRY.spawn('widget', {
-          widgetType: item.dataset.widget,
-          x: ctxMenuCanvasPos.x,
-          y: ctxMenuCanvasPos.y,
-        });
+      async: true,
+      handler: async (item) => {
+        // Epic #254 child 5 (#260): user-spawn now flows through the
+        // server-authored ``POST /api/cards/widget`` endpoint. The render is
+        // driven by the ``card_created`` broadcast (handleControlCardCreated)
+        // so every attached client sees the new widget within 1s.
+        try {
+          const resp = await fetch('/api/cards/widget', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              widgetType: item.dataset.widget,
+              x: Math.round(ctxMenuCanvasPos.x),
+              y: Math.round(ctxMenuCanvasPos.y),
+              canvas_name: currentCanvasName,
+            }),
+          });
+          if (!resp.ok) {
+            const text = await resp.text().catch(() => '');
+            console.error('widget create failed:', resp.status, text);
+          }
+        } catch (err) {
+          console.error('widget create failed:', err);
+        }
       },
     });
   }
@@ -3040,6 +3058,18 @@ class WidgetCard extends Card {
     this.widgetType = opts.widgetType;
     this.refreshInterval = opts.refreshInterval || (WIDGET_REGISTRY[opts.widgetType]?.defaultRefreshInterval) || 30000;
     this._refreshTimer = null;
+    // Epic #254 child 5 (#260): widgets are now server-authored cards.
+    // ``serverCardId`` is the id under which the server registered this
+    // widget in ``CardRegistry``. We mirror it into ``sessionId`` so the
+    // existing Card-base drag / resize / star handlers (which PUT
+    // ``/api/cards/{this.sessionId}/state``) and ``handleControlCardUpdated``
+    // (which matches ``c.sessionId === msg.card_id``) work uniformly across
+    // terminals and widgets without per-type branching.
+    this.starred = opts.starred != null ? !!opts.starred : false;
+    if (opts.cardId || opts.card_id || opts.serverCardId) {
+      this.sessionId = opts.cardId || opts.card_id || opts.serverCardId;
+    }
+    if (typeof opts.starred === 'boolean') this.starred = opts.starred;
   }
 
   createBody() {
@@ -3086,6 +3116,11 @@ class WidgetCard extends Card {
       h: data.h || 280,
       symbol: 'W',
       refreshInterval: data.refreshInterval,
+      // Epic #254 child 5 (#260): server-authored card_id flows through
+      // here for snapshot-only fallback paths (legacy ``spawnFromSerialized``)
+      // so widget instances created via that path also wire up state PUTs.
+      cardId: data.card_id || data.cardId || null,
+      starred: data.starred != null ? !!data.starred : false,
     });
     return card;
   }
@@ -3286,8 +3321,19 @@ async function renderFromDescriptor(descriptor) {
     });
   }
   if (t === 'widget') {
-    // TODO Child #5 (#260): widget hydration via renderFromDescriptor.
-    return spawnFromSerialized(descriptor);
+    // Epic #254 child 5 (#260): server-authored widget hydration. The
+    // descriptor carries the server-owned ``card_id``, ``widgetType``,
+    // ``starred``, and geometry; client constructs the WidgetCard directly
+    // from the descriptor — no client-only ``CARD_TYPE_REGISTRY.spawn``
+    // fallthrough.
+    if (!descriptor.widgetType) return null;
+    return CARD_TYPE_REGISTRY.spawn('widget', {
+      widgetType: descriptor.widgetType,
+      x: descriptor.x, y: descriptor.y, w: descriptor.w, h: descriptor.h,
+      refreshInterval: descriptor.refreshInterval,
+      starred: descriptor.starred != null ? descriptor.starred : false,
+      cardId: descriptor.card_id || null,
+    });
   }
   if (t === 'canvas_claude') {
     // TODO Child #6 (#261): canvas_claude hydration via renderFromDescriptor.
@@ -3360,6 +3406,10 @@ async function spawnFromSerialized(s) {
       x: s.x, y: s.y, w: s.w, h: s.h,
       refreshInterval: s.refreshInterval,
       starred: s.starred != null ? s.starred : false,
+      // Epic #254 child 5 (#260): legacy snapshot path also forwards
+      // ``card_id`` so the resulting widget participates in the
+      // server-authored state-mutation contract.
+      cardId: s.card_id || null,
     });
   }
   if (typeName === 'canvas_claude') {
@@ -4060,6 +4110,28 @@ async function handleControlCardCreated(msg) {
     });
     // Epic #236 child 5 (#241): server snapshot already reflects this card
     // (the broadcast is downstream of the server-side register).
+  } else if (desc.type === 'widget') {
+    // Epic #254 child 5 (#260): widget broadcast renders client card from
+    // the server descriptor. Dedupe against existing widgets that share the
+    // same server card_id (e.g. POST /api/cards/widget locally fired the
+    // broadcast back to its own client).
+    if (!desc.widgetType) return;
+    if (cards.some(c => c.type === 'widget' && c.sessionId === desc.card_id)) return;
+    const vw = viewport.clientWidth;
+    const vh = viewport.clientHeight;
+    const cx = (-pan.x + vw / 2) / zoom;
+    const cy = (-pan.y + vh / 2) / zoom;
+    const x = desc.x != null ? desc.x : cx - 180;
+    const y = desc.y != null ? desc.y : cy - 140;
+    await CARD_TYPE_REGISTRY.spawn('widget', {
+      widgetType: desc.widgetType,
+      x, y,
+      w: desc.w || 360,
+      h: desc.h || 280,
+      refreshInterval: desc.refreshInterval,
+      starred: desc.starred != null ? desc.starred : false,
+      cardId: desc.card_id || null,
+    });
   }
 }
 

@@ -2251,6 +2251,90 @@ async def _apply_card_state_patch(request: web.Request, card_id: str, fields: di
     return applied
 
 
+async def cards_widget_create_handler(request: web.Request) -> web.Response:
+    """POST /api/cards/widget — server-authored WidgetCard spawn.
+
+    Epic #254 child 5 (#260): user-initiated widget spawn (sidebar context
+    menu) flows through this endpoint instead of constructing a client-only
+    WidgetCard. The server creates the ``WidgetCard``, registers it on the
+    target canvas, persists the snapshot via the registry's write-through
+    hook, and broadcasts ``card_created`` so every attached client renders
+    the widget from the server descriptor.
+
+    Body (JSON object):
+      - ``widgetType`` (required): registry key (``system-info`` /
+        ``container-manager`` / ``profiles`` / …).
+      - ``canvas_name`` (optional): canvas to register on. Defaults to the
+        configured ``default_canvas`` when absent.
+      - ``x``, ``y``, ``w``, ``h``, ``z_order`` (optional): integer geometry.
+      - ``starred`` (optional bool): defaults to ``False`` (epic #194 / #236).
+      - ``card_id`` (optional): caller-supplied card id; otherwise the server
+        generates one. Useful for deterministic test fixtures.
+      - ``refreshInterval`` / ``refresh_interval`` (optional int): override
+        the client's default refresh cadence for this widget instance.
+
+    Returns the new card's full descriptor (``200 OK``). Returns ``400`` if
+    ``widgetType`` is missing or non-string.
+    """
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="Invalid JSON")
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(text="Body must be a JSON object")
+
+    widget_type = body.get("widgetType") or body.get("widget_type")
+    if not isinstance(widget_type, str) or not widget_type:
+        raise web.HTTPBadRequest(text="Missing or invalid 'widgetType'")
+
+    app_config: AppConfig = request.app["app_config"]
+    canvas_name = body.get("canvas_name") or body.get("canvas")
+    if not canvas_name:
+        config_data = read_config(app_config)
+        canvas_name = config_data.get("default_canvas", "probe-qa")
+
+    layout: dict = {}
+    for _field in ("x", "y", "w", "h", "z_order"):
+        v = body.get(_field)
+        if isinstance(v, int) and not isinstance(v, bool):
+            layout[_field] = v
+
+    refresh_interval = body.get("refreshInterval") or body.get("refresh_interval")
+    if isinstance(refresh_interval, bool):
+        refresh_interval = None
+
+    try:
+        card = WidgetCard(
+            widget_type=widget_type,
+            card_id=body.get("card_id") or None,
+            layout=layout or None,
+            starred=bool(body.get("starred", False)),
+            refresh_interval=refresh_interval if isinstance(refresh_interval, int) else None,
+        )
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc))
+
+    card_registry: CardRegistry = request.app["card_registry"]
+    card_registry.register(card, canvas_name=canvas_name)
+    # Trigger a write-through so the new widget is persisted to the canvas
+    # snapshot immediately (mirrors hydrate_canvas_into_registry's pattern).
+    try:
+        card_registry.apply_state_patch(card.id, {"starred": bool(card.starred)})
+    except (LookupError, ValueError):
+        logger.warning(
+            "cards_widget_create_handler: immediate persist for '{}' failed (non-fatal)",
+            card.id,
+        )
+
+    logger.info(
+        "cards_widget_create_handler: created widget {} type={} on canvas {}",
+        card.id,
+        widget_type,
+        canvas_name,
+    )
+    return web.json_response(card.to_descriptor())
+
+
 async def cards_state_put(request: web.Request) -> web.Response:
     """PUT /api/cards/{id}/state — generic server-owned state mutation.
 
@@ -2928,6 +3012,10 @@ def create_app(
 
     # Generic card state mutation (epic #236 / issue #238 — single mutation path)
     app.router.add_put("/api/cards/{id}/state", cards_state_put)
+    # Epic #254 child 5 (#260): server-authored WidgetCard spawn endpoint.
+    # Routed before any ``/api/cards/{id}/...`` rule so ``widget`` is not
+    # captured as an id segment.
+    app.router.add_post("/api/cards/widget", cards_widget_create_handler)
     # Epic #254 child 2 (#257): server-authored card listing for observers
     # before any browser attaches.
     app.router.add_get("/api/cards", cards_list_handler)
