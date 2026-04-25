@@ -2183,6 +2183,14 @@ class CanvasClaudeCard extends TerminalCard {
     this.setupInput();
     this.setupResizeObserver();
     this.setupClaudeBtn();
+    // Epic #254 child 6 (#261): hydrated card whose tmux session was missing
+    // at boot. Show the no-priority overlay (which exposes the Retry button
+    // that goes through /api/canvas-claude/create) so the user can recreate
+    // the session — never auto-recreate, per the hydrate-as-starred policy.
+    if (this.errorState) {
+      this._showNoPriorityOverlay();
+      return;
+    }
     if (!this.sessionId) {
       this._showNoPriorityOverlay();
       return; // connectWs() will be called by _retryConnect() once a session exists
@@ -3336,8 +3344,23 @@ async function renderFromDescriptor(descriptor) {
     });
   }
   if (t === 'canvas_claude') {
-    // TODO Child #6 (#261): canvas_claude hydration via renderFromDescriptor.
-    return spawnFromSerialized(descriptor);
+    // Epic #254 child 6 (#261): server-authored canvas_claude hydration.
+    // The descriptor carries server-owned card_id, session_id (for the
+    // attached PTY), starred, geometry, profile, and canvas_name. The
+    // client constructs the CanvasClaudeCard from the descriptor — when
+    // session_id is present, connectWs() reattaches to the live PTY rather
+    // than going through the create-and-seed path. When error_state is
+    // present (e.g. server's attach() found the tmux session missing) the
+    // retry overlay surfaces it instead of attempting to connect.
+    return CARD_TYPE_REGISTRY.spawn('canvas_claude', {
+      x: descriptor.x, y: descriptor.y, w: descriptor.w, h: descriptor.h,
+      sessionId: descriptor.session_id,
+      profile: descriptor.profile,
+      canvasName: descriptor.canvas_name || descriptor.canvasName,
+      starred: descriptor.starred != null ? descriptor.starred : false,
+      cardId: descriptor.card_id || null,
+      errorState: descriptor.error_state || null,
+    });
   }
   return spawnFromSerialized(descriptor);
 }
@@ -4048,10 +4071,6 @@ async function handleControlCardCreated(msg) {
   const desc = msg.descriptor;
   if (!desc) return;
 
-  // canvas_claude cards always self-create via _createAndConnect() — never spawn from
-  // the control event, which would race with the in-flight fetch and create duplicate cards.
-  if (desc.type === 'canvas_claude') return;
-
   // Blueprint cards are spawned directly from context menu — skip the control event
   // to avoid duplicates. Also skip container_starter (hidden cards).
   if (desc.type === 'blueprint' || desc.type === 'container_starter') return;
@@ -4131,6 +4150,36 @@ async function handleControlCardCreated(msg) {
       refreshInterval: desc.refreshInterval,
       starred: desc.starred != null ? desc.starred : false,
       cardId: desc.card_id || null,
+    });
+  } else if (desc.type === 'canvas_claude') {
+    // Epic #254 child 6 (#261): canvas_claude broadcast renders the card
+    // from the server descriptor on hydration. Dedupe against existing
+    // cards by both session_id (legacy create-and-connect path) and card_id
+    // (server-authored hydration path) so neither the
+    // ``/api/canvas-claude/create`` self-loop nor a renderFromDescriptor
+    // pre-render can produce a duplicate.
+    if (cards.some(c =>
+      c.type === 'canvas_claude' && (
+        (desc.session_id && c.sessionId === desc.session_id) ||
+        (desc.card_id && (c.cardId === desc.card_id || c.sessionId === desc.card_id))
+      )
+    )) return;
+    const vw = viewport.clientWidth;
+    const vh = viewport.clientHeight;
+    const cx = (-pan.x + vw / 2) / zoom;
+    const cy = (-pan.y + vh / 2) / zoom;
+    const x = desc.x != null ? desc.x : cx - 480;
+    const y = desc.y != null ? desc.y : cy - 320;
+    await CARD_TYPE_REGISTRY.spawn('canvas_claude', {
+      x, y,
+      w: desc.w || 960,
+      h: desc.h || 640,
+      sessionId: desc.session_id,
+      profile: desc.profile,
+      canvasName: desc.canvas_name || desc.canvasName,
+      starred: desc.starred != null ? desc.starred : false,
+      cardId: desc.card_id || null,
+      errorState: desc.error_state || null,
     });
   }
 }

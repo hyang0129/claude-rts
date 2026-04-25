@@ -36,6 +36,7 @@
     },
     {
       "type": "canvas_claude",
+      "card_id": "human-qa-cc",
       "starred": true,
       "x": 900,
       "y": 640,
