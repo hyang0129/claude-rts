@@ -252,6 +252,14 @@ def test_api_cards_state_only_fetched_from_putCardState():
     source = _load_source()
     all_lines = source.splitlines()
     offenders: list[tuple[int, str, str | None]] = []
+    # Allowlist of non-mutation /api/cards/ paths that legitimately bypass the
+    # single-mutation helper. These are creation / read endpoints, not state
+    # writers. Update this list when adding a new such endpoint and document
+    # why it is not state mutation.
+    #
+    # - ``/api/cards/widget`` — server-authored WidgetCard spawn (epic #254
+    #   child 5 / #260). Creates the card; it does not patch existing state.
+    NON_MUTATION_PATHS = ("/api/cards/widget",)
     for lineno, line in _lines_non_comment(source):
         if "/api/cards/" not in line:
             continue
@@ -259,6 +267,8 @@ def test_api_cards_state_only_fetched_from_putCardState():
         # ``fetch(`` on the same line as ``/api/cards/`` catches the whole
         # template-literal form used today.
         if "fetch(" not in line:
+            continue
+        if any(p in line for p in NON_MUTATION_PATHS):
             continue
         enc = _enclosing_function(all_lines, lineno)
         if enc != "putCardState":

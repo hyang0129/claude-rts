@@ -311,6 +311,158 @@ async def test_session_new_attaches_to_hydrated_card(tmp_path, monkeypatch):
         assert len(registry.list_terminals()) == 1
 
 
+# ── WidgetCard descriptor + endpoint + state mutation (epic #254 child 5) ─
+
+
+def test_widget_card_to_descriptor_round_trip():
+    """WidgetCard.to_descriptor() emits widgetType / starred / card_id / geometry."""
+    card = WidgetCard(
+        widget_type="system-info",
+        card_id="widget-test-1",
+        layout={"x": 100, "y": 200, "w": 360, "h": 280, "z_order": 3},
+        starred=True,
+        refresh_interval=15000,
+    )
+    desc = card.to_descriptor()
+    assert desc["type"] == "widget"
+    assert desc["card_id"] == "widget-test-1"
+    assert desc["widgetType"] == "system-info"
+    assert desc["starred"] is True
+    assert desc["x"] == 100 and desc["y"] == 200
+    assert desc["w"] == 360 and desc["h"] == 280
+    assert desc["z_order"] == 3
+    assert desc["refreshInterval"] == 15000
+
+    # from_descriptor reconstructs the same card.
+    rebuilt = WidgetCard.from_descriptor(desc)
+    assert rebuilt.widget_type == "system-info"
+    assert rebuilt.starred is True
+    assert rebuilt.x == 100 and rebuilt.y == 200
+
+
+def test_widget_card_legacy_vm_manager_renamed():
+    """from_descriptor maps the deprecated 'vm-manager' widget type to 'container-manager'."""
+    card = WidgetCard.from_descriptor({"widgetType": "vm-manager"})
+    assert card.widget_type == "container-manager"
+
+
+async def test_post_widget_creates_and_registers(tmp_path, aiohttp_client, monkeypatch):
+    """POST /api/cards/widget creates a WidgetCard, registers it, and returns the descriptor."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    app_config = config.load(tmp_path / ".sc")
+    app_config.canvases_dir.mkdir(parents=True, exist_ok=True)
+    (app_config.canvases_dir / "main.json").write_text(
+        json.dumps({"name": "main", "canvas_size": [3840, 2160], "cards": []})
+    )
+
+    app = create_app(app_config, test_mode=True, skip_canvas_schema_check=True)
+    client = await aiohttp_client(app)
+
+    resp = await client.post(
+        "/api/cards/widget",
+        json={
+            "widgetType": "system-info",
+            "canvas_name": "main",
+            "x": 50,
+            "y": 60,
+            "w": 360,
+            "h": 280,
+            "starred": True,
+        },
+    )
+    assert resp.status == 200, await resp.text()
+    desc = await resp.json()
+    assert desc["type"] == "widget"
+    assert desc["widgetType"] == "system-info"
+    assert desc["starred"] is True
+    assert desc["x"] == 50 and desc["y"] == 60
+    assert "card_id" in desc and desc["card_id"]
+
+    # The card is registered and visible via GET /api/cards.
+    list_resp = await client.get("/api/cards?canvas=main")
+    assert list_resp.status == 200
+    listing = await list_resp.json()
+    widget_entries = [d for d in listing if d.get("type") == "widget"]
+    assert len(widget_entries) == 1
+    assert widget_entries[0]["card_id"] == desc["card_id"]
+
+
+async def test_post_widget_missing_widget_type_400(tmp_path, aiohttp_client, monkeypatch):
+    """POST /api/cards/widget rejects a body without widgetType."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    app_config = config.load(tmp_path / ".sc")
+    app_config.canvases_dir.mkdir(parents=True, exist_ok=True)
+    app = create_app(app_config, test_mode=True, skip_canvas_schema_check=True)
+    client = await aiohttp_client(app)
+    resp = await client.post("/api/cards/widget", json={"x": 0, "y": 0})
+    assert resp.status == 400
+
+
+async def test_widget_state_mutation_via_put(tmp_path, aiohttp_client, monkeypatch):
+    """PUT /api/cards/{id}/state mutates a hydrated WidgetCard's geometry / starred."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    app_config = config.load(tmp_path / ".sc")
+    app_config.canvases_dir.mkdir(parents=True, exist_ok=True)
+    (app_config.canvases_dir / "wcanvas.json").write_text(
+        json.dumps(
+            {
+                "name": "wcanvas",
+                "canvas_size": [3840, 2160],
+                "cards": [
+                    {
+                        "type": "widget",
+                        "widgetType": "system-info",
+                        "card_id": "w-1",
+                        "starred": True,
+                        "x": 0,
+                        "y": 0,
+                        "w": 360,
+                        "h": 280,
+                    }
+                ],
+            }
+        )
+    )
+
+    app = create_app(app_config, test_mode=True, skip_canvas_schema_check=True)
+    app["_hydrate_retry_delays"] = [0]
+    client = await aiohttp_client(app)
+    await asyncio.sleep(0.05)  # let hydrate task settle
+
+    registry: CardRegistry = app["card_registry"]
+    cards_now = [c for c in registry.cards_on_canvas("wcanvas") if isinstance(c, WidgetCard)]
+    assert len(cards_now) == 1
+    widget_id = cards_now[0].id
+
+    resp = await client.put(
+        f"/api/cards/{widget_id}/state",
+        json={"x": 200, "y": 250, "w": 480, "h": 320, "starred": False},
+    )
+    assert resp.status == 200, await resp.text()
+    body = await resp.json()
+    assert body["x"] == 200 and body["y"] == 250
+    assert body["w"] == 480 and body["h"] == 320
+    assert body["starred"] is False
+
+    widget = registry.get(widget_id)
+    assert widget.x == 200 and widget.y == 250
+    assert widget.starred is False
+
+
+def test_preset_widget_entries_have_card_id():
+    """Every widget entry in dev_presets/*/canvases/*.json carries a stable card_id."""
+    import pathlib
+
+    preset_root = pathlib.Path(__file__).resolve().parents[1] / "claude_rts" / "dev_presets"
+    missing: list[str] = []
+    for canvas_file in preset_root.glob("*/canvases/*.json"):
+        data = json.loads(canvas_file.read_text())
+        for idx, card in enumerate(data.get("cards", [])):
+            if card.get("type") == "widget" and not card.get("card_id"):
+                missing.append(f"{canvas_file}: idx={idx} widgetType={card.get('widgetType')}")
+    assert not missing, "Widget entries without card_id:\n" + "\n".join(missing)
+
+
 # ── Helper context manager to run the app lifecycle ─────────────────────
 
 
