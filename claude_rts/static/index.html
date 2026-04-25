@@ -3901,6 +3901,19 @@ async function switchCanvas(name) {
   // ``GET /api/cards?canvas=X`` instead of reading the on-disk snapshot and
   // re-spawning via ``/ws/session/new``. The server has already hydrated the
   // canvas into ``CardRegistry`` (Child #2 / #257); the client only renders.
+  //
+  // Epic #254 child 4 (#259): POST to the activate endpoint first so that
+  // ``lazy_hydrate`` policy hydrates the target canvas before we GET its
+  // descriptors. Under ``keep_resident`` (the default) this is a fast-path
+  // no-op (canvas was hydrated at boot, ``already_resident=true``); under
+  // ``lazy_hydrate`` this is the only path that registers the canvas's
+  // cards. The activate call is idempotent — repeated switches into the
+  // same canvas never duplicate registrations.
+  try {
+    await fetch(`/api/canvases/${encodeURIComponent(currentCanvasName)}/activate`, { method: 'POST' });
+  } catch (err) {
+    console.warn('switchCanvas: activate failed (continuing with GET /api/cards):', err);
+  }
   const descriptors = await fetchCanvasDescriptors(currentCanvasName);
   if (descriptors.length > 0) {
     for (const d of descriptors) {

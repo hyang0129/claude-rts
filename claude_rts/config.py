@@ -68,6 +68,23 @@ DEFAULT_CONFIG = {
         "scrollback_size": 65536,
         "tmux_persistence": True,
     },
+    # Epic #254 child 4 (#259): canvas-switch hydration lifecycle policy.
+    # ``keep_resident`` (default) hydrates every canvas at startup and keeps
+    # all of them in ``CardRegistry`` for the life of the server — long-running
+    # PTYs, MCP observers, and pre-first-client hydration all behave uniformly
+    # regardless of which canvas the user is looking at. Matches the
+    # "server-as-tmux-remote" mental model from epic intent §3.
+    # ``lazy_hydrate`` only hydrates the default canvas at boot; other
+    # canvases are hydrated on first switch via ``POST /api/canvases/{name}/activate``.
+    # This is the escape hatch for memory-pressure scenarios when a user has
+    # many canvases but only works in one or two at a time.
+    # NOTE: ``unload_on_switch`` is intentionally NOT supported — unloading
+    # an inactive canvas would stop its PTYs, breaking the long-running
+    # background-work invariant. The author-feared failure mode was implicit
+    # here: silently destroying user work to save memory. Explicit eviction
+    # (when ever needed) belongs in a separate admin endpoint, not in the
+    # implicit canvas-switch flow.
+    "canvas_switch_policy": "keep_resident",
     "container_manager": {
         "favorites": [],
         "image_whitelist": [

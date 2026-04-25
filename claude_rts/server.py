@@ -236,6 +236,71 @@ async def cards_list_handler(request: web.Request) -> web.Response:
     return web.json_response(descriptors)
 
 
+async def canvas_activate_handler(request: web.Request) -> web.Response:
+    """POST /api/canvases/{name}/activate — ensure ``name`` is hydrated.
+
+    Epic #254 child 4 (#259): the client calls this before
+    ``GET /api/cards?canvas=X`` on canvas switch so that the server-authored
+    hydration model holds even under ``lazy_hydrate`` policy. The handler is
+    idempotent in two ways:
+
+    1. If the canvas already has any cards in ``CardRegistry``, the handler
+       returns immediately without re-running hydration. This prevents
+       duplicate registration when the user toggles between two resident
+       canvases (the common case under ``keep_resident``).
+    2. If the canvas file does not exist, returns 404 — there is nothing to
+       hydrate. Empty canvases (file exists, ``cards: []``) succeed with
+       ``hydrated=0``.
+
+    Under ``keep_resident`` policy the canvas was already hydrated at
+    startup, so this endpoint is a cheap fast-path no-op. Under
+    ``lazy_hydrate`` policy this is the *only* path that hydrates non-default
+    canvases.
+
+    Returns ``{"name": <canvas>, "policy": <policy>, "hydrated": <int>,
+    "already_resident": <bool>}``.
+    """
+    canvas_name = request.match_info["name"]
+    app_config: AppConfig = request.app["app_config"]
+    # Validate canvas existence the same way ``cards_list_handler`` does.
+    data = read_canvas(app_config, canvas_name)
+    if data is None:
+        raise web.HTTPNotFound(text=f"Canvas '{canvas_name}' not found")
+
+    card_registry: CardRegistry = request.app["card_registry"]
+    policy = request.app.get("canvas_switch_policy", "keep_resident")
+
+    # Fast path: any registry card already on this canvas means hydration
+    # already ran (either at startup under keep_resident, or on a prior
+    # activate under lazy_hydrate). Idempotent — never re-hydrate.
+    existing = card_registry.cards_on_canvas(canvas_name)
+    if existing:
+        return web.json_response(
+            {
+                "name": canvas_name,
+                "policy": policy,
+                "hydrated": 0,
+                "already_resident": True,
+            }
+        )
+
+    retry_delays = request.app.get("_hydrate_retry_delays")
+    try:
+        hydrated = await hydrate_canvas_into_registry(request.app, canvas_name, retry_delays=retry_delays)
+    except Exception:
+        logger.exception("canvas_activate_handler: hydration failed for '{}'", canvas_name)
+        raise web.HTTPInternalServerError(text=f"Hydration failed for canvas '{canvas_name}'")
+
+    return web.json_response(
+        {
+            "name": canvas_name,
+            "policy": policy,
+            "hydrated": hydrated,
+            "already_resident": False,
+        }
+    )
+
+
 async def canvas_delete_handler(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     logger.info("Canvas '{}' delete requested by {}", name, request.remote)
@@ -2858,6 +2923,8 @@ def create_app(
     app.router.add_get("/api/canvases/{name}", canvas_get_handler)
     # Epic #236 child 5 (#241): no PUT — canvas JSON is server-authored.
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
+    # Epic #254 child 4 (#259): canvas-switch lazy-hydration entry point.
+    app.router.add_post("/api/canvases/{name}/activate", canvas_activate_handler)
 
     # Generic card state mutation (epic #236 / issue #238 — single mutation path)
     app.router.add_put("/api/cards/{id}/state", cards_state_put)
@@ -3070,8 +3137,37 @@ def create_app(
         #
         # Retry runs as a background task so ``on_startup`` does not block
         # the event loop for up to ~130s waiting on a missing container.
+        #
+        # Epic #254 child 4 (#259): the set of canvases hydrated at boot
+        # depends on the ``canvas_switch_policy`` config:
+        #   - ``keep_resident`` (default): every canvas file on disk is
+        #     hydrated. All canvases are observable from boot; no further
+        #     hydration ever runs. This is the "server-as-tmux-remote" model.
+        #   - ``lazy_hydrate``: only the default canvas is hydrated at boot.
+        #     Others are hydrated on first switch via
+        #     ``POST /api/canvases/{name}/activate``. Subsequent activates
+        #     are idempotent (a canvas already resident is a no-op).
         hydrate_retry_delays = app.get("_hydrate_retry_delays")
-        canvas_names = list_canvases(app_config)
+        canvas_switch_policy = config.get("canvas_switch_policy", "keep_resident")
+        if canvas_switch_policy not in ("keep_resident", "lazy_hydrate"):
+            logger.warning(
+                "on_startup: unknown canvas_switch_policy '{}', falling back to 'keep_resident'",
+                canvas_switch_policy,
+            )
+            canvas_switch_policy = "keep_resident"
+        app["canvas_switch_policy"] = canvas_switch_policy
+
+        all_canvas_names = list_canvases(app_config)
+        if canvas_switch_policy == "lazy_hydrate":
+            default_canvas = config.get("default_canvas", "probe-qa")
+            canvas_names = [default_canvas] if default_canvas in all_canvas_names else []
+            logger.info(
+                "on_startup: canvas_switch_policy=lazy_hydrate; hydrating only default canvas '{}'",
+                default_canvas,
+            )
+        else:
+            canvas_names = all_canvas_names
+
         for _cn in canvas_names:
             try:
                 await hydrate_canvas_into_registry(app, _cn, retry_delays=hydrate_retry_delays)
