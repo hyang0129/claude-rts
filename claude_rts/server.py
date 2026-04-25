@@ -7,6 +7,7 @@ import platform
 import re
 import sys
 import time
+import uuid
 
 from aiohttp import web
 from loguru import logger
@@ -126,6 +127,16 @@ async def cards_list_handler(request: web.Request) -> web.Response:
     ``to_descriptor()`` so the response carries the full server-owned state
     (card_id, starred, geometry, display_name, recovery_script, error_state).
 
+    Transitional shim (epic #254 integration fix): non-terminal card types
+    (widget, canvas_claude, container) are not yet hydrated into the registry
+    at startup — that work is scoped to children #260 and #261. Until those
+    land, ``cards_list_handler`` falls back to the on-disk canvas snapshot for
+    any snapshot entry whose ``card_uid`` (or session id) is NOT already
+    represented in the registry view. The client's existing
+    ``renderFromDescriptor`` / ``spawnFromSerialized`` fallback handles these
+    unhydrated entries correctly. Registry entries always win over snapshot
+    entries on overlap.
+
     404 if the canvas name is invalid or the canvas JSON file does not exist;
     200 with ``[]`` if the canvas is empty.
     """
@@ -150,6 +161,70 @@ async def cards_list_handler(request: web.Request) -> web.Response:
             descriptors.append(card.to_descriptor())
         except Exception:
             logger.exception("cards_list_handler: card '{}' to_descriptor failed", card.id)
+
+    # Shim: append snapshot-only entries for card types the registry does not
+    # yet hydrate (widget, canvas_claude, container — children #260 / #261),
+    # and for terminal entries that were not hydrated at startup (e.g. canvases
+    # written after the server started, or terminals whose start() failed).
+    # Build a set of uid keys already covered by the registry so we never
+    # emit two descriptors for the same card.
+    registry_ids: set[str] = set()
+    for desc in descriptors:
+        # card_id / session_id identifies a hydrated terminal; card_uid (if
+        # present) is the persistent client-side uid that also appears in the
+        # snapshot.
+        for key in ("card_id", "session_id", "card_uid"):
+            val = desc.get(key)
+            if val:
+                registry_ids.add(val)
+
+    # Collect the hub names that are "known" (have a live registry card) so
+    # we can filter snapshot-only terminal entries to those with discoverable
+    # hubs. This mirrors the hub-validation that ``spawnFromSerialized`` did
+    # in the pre-#258 client path (``hubs.find(h => h.hub === s.hub)``).
+    # Using the registry as the hub source is fast (no subprocess) and
+    # reasonably current — any canvas hydrated at startup will have its hub
+    # names present. An empty set means no hubs are registered yet; we
+    # fall back to allowing all hubs in that case so a fully-unhydrated
+    # server still serves snapshot terminals.
+    known_hubs: set[str] = {
+        getattr(card, "hub", None) for card in card_registry.list_all() if getattr(card, "hub", None)
+    }
+
+    for snapshot_entry in data.get("cards", []):
+        entry_uid = snapshot_entry.get("card_uid") or snapshot_entry.get("card_id") or snapshot_entry.get("session_id")
+        # If the entry has a uid that the registry already covers, skip it —
+        # the live registry descriptor is authoritative.
+        if entry_uid and entry_uid in registry_ids:
+            continue
+        # Normalise legacy hub-only entries (no ``type`` field, predating the
+        # type-field refactor) so ``renderFromDescriptor`` can dispatch them.
+        # They are always terminals: the hub field is the discriminator.
+        entry_type = snapshot_entry.get("type", "")
+        entry_hub = snapshot_entry.get("hub", "")
+        if not entry_type and entry_hub:
+            snapshot_entry = dict(snapshot_entry)
+            snapshot_entry["type"] = "terminal"
+            entry_type = "terminal"
+        # For terminal snapshot entries (including type-injected legacy ones),
+        # only include those whose hub is known to the registry. This prevents
+        # ``renderFromDescriptor`` from adding fake hub entries for containers
+        # that have never been observed — mirroring the pre-#258 client-side
+        # hub check in ``spawnFromSerialized``. When no hubs are registered
+        # (fully unhydrated server), all terminal entries pass through.
+        if entry_type == "terminal" and known_hubs and entry_hub and entry_hub not in known_hubs:
+            logger.debug(
+                "cards_list_handler: snapshot terminal entry hub '{}' not in known hubs, skipping",
+                entry_hub,
+            )
+            continue
+        # All snapshot entries not already covered by the registry are passed
+        # through. The client's renderFromDescriptor / spawnFromSerialized
+        # dispatch handles them:
+        #  - terminal (known hub): renderFromDescriptor reconnects or spawns new PTY
+        #  - widget/canvas_claude: spawnFromSerialized uses the legacy path
+        descriptors.append(snapshot_entry)
+
     return web.json_response(descriptors)
 
 
@@ -1237,13 +1312,20 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
         return ws
 
     try:
+        # Transitional fix (epic #254 integration): if no card_uid was
+        # supplied by the caller (user-initiated spawn, or post-#258 reconnect
+        # that fell through to /ws/session/new after session_not_found), assign
+        # a server-generated UUID so the snapshot always carries a stable
+        # card_uid. Pre-#258 the client generated this UUID and couriered it;
+        # post-#258 the server is the authority (DP-1 invariant).
+        effective_card_uid = card_uid or str(uuid.uuid4())
         card = TerminalCard(
             session_manager=mgr,
             cmd=cmd,
             hub=hub or None,
             container=container or None,
             starred=starred,
-            card_uid=card_uid or None,
+            card_uid=effective_card_uid,
             display_name=spawn_display_name or None,
             recovery_script=spawn_recovery_script or None,
         )
@@ -1297,9 +1379,27 @@ async def session_attach_handler(request: web.Request) -> web.WebSocketResponse:
     # Try CardRegistry first, then fall back to SessionManager
     card = card_registry.get_terminal(session_id)
     if card and not card.alive:
-        # Card exists but PTY died — unregister stale card
-        card_registry.unregister(session_id)
-        card = None
+        # Transitional fix (epic #254 integration): if the card exists in the
+        # registry but its session hasn't started yet (PTY background task
+        # race), wait briefly so the background _start_card_bg task can run.
+        # Without this wait, session_attach_handler would unregister the card
+        # and write a snapshot without card_uid, defeating the UUID generation
+        # in hydrate_canvas_into_registry. Only wait if no session exists yet
+        # (session = None); if the session exists but is dead, fall through to
+        # the unregister path immediately.
+        existing_session = mgr.get_session(session_id)
+        if existing_session is None and card.session is None:
+            # PTY hasn't started yet — yield the event loop a few times so
+            # the background start() task can create the session.
+            for _ in range(5):
+                await asyncio.sleep(0.05)
+                if card.alive:
+                    break
+        if not card.alive:
+            # PTY started and died, or failed to start within the wait —
+            # unregister stale card so the client can re-spawn.
+            card_registry.unregister(session_id)
+            card = None
 
     scrollback = await mgr.attach(session_id, ws)
     if scrollback is None:
@@ -2614,6 +2714,16 @@ async def hydrate_canvas_into_registry(
         try:
             if card_type == "terminal":
                 card = TerminalCard.from_descriptor(entry, session_manager=session_manager)
+                # Transitional fix (epic #254 integration): pre-#258 the client
+                # generated a UUID at spawn time and sent it via
+                # ``/ws/session/new?card_uid=<uuid>``. Post-#258, startup
+                # hydration creates the card before the client connects, so no
+                # client-generated UUID is available. Assign a stable UUID here
+                # so ``to_descriptor`` / ``_persist_canvas_snapshot`` emit
+                # ``card_uid`` on the first write-through, matching pre-#258
+                # snapshot behaviour.
+                if not card.card_uid:
+                    card.card_uid = str(uuid.uuid4())
             else:
                 # Children #5/#6 extend dispatch here for widget / canvas-claude.
                 logger.debug(
@@ -2637,6 +2747,19 @@ async def hydrate_canvas_into_registry(
         # does not block the event loop for up to ~130s while retries proceed.
         card_registry.register(card, canvas_name=canvas_name)
         hydrated += 1
+        # Transitional fix (epic #254 integration): persist the card_uid to
+        # the canvas snapshot immediately after registration so the UUID
+        # survives any subsequent reconnect-race unregister/re-spawn cycle.
+        # Without this write-through the UUID lives only in memory; a
+        # session_attach_handler unregister (PTY-not-started race) triggers a
+        # snapshot write that drops the UUID before any mutation can persist it.
+        try:
+            card_registry.apply_state_patch(card.id, {"starred": bool(card.starred)})
+        except (LookupError, ValueError):
+            logger.warning(
+                "hydrate_canvas_into_registry: immediate persist for '{}' failed (non-fatal)",
+                card.id,
+            )
 
         # On retry-ceiling error, emit a card_updated broadcast so any
         # observer (Child #3 client, MCP probe) sees the new error_state.
