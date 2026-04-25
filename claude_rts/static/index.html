@@ -1781,6 +1781,10 @@ class TerminalCard extends Card {
   // another client. Idempotent guard via ``this.term``.
   _activate() {
     if (this.term) return; // already live
+    // Reset intentional-close guard so reconnect works after re-activation
+    // (it was set to true by _deactivate() to suppress the async WS close
+    // event from triggering an unwanted reconnect while dormant).
+    this._intentionalClose = false;
     const body = this.el.querySelector(`[data-body="${this.id}"]`);
     if (body) {
       body.innerHTML = '';
@@ -1824,6 +1828,9 @@ class TerminalCard extends Card {
     // Tear down the live terminal, preserving the session on the server
     // (kill_tmux=False default). The dormant placeholder is re-rendered
     // so the card UI matches the fresh-load dormant look.
+    // Keep _intentionalClose = true so the WS close event (which fires
+    // asynchronously after ws.close()) does NOT trigger the reconnect timer.
+    // _activate() will reset it when the card transitions back to live.
     this._intentionalClose = true;
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -1833,7 +1840,6 @@ class TerminalCard extends Card {
     if (this.ro) { try { this.ro.disconnect(); } catch (e) { /* ignore */ } this.ro = null; }
     if (this.term) { try { this.term.dispose(); } catch (e) { /* ignore */ } this.term = null; }
     this.fitAddon = null;
-    this._intentionalClose = false;
     this._renderDormant();
   }
 
@@ -3093,6 +3099,12 @@ class WidgetCard extends Card {
 
   onDestroy() {
     if (this._refreshTimer) clearInterval(this._refreshTimer);
+    // Epic #254 child 5 (#260): WidgetCards are server-authored — unregister
+    // from CardRegistry on destroy so reloads don't rehydrate destroyed widgets.
+    if (this.sessionId) {
+      fetch(`/api/cards/${encodeURIComponent(this.sessionId)}`, { method: 'DELETE' })
+        .catch(err => console.error('widget unregister failed:', err));
+    }
   }
 
   async render() {
@@ -3261,8 +3273,9 @@ function destroyCard(id) {
   // and the write-through hook rewrites the snapshot without the closed
   // card — otherwise a reload rehydrates it from the stale snapshot. WS
   // close alone does NOT unregister (the session lives for the 5-minute
-  // orphan window to support reconnection). For non-terminal cards the
-  // server has no record to clean up.
+  // orphan window to support reconnection).
+  // Epic #254 child 5 (#260): WidgetCards are now server-authored and must
+  // also be unregistered on destroy so subsequent reloads don't rehydrate them.
   const sessionId = card.type === 'terminal' ? card.sessionId : null;
   card.destroy();
   cards.splice(idx, 1);
@@ -3314,19 +3327,25 @@ async function renderFromDescriptor(descriptor) {
       hubs.push(hub);
       hubSymbolMap[hubName] = HUB_SYMBOLS[hubs.length % HUB_SYMBOLS.length];
     }
-    return CARD_TYPE_REGISTRY.spawn('terminal', {
-      hub,
-      container: container,
-      exec: descriptor.exec || null,
-      sessionId: descriptor.session_id,
-      x: descriptor.x, y: descriptor.y, w: descriptor.w, h: descriptor.h,
-      starred: descriptor.starred != null ? descriptor.starred : false,
-      displayName: descriptor.display_name || '',
-      recoveryScript: descriptor.recovery_script || '',
-      cardUid: descriptor.card_uid || '',
-      errorState: descriptor.error_state || null,
-      controlGroups: descriptor.controlGroups,
-    });
+    const _spawnKey = descriptor.session_id || descriptor.card_id;
+    if (_spawnKey) _pendingSpawns.add(_spawnKey);
+    try {
+      return await CARD_TYPE_REGISTRY.spawn('terminal', {
+        hub,
+        container: container,
+        exec: descriptor.exec || null,
+        sessionId: descriptor.session_id,
+        x: descriptor.x, y: descriptor.y, w: descriptor.w, h: descriptor.h,
+        starred: descriptor.starred != null ? descriptor.starred : false,
+        displayName: descriptor.display_name || '',
+        recoveryScript: descriptor.recovery_script || '',
+        cardUid: descriptor.card_uid || '',
+        errorState: descriptor.error_state || null,
+        controlGroups: descriptor.controlGroups,
+      });
+    } finally {
+      if (_spawnKey) _pendingSpawns.delete(_spawnKey);
+    }
   }
   if (t === 'widget') {
     // Epic #254 child 5 (#260): server-authored widget hydration. The
@@ -3335,13 +3354,19 @@ async function renderFromDescriptor(descriptor) {
     // from the descriptor — no client-only ``CARD_TYPE_REGISTRY.spawn``
     // fallthrough.
     if (!descriptor.widgetType) return null;
-    return CARD_TYPE_REGISTRY.spawn('widget', {
-      widgetType: descriptor.widgetType,
-      x: descriptor.x, y: descriptor.y, w: descriptor.w, h: descriptor.h,
-      refreshInterval: descriptor.refreshInterval,
-      starred: descriptor.starred != null ? descriptor.starred : false,
-      cardId: descriptor.card_id || null,
-    });
+    const _spawnKey = descriptor.card_id;
+    if (_spawnKey) _pendingSpawns.add(_spawnKey);
+    try {
+      return await CARD_TYPE_REGISTRY.spawn('widget', {
+        widgetType: descriptor.widgetType,
+        x: descriptor.x, y: descriptor.y, w: descriptor.w, h: descriptor.h,
+        refreshInterval: descriptor.refreshInterval,
+        starred: descriptor.starred != null ? descriptor.starred : false,
+        cardId: descriptor.card_id || null,
+      });
+    } finally {
+      if (_spawnKey) _pendingSpawns.delete(_spawnKey);
+    }
   }
   if (t === 'canvas_claude') {
     // Epic #254 child 6 (#261): server-authored canvas_claude hydration.
@@ -3352,15 +3377,21 @@ async function renderFromDescriptor(descriptor) {
     // than going through the create-and-seed path. When error_state is
     // present (e.g. server's attach() found the tmux session missing) the
     // retry overlay surfaces it instead of attempting to connect.
-    return CARD_TYPE_REGISTRY.spawn('canvas_claude', {
-      x: descriptor.x, y: descriptor.y, w: descriptor.w, h: descriptor.h,
-      sessionId: descriptor.session_id,
-      profile: descriptor.profile,
-      canvasName: descriptor.canvas_name || descriptor.canvasName,
-      starred: descriptor.starred != null ? descriptor.starred : false,
-      cardId: descriptor.card_id || null,
-      errorState: descriptor.error_state || null,
-    });
+    const _spawnKey = descriptor.card_id || descriptor.session_id;
+    if (_spawnKey) _pendingSpawns.add(_spawnKey);
+    try {
+      return await CARD_TYPE_REGISTRY.spawn('canvas_claude', {
+        x: descriptor.x, y: descriptor.y, w: descriptor.w, h: descriptor.h,
+        sessionId: descriptor.session_id,
+        profile: descriptor.profile,
+        canvasName: descriptor.canvas_name || descriptor.canvasName,
+        starred: descriptor.starred != null ? descriptor.starred : false,
+        cardId: descriptor.card_id || null,
+        errorState: descriptor.error_state || null,
+      });
+    } finally {
+      if (_spawnKey) _pendingSpawns.delete(_spawnKey);
+    }
   }
   return spawnFromSerialized(descriptor);
 }
@@ -3982,21 +4013,30 @@ async function switchCanvas(name) {
   // ``lazy_hydrate`` this is the only path that registers the canvas's
   // cards. The activate call is idempotent — repeated switches into the
   // same canvas never duplicate registrations.
+  //
+  // Set the in-progress flag so handleControlCardCreated ignores card_created
+  // broadcasts for the duration of this switch — the server may emit them
+  // from activate's register() calls, and they would produce duplicates.
+  _canvasSwitchInProgress = true;
   try {
-    await fetch(`/api/canvases/${encodeURIComponent(currentCanvasName)}/activate`, { method: 'POST' });
-  } catch (err) {
-    console.warn('switchCanvas: activate failed (continuing with GET /api/cards):', err);
-  }
-  const descriptors = await fetchCanvasDescriptors(currentCanvasName);
-  if (descriptors.length > 0) {
-    for (const d of descriptors) {
-      try {
-        await renderFromDescriptor(d);
-      } catch (err) {
-        console.warn('switchCanvas: render entry failed, skipping:', d, err);
-      }
+    try {
+      await fetch(`/api/canvases/${encodeURIComponent(currentCanvasName)}/activate`, { method: 'POST' });
+    } catch (err) {
+      console.warn('switchCanvas: activate failed (continuing with GET /api/cards):', err);
     }
-    rebuildControlGroupsFromCards();
+    const descriptors = await fetchCanvasDescriptors(currentCanvasName);
+    if (descriptors.length > 0) {
+      for (const d of descriptors) {
+        try {
+          await renderFromDescriptor(d);
+        } catch (err) {
+          console.warn('switchCanvas: render entry failed, skipping:', d, err);
+        }
+      }
+      rebuildControlGroupsFromCards();
+    }
+  } finally {
+    _canvasSwitchInProgress = false;
   }
 
   // 5. Fit view
@@ -4016,6 +4056,18 @@ async function switchCanvas(name) {
 // Prevents a queued card_created broadcast from re-spawning a card that was
 // just deleted (e.g. during test teardown or rapid user close).
 const _recentlyDestroyedSessions = new Set();
+
+// Set of card identifiers (card_id or session_id) whose spawn is in-flight
+// via renderFromDescriptor.  handleControlCardCreated checks this so a
+// card_created broadcast that arrives while renderFromDescriptor is awaiting
+// prepareOpts does not duplicate the card.
+const _pendingSpawns = new Set();
+
+// Flag set for the duration of a switchCanvas() call.  handleControlCardCreated
+// ignores all broadcasts while a canvas switch is in progress — the full set of
+// descriptors is already fetched and rendered by the switch itself, so any
+// concurrent card_created broadcast would produce a duplicate.
+let _canvasSwitchInProgress = false;
 function _markSessionDestroyed(sessionId) {
   if (!sessionId) return;
   _recentlyDestroyedSessions.add(sessionId);
@@ -4075,12 +4127,21 @@ async function handleControlCardCreated(msg) {
   // to avoid duplicates. Also skip container_starter (hidden cards).
   if (desc.type === 'blueprint' || desc.type === 'container_starter') return;
 
+  // Suppress all card_created broadcasts during a canvas switch — the switch
+  // itself fetches and renders the full descriptor list, so any concurrent
+  // broadcast would produce a duplicate.
+  if (_canvasSwitchInProgress) return;
+
   // Avoid duplicates — check if a card with this session_id already exists or was
   // recently destroyed locally (guards against queued broadcasts racing with teardown).
+  // Also check _pendingSpawns: a renderFromDescriptor may be awaiting prepareOpts
+  // and the card is not yet in cards[] but a spawn is already in flight.
   if (desc.session_id && (
     cards.some(c => c.sessionId === desc.session_id) ||
-    _recentlyDestroyedSessions.has(desc.session_id)
+    _recentlyDestroyedSessions.has(desc.session_id) ||
+    _pendingSpawns.has(desc.session_id)
   )) return;
+  if (desc.card_id && _pendingSpawns.has(desc.card_id)) return;
 
   if (desc.type === 'terminal') {
     const hubName = desc.hub || desc.exec || 'api-terminal';
@@ -4136,6 +4197,7 @@ async function handleControlCardCreated(msg) {
     // broadcast back to its own client).
     if (!desc.widgetType) return;
     if (cards.some(c => c.type === 'widget' && c.sessionId === desc.card_id)) return;
+    if (desc.card_id && _pendingSpawns.has(desc.card_id)) return;
     const vw = viewport.clientWidth;
     const vh = viewport.clientHeight;
     const cx = (-pan.x + vw / 2) / zoom;
@@ -4164,6 +4226,8 @@ async function handleControlCardCreated(msg) {
         (desc.card_id && (c.cardId === desc.card_id || c.sessionId === desc.card_id))
       )
     )) return;
+    if ((desc.card_id && _pendingSpawns.has(desc.card_id)) ||
+        (desc.session_id && _pendingSpawns.has(desc.session_id))) return;
     const vw = viewport.clientWidth;
     const vh = viewport.clientHeight;
     const cx = (-pan.x + vw / 2) / zoom;
@@ -4484,18 +4548,23 @@ async function handleBlueprintOpenWidget(msg) {
   // client does not auto-spawn cards for discovered hubs that the server
   // did not register. New hubs appear via user-initiated spawn (sidebar /
   // context menu) post-inversion.
-  const descriptors = await fetchCanvasDescriptors(currentCanvasName);
-  if (descriptors.length > 0) {
-    for (const d of descriptors) {
-      try {
-        await renderFromDescriptor(d);
-      } catch (err) {
-        console.warn('boot: render entry failed, skipping:', d, err);
+  _canvasSwitchInProgress = true;
+  try {
+    const descriptors = await fetchCanvasDescriptors(currentCanvasName);
+    if (descriptors.length > 0) {
+      for (const d of descriptors) {
+        try {
+          await renderFromDescriptor(d);
+        } catch (err) {
+          console.warn('boot: render entry failed, skipping:', d, err);
+        }
       }
+      rebuildControlGroupsFromCards();
+    } else {
+      layoutGrid(hubs);
     }
-    rebuildControlGroupsFromCards();
-  } else {
-    layoutGrid(hubs);
+  } finally {
+    _canvasSwitchInProgress = false;
   }
 
   // Center viewport on the cards

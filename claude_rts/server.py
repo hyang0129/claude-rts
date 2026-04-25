@@ -226,6 +226,17 @@ async def cards_list_handler(request: web.Request) -> web.Response:
                 entry_hub,
             )
             continue
+        # Only pass through entries whose type is in the supported set.
+        # Unknown types (e.g. "foo") are silently dropped — mirroring what
+        # hydrate_canvas_into_registry does.  Legacy hub-only entries have
+        # already been normalised to type "terminal" above.
+        _SUPPORTED_TYPES = {"terminal", "widget", "canvas_claude"}
+        if entry_type not in _SUPPORTED_TYPES:
+            logger.debug(
+                "cards_list_handler: snapshot entry type '{}' not supported, skipping",
+                entry_type,
+            )
+            continue
         # All snapshot entries not already covered by the registry are passed
         # through. The client's renderFromDescriptor / spawnFromSerialized
         # dispatch handles them:
@@ -1449,8 +1460,13 @@ async def session_attach_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse()
     await ws.prepare(request)
 
-    # Try CardRegistry first, then fall back to SessionManager
+    # Try CardRegistry first, then fall back to SessionManager.
+    # After boot hydration, the registry may hold a card whose id was a
+    # placeholder at registration time and was rekeyed by start() to the
+    # real session_id.  In that race the URL session_id is the placeholder
+    # and card.id is now the real session id — use card.id for the attach.
     card = card_registry.get_terminal(session_id)
+    effective_session_id = session_id
     if card and not card.alive:
         # Transitional fix (epic #254 integration): if the card exists in the
         # registry but its session hasn't started yet (PTY background task
@@ -1471,10 +1487,20 @@ async def session_attach_handler(request: web.Request) -> web.WebSocketResponse:
         if not card.alive:
             # PTY started and died, or failed to start within the wait —
             # unregister stale card so the client can re-spawn.
-            card_registry.unregister(session_id)
-            card = None
+            # Exception: cards still in background retry-sleep (session=None,
+            # error_state=None) are left registered. The client receives
+            # session_not_found and reconnects independently.
+            still_retrying = card.session is None and card.error_state is None
+            if not still_retrying:
+                card_registry.unregister(session_id)
+                card = None
+    # After the wait loop, card.id may have been updated by rekey() to the
+    # real session_id (e.g. "rts-xxx") while the URL carried a placeholder.
+    # Use card.id for the SessionManager attach so we hit the correct session.
+    if card is not None and card.id != session_id:
+        effective_session_id = card.id
 
-    scrollback = await mgr.attach(session_id, ws)
+    scrollback = await mgr.attach(effective_session_id, ws)
     if scrollback is None:
         await ws.send_str(json.dumps({"error": "session_not_found"}))
         await ws.close()
@@ -1483,9 +1509,9 @@ async def session_attach_handler(request: web.Request) -> web.WebSocketResponse:
     # Replay scrollback, then signal ready
     if scrollback:
         await ws.send_bytes(scrollback)
-    await ws.send_str(json.dumps({"type": "session_attached", "session_id": session_id}))
+    await ws.send_str(json.dumps({"type": "session_attached", "session_id": effective_session_id}))
 
-    session = mgr.get_session(session_id)
+    session = mgr.get_session(effective_session_id)
     if session:
         await _session_ws_input_loop(ws, session, mgr)
     return ws
@@ -2416,6 +2442,26 @@ async def _dispatch_card_action(request: web.Request, card_id: str, action: str)
     raise web.HTTPBadRequest(text=f"Unknown action: {action!r}")
 
 
+async def cards_delete(request: web.Request) -> web.Response:
+    """DELETE /api/cards/{id} — unregister a non-terminal card (e.g. WidgetCard).
+
+    Terminal deletion uses ``DELETE /api/claude/terminal/{id}`` which also
+    tears down the PTY session.  This endpoint handles server-authored cards
+    that have no PTY (widgets, canvas-claude detach paths) so the client can
+    remove them from ``CardRegistry`` and trigger the write-through snapshot
+    update via ``CardRegistry.unregister``.
+
+    Returns 204 on success, 404 if the card is not registered.
+    """
+    card_id = request.match_info["id"]
+    card_registry: CardRegistry = request.app["card_registry"]
+    removed = card_registry.unregister(card_id)
+    if removed is None:
+        raise web.HTTPNotFound(text=f"Card '{card_id}' not found")
+    logger.info("cards_delete: unregistered card '{}'", card_id)
+    return web.Response(status=204)
+
+
 async def claude_terminal_rename(request: web.Request) -> web.Response:
     """PUT /api/claude/terminal/{id}/rename — legacy alias for display_name.
 
@@ -3023,6 +3069,9 @@ def create_app(
 
     # Generic card state mutation (epic #236 / issue #238 — single mutation path)
     app.router.add_put("/api/cards/{id}/state", cards_state_put)
+    # Generic card deletion — unregisters non-terminal server-authored cards
+    # (e.g. WidgetCard) so reloads don't rehydrate destroyed cards.
+    app.router.add_delete("/api/cards/{id}", cards_delete)
     # Epic #254 child 5 (#260): server-authored WidgetCard spawn endpoint.
     # Routed before any ``/api/cards/{id}/...`` rule so ``widget`` is not
     # captured as an id segment.

@@ -235,6 +235,10 @@ class TerminalCard(BaseCard):
             # Success path.
             self._session = session
             # Align card id with session_id so lookups are unified.
+            # If the card was already registered under a snapshot id, rotate
+            # the registry key so get_terminal(session_id) still finds it.
+            if getattr(self, "_registry", None) is not None and self._id != session.session_id:
+                self._registry.rekey(self._id, session.session_id)
             self._id = session.session_id
             # Clear any prior error_state (e.g. successful retry after transient failure).
             self.error_state = None

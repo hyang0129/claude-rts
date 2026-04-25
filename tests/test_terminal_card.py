@@ -573,3 +573,52 @@ async def test_persist_callback_only_includes_starred_cards(monkeypatch):
     await starred.stop()
     await unstarred.stop()
     mgr.stop_all()
+
+
+# ── Fix 2 (#254 e2e regressions): registry rekey on TerminalCard.start() ──
+
+
+async def test_registry_rekey_on_start(monkeypatch):
+    """When a TerminalCard is registered before start(), the registry key is
+    updated to the real session_id after start() completes.
+
+    Asserts:
+    - get_terminal(session_id) returns the card after start().
+    - get_terminal(snapshot_id) returns None (old key is gone).
+    - cards_on_canvas order is preserved (rekey does not move card to end).
+    """
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    reg = CardRegistry()
+
+    # Register two cards: card_a first, then card_b.
+    persist_calls: list[str] = []
+    reg.set_persist_callback(persist_calls.append)
+
+    card_a = TerminalCard(session_manager=mgr, cmd="bash", card_id="snapshot-abc")
+    card_b = TerminalCard(session_manager=mgr, cmd="bash", card_id="snapshot-xyz")
+    reg.register(card_a, canvas_name="test-canvas")
+    reg.register(card_b, canvas_name="test-canvas")
+    persist_calls.clear()  # clear registration-time persists
+
+    # Start card_a — this rekeyes it from snapshot-abc to a real session_id.
+    await card_a.start(retry_delays=[])
+    real_session_id = card_a.session_id
+    assert real_session_id != "snapshot-abc", "session_id should differ from snapshot placeholder"
+
+    # After start: lookup by session_id works, old key is gone.
+    assert reg.get_terminal(real_session_id) is card_a, "get_terminal(session_id) should return card_a"
+    assert reg.get_terminal("snapshot-abc") is None, "old snapshot key should be gone"
+    assert card_a.id == real_session_id
+
+    # Insertion order must be preserved: card_a (rekeyed) still comes BEFORE card_b.
+    on_canvas = reg.cards_on_canvas("test-canvas")
+    assert on_canvas[0] is card_a, "card_a should remain first after rekey"
+    assert on_canvas[1] is card_b, "card_b should remain second after rekey"
+
+    # Rekey must trigger a persist so the canvas JSON reflects the new session_id.
+    assert "test-canvas" in persist_calls, "rekey should have triggered canvas persist"
+
+    await card_a.stop()
+    await card_b.stop()
+    mgr.stop_all()

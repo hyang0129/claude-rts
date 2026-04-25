@@ -8,6 +8,8 @@
     {
       "type": "terminal",
       "hub": "supreme-claudemander-util",
+      "container": "supreme-claudemander-util",
+      "exec": "docker exec -it supreme-claudemander-util bash -l",
       "starred": true,
       "x": 50,
       "y": 50,
@@ -17,6 +19,8 @@
     {
       "type": "terminal",
       "hub": "supreme-claudemander-util",
+      "container": "supreme-claudemander-util",
+      "exec": "docker exec -it supreme-claudemander-util bash -l",
       "starred": true,
       "x": 400,
       "y": 50,
@@ -46,6 +50,8 @@
     {
       "type": "terminal",
       "hub": "supreme-claudemander-util",
+      "container": "supreme-claudemander-util",
+      "exec": "docker exec -it supreme-claudemander-util bash -l",
       "starred": true,
       "x": 3000,
       "y": 2000,
@@ -55,6 +61,8 @@
     {
       "type": "terminal",
       "hub": "supreme-claudemander-util",
+      "container": "supreme-claudemander-util",
+      "exec": "docker exec -it supreme-claudemander-util bash -l",
       "starred": true,
       "x": 150,
       "y": 150,

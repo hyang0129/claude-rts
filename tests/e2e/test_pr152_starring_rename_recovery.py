@@ -576,14 +576,20 @@ class TestRenamePersistence:
         # PUT fire-and-forget (epic #236 DP-4). Poll the server's authoritative
         # view before reload to ensure the PUT landed — otherwise reload may
         # race ahead of the write-through and the snapshot never captured it.
+        # Use the server session_id (from cards[].sessionId) rather than the
+        # numeric JS card id (cards[].id) so the match against the server's
+        # /api/claude/terminals response is valid.
         page.wait_for_function(
             f"""async () => {{
+                const c = cards.find(c => String(c.id) === '{target_id}');
+                const sid = c && c.sessionId;
+                if (!sid) return false;
                 const resp = await fetch('/api/claude/terminals');
                 if (!resp.ok) return false;
                 const body = await resp.json();
                 const list = Array.isArray(body) ? body : (body.terminals || []);
                 return list.some(
-                    t => String(t.card_id || t.session_id) === '{target_id}'
+                    t => (t.card_id === sid || t.session_id === sid)
                       && t.display_name === 'Persistent Name'
                 );
             }}""",

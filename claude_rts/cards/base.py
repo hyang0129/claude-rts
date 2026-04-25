@@ -31,6 +31,9 @@ class BaseCard(abc.ABC):
     def __init__(self, card_id: str | None = None, bus: EventBus | None = None):
         self._id = card_id or uuid.uuid4().hex[:8]
         self._bus = bus
+        # Set by CardRegistry.register(); allows the card to call rekey() on
+        # id mutation (TerminalCard.start() aligns _id to session_id).
+        self._registry = None
         # Server-owned state (epic #236). Every field listed here must appear
         # in ``MUTABLE_FIELDS`` on the subclass that wants it mutable through
         # ``PUT /api/cards/{id}/state`` (see docs/state-model.md).

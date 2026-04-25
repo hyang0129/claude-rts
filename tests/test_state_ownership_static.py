@@ -259,6 +259,10 @@ def test_api_cards_state_only_fetched_from_putCardState():
     #
     # - ``/api/cards/widget`` — server-authored WidgetCard spawn (epic #254
     #   child 5 / #260). Creates the card; it does not patch existing state.
+    # - ``DELETE`` method calls — unregistration/deletion is not a field
+    #   mutation; it removes the card from the registry entirely.  These go
+    #   through ``DELETE /api/cards/{id}`` which is not routed through
+    #   ``putCardState``.
     NON_MUTATION_PATHS = ("/api/cards/widget",)
     for lineno, line in _lines_non_comment(source):
         if "/api/cards/" not in line:
@@ -269,6 +273,9 @@ def test_api_cards_state_only_fetched_from_putCardState():
         if "fetch(" not in line:
             continue
         if any(p in line for p in NON_MUTATION_PATHS):
+            continue
+        # DELETE calls are unregistration, not state mutation — exempt.
+        if "DELETE" in line:
             continue
         enc = _enclosing_function(all_lines, lineno)
         if enc != "putCardState":

@@ -100,7 +100,7 @@ class TestUnknownTypeSkip:
         clear_canvas(page)
         put_canvas(page, "compat-unknown-type", fixture)
 
-        page.evaluate("() => switchCanvas('compat-unknown-type')")
+        page.evaluate("async () => { await switchCanvas('compat-unknown-type'); }")
         # unknown_type_canvas.json has 2 entries; the 'foo' entry is skipped → 1 card.
         page.wait_for_function("() => cards.length === 1", timeout=5000)
 
@@ -114,7 +114,7 @@ class TestUnknownTypeSkip:
         clear_canvas(page)
         put_canvas(page, "compat-unknown-type-count", fixture)
 
-        page.evaluate("() => switchCanvas('compat-unknown-type-count')")
+        page.evaluate("async () => { await switchCanvas('compat-unknown-type-count'); }")
         page.wait_for_function("() => cards.length === 1", timeout=5000)
 
         total = get_card_count(page)
@@ -127,7 +127,7 @@ class TestUnknownTypeSkip:
         clear_canvas(page)
         put_canvas(page, "compat-unknown-type-foo", fixture)
 
-        page.evaluate("() => switchCanvas('compat-unknown-type-foo')")
+        page.evaluate("async () => { await switchCanvas('compat-unknown-type-foo'); }")
         page.wait_for_function("() => cards.length === 1", timeout=5000)
 
         foo_count = count_cards_by_type(page, "foo")
@@ -140,7 +140,7 @@ class TestUnknownTypeSkip:
         clear_canvas(page)
         put_canvas(page, "compat-unknown-type-widget", fixture)
 
-        page.evaluate("() => switchCanvas('compat-unknown-type-widget')")
+        page.evaluate("async () => { await switchCanvas('compat-unknown-type-widget'); }")
         page.wait_for_function("() => cards.length === 1", timeout=5000)
 
         widget_count = count_cards_by_type(page, "widget")

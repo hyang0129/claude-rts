@@ -192,3 +192,79 @@ async def test_websocket_accepts_non_localhost_origin(client):
         headers={"Origin": "http://100.64.0.5:3000"},
     ) as ws:
         assert not ws.closed
+
+
+# ── cards_list_handler unknown-type shim filter ───────────────────────────
+
+
+async def test_cards_delete_unregisters_widget(tmp_path):
+    """DELETE /api/cards/{id} unregisters a WidgetCard and returns 204."""
+    from claude_rts import config as cfg
+    from claude_rts.config import write_canvas
+    from claude_rts.cards.widget_card import WidgetCard
+    from aiohttp.test_utils import TestClient, TestServer
+
+    app_config = cfg.load(tmp_path / ".sc")
+    write_canvas(app_config, "del-test", {"cards": [], "pan": {"x": 0, "y": 0}, "zoom": 1})
+    app = create_app(app_config)
+    async with TestClient(TestServer(app)) as client:
+        # Manually register a WidgetCard
+        card = WidgetCard(widget_type="system-info", card_id="widget-del-123")
+        registry = app["card_registry"]
+        registry.register(card, canvas_name="del-test")
+        assert registry.get("widget-del-123") is card
+
+        resp = await client.delete("/api/cards/widget-del-123")
+        assert resp.status == 204
+        assert registry.get("widget-del-123") is None
+
+    # 404 for unknown id
+    app2_config = cfg.load(tmp_path / ".sc2")
+    app2 = create_app(app2_config)
+    async with TestClient(TestServer(app2)) as client2:
+        resp = await client2.delete("/api/cards/does-not-exist")
+        assert resp.status == 404
+
+
+async def test_cards_list_handler_filters_unknown_type(tmp_path):
+    """Snapshot entry with type 'foo' is dropped by the shim; only the known
+    widget entry is returned.  Fix 1 of epic #254 e2e regressions."""
+    from claude_rts import config as cfg
+    from claude_rts.config import write_canvas
+    from aiohttp.test_utils import TestClient, TestServer
+
+    app_config = cfg.load(tmp_path / ".sc")
+    # Seed a canvas with one widget entry and one unknown-type entry.
+    write_canvas(
+        app_config,
+        "shim-filter-test",
+        {
+            "cards": [
+                {
+                    "type": "widget",
+                    "widgetType": "system-info",
+                    "card_id": "widget-aaa",
+                    "x": 0,
+                    "y": 0,
+                    "w": 360,
+                    "h": 280,
+                },
+                {
+                    "type": "foo",
+                    "card_id": "foo-bbb",
+                    "x": 0,
+                    "y": 0,
+                },
+            ],
+            "pan": {"x": 0, "y": 0},
+            "zoom": 1,
+        },
+    )
+    app = create_app(app_config)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get("/api/cards?canvas=shim-filter-test")
+        assert resp.status == 200
+        data = await resp.json()
+    assert len(data) == 1, f"Expected 1 descriptor (widget only), got {len(data)}: {data}"
+    assert data[0]["type"] == "widget"
+    assert data[0].get("card_id") == "widget-aaa"
