@@ -17,6 +17,7 @@ import pytest
 from claude_rts import config
 from claude_rts.cards.card_registry import CardRegistry
 from claude_rts.cards.terminal_card import TerminalCard
+from claude_rts.cards.widget_card import WidgetCard
 from claude_rts.server import create_app
 from claude_rts.sessions import SessionManager
 
@@ -137,7 +138,7 @@ async def test_error_state_in_descriptor_and_stripped_from_persist(monkeypatch):
 
 
 async def test_hydrate_canvas_populates_registry(tmp_path, monkeypatch):
-    """Boot-time hydration registers TerminalCards for every snapshot entry."""
+    """Boot-time hydration registers TerminalCards and WidgetCards for every snapshot entry."""
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
     app_config = config.load(tmp_path / ".sc")
     app_config.canvases_dir.mkdir(parents=True, exist_ok=True)
@@ -147,7 +148,7 @@ async def test_hydrate_canvas_populates_registry(tmp_path, monkeypatch):
         "cards": [
             {"type": "terminal", "exec": "bash", "starred": True, "hub": "h1"},
             {"type": "terminal", "exec": "echo hi", "starred": True, "container": "util"},
-            {"type": "widget", "widgetType": "system-info", "starred": True},  # skipped in #2
+            {"type": "widget", "widgetType": "system-info", "starred": True},
         ],
     }
     (app_config.canvases_dir / "probe-qa.json").write_text(json.dumps(snapshot))
@@ -159,12 +160,19 @@ async def test_hydrate_canvas_populates_registry(tmp_path, monkeypatch):
         # Give background start() tasks a chance to run.
         await asyncio.sleep(0.1)
         registry: CardRegistry = app["card_registry"]
-        terminals = registry.cards_on_canvas("probe-qa")
+        all_cards = registry.cards_on_canvas("probe-qa")
+        # All 3 entries (2 terminals + 1 widget) are now hydrated.
+        assert len(all_cards) == 3
+        terminals = [c for c in all_cards if isinstance(c, TerminalCard)]
+        widgets = [c for c in all_cards if isinstance(c, WidgetCard)]
         assert len(terminals) == 2
+        assert len(widgets) == 1
         for t in terminals:
-            assert isinstance(t, TerminalCard)
             assert t.session_id is not None
             assert t.error_state is None
+        widget = widgets[0]
+        assert widget.widget_type == "system-info"
+        assert widget.starred is True
 
 
 async def test_hydrate_skips_unknown_type_without_crash(tmp_path, monkeypatch):

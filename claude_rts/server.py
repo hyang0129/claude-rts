@@ -29,7 +29,15 @@ from .discovery import discover_hubs  # noqa: E402
 from .startup import run_startup  # noqa: E402
 from .util_container import ensure_util_container, discover_profiles, exec_in_util  # noqa: E402
 from .sessions import SessionManager  # noqa: E402
-from .cards import ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegistry, CanvasClaudeCard, BlueprintCard  # noqa: E402
+from .cards import (  # noqa: E402
+    ServiceCardRegistry,
+    ClaudeUsageCard,
+    TerminalCard,
+    CardRegistry,
+    CanvasClaudeCard,
+    BlueprintCard,
+    WidgetCard,
+)
 from .cards.base import BaseCard  # noqa: E402
 from .event_bus import EventBus  # noqa: E402
 from .ansi_strip import strip_ansi  # noqa: E402
@@ -2724,8 +2732,16 @@ async def hydrate_canvas_into_registry(
                 # snapshot behaviour.
                 if not card.card_uid:
                     card.card_uid = str(uuid.uuid4())
+            elif card_type == "widget":
+                # Child #5 (#260): wire WidgetCard into hydration so widget
+                # entries survive the snapshot write-through that follows
+                # terminal registration. Without this branch the widget entry
+                # was skipped, then destroyed when ``apply_state_patch`` called
+                # ``_persist_canvas_snapshot`` with only registered (terminal)
+                # cards in the registry.
+                card = WidgetCard.from_descriptor(entry)
             else:
-                # Children #5/#6 extend dispatch here for widget / canvas-claude.
+                # Child #6 extends dispatch here for canvas-claude.
                 logger.debug(
                     "hydrate_canvas_into_registry: canvas '{}' entry #{} type '{}' has no hydrator, skipping",
                     canvas_name,
