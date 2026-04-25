@@ -1,8 +1,10 @@
 """Tests for BlueprintCard step execution, variable binding, failure, and EventBus lifecycle."""
 
 import asyncio
+import json
 import time
 
+import pytest
 
 from claude_rts.cards.blueprint_card import BlueprintCard
 from claude_rts.cards.card_registry import CardRegistry
@@ -586,3 +588,189 @@ async def test_step_timeout(tmp_path, monkeypatch):
     failed = [e for e in events if e[0] == "blueprint:failed"]
     assert len(failed) == 1
     mgr.stop_all()
+
+
+# ── Ephemerality (epic #254 child 7 / #262) ─────────────────────────────────
+#
+# BlueprintCard is the deliberate counter-example to "all card types migrate
+# together" — it is one-shot and ephemeral, and must remain absent from canvas
+# snapshots and from the post-restart CardRegistry. These tests exist so a
+# future change that accidentally adds BlueprintCard to the persist or
+# hydration paths fails loudly. See docs/state-model.md "BlueprintCard
+# ephemerality".
+
+
+def test_blueprint_card_from_descriptor_is_not_implemented():
+    """BlueprintCard.from_descriptor must refuse to hydrate from a snapshot.
+
+    The hydrate dispatch table in ``hydrate_canvas_into_registry`` only knows
+    about ``terminal`` / ``widget`` / ``canvas_claude``; if a future change
+    adds ``blueprint`` to that table, this test still guards the contract on
+    the class itself.
+    """
+    with pytest.raises(NotImplementedError):
+        BlueprintCard.from_descriptor({"type": "blueprint", "blueprint_name": "x"})
+
+
+def test_blueprint_card_default_starred_is_false():
+    """A live BlueprintCard is unstarred by default.
+
+    The persist callback filters non-starred cards out of the canvas snapshot
+    (issue #194 / epic #236). Combined with the empty MUTABLE_FIELDS on
+    BlueprintCard (so ``starred`` cannot be flipped via ``PUT
+    /api/cards/{id}/state``), a live BlueprintCard cannot leak into the
+    snapshot through the legitimate mutation path.
+    """
+    card = BlueprintCard(blueprint={"name": "x", "steps": []})
+    assert card.starred is False
+    # ``starred`` is not in MUTABLE_FIELDS for BlueprintCard, so the generic
+    # state-patch endpoint cannot turn it on.
+    assert "starred" not in BlueprintCard.MUTABLE_FIELDS
+
+
+async def test_live_blueprint_card_excluded_from_canvas_snapshot(tmp_path, monkeypatch):
+    """A registered BlueprintCard does not appear in the on-disk canvas JSON.
+
+    Spawn a live BlueprintCard mid-execution, force the persist callback to
+    fire (by mutating a starred neighbour), and assert the canvas snapshot
+    contains no blueprint entries — even though the BlueprintCard is in the
+    registry at the moment of write.
+    """
+    from claude_rts.cards.terminal_card import TerminalCard
+    from claude_rts.server import create_app
+    from tests.test_terminal_card import MockPty as TerminalMockPty
+
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", TerminalMockPty)
+    app_config = config.load(tmp_path / ".sc")
+    app_config.canvases_dir.mkdir(parents=True, exist_ok=True)
+    canvas_name = "ephem"
+    (app_config.canvases_dir / f"{canvas_name}.json").write_text(
+        json.dumps({"name": canvas_name, "canvas_size": [3840, 2160], "cards": []})
+    )
+
+    app = create_app(app_config, test_mode=True, skip_canvas_schema_check=True)
+    # Run on_startup to wire the persist callback.
+    for hook in app.on_startup:
+        await hook(app)
+    try:
+        registry: CardRegistry = app["card_registry"]
+        mgr: SessionManager = app["session_manager"]
+
+        # Spawn a starred TerminalCard so the snapshot has a non-blueprint
+        # entry to write through.
+        terminal = TerminalCard(session_manager=mgr, cmd="bash", starred=True)
+        await terminal.start(retry_delays=[])
+        registry.register(terminal, canvas_name=canvas_name)
+
+        # Spawn a long-running BlueprintCard (open_widget step never gets an
+        # ack in the test harness, so the card stays in the registry while we
+        # take the snapshot).
+        bp = BlueprintCard(
+            blueprint={
+                "name": "long-running",
+                "steps": [{"action": "open_widget", "widget_type": "system-info", "timeout": 30}],
+            },
+            app=app,
+        )
+        bp.bus = app["event_bus"]
+        registry.register(bp, canvas_name=canvas_name)
+        await bp.start()
+        await asyncio.sleep(0.05)
+
+        # Sanity: the BlueprintCard is currently in the registry on this canvas.
+        live_types = {c.card_type for c in registry.cards_on_canvas(canvas_name)}
+        assert "blueprint" in live_types
+        assert "terminal" in live_types
+
+        # Trigger write-through via the legitimate mutation path.
+        registry.apply_state_patch(terminal.id, {"starred": True})
+
+        on_disk = json.loads((app_config.canvases_dir / f"{canvas_name}.json").read_text())
+        types_on_disk = {entry.get("type") for entry in on_disk.get("cards", [])}
+        assert "blueprint" not in types_on_disk, f"BlueprintCard leaked into canvas snapshot: {on_disk}"
+        # And the terminal is still there — the filter is per-card, not all-or-nothing.
+        assert "terminal" in types_on_disk
+
+        # Cancel the blueprint so its background task does not outlive the test.
+        await bp.stop()
+    finally:
+        for hook in app.on_shutdown:
+            try:
+                await hook(app)
+            except Exception:
+                pass
+
+
+async def test_blueprint_card_absent_from_registry_after_restart(tmp_path, monkeypatch):
+    """After a simulated server restart, no BlueprintCards exist in CardRegistry.
+
+    "Restart" here = run on_startup against a canvas-dir that was the live
+    canvas of a previous run. The previous run's persist callback never
+    wrote BlueprintCard entries (test above), so the post-restart registry
+    contains zero blueprints regardless of what was running pre-restart.
+    """
+    from claude_rts.cards.terminal_card import TerminalCard
+    from claude_rts.server import create_app
+    from tests.test_terminal_card import MockPty as TerminalMockPty
+
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", TerminalMockPty)
+    app_config = config.load(tmp_path / ".sc")
+    app_config.canvases_dir.mkdir(parents=True, exist_ok=True)
+    canvas_name = "restart-canvas"
+    (app_config.canvases_dir / f"{canvas_name}.json").write_text(
+        json.dumps({"name": canvas_name, "canvas_size": [3840, 2160], "cards": []})
+    )
+
+    # ── First run: spawn a TerminalCard + BlueprintCard, force persist. ──
+    app1 = create_app(app_config, test_mode=True, skip_canvas_schema_check=True)
+    app1["_hydrate_retry_delays"] = [0]
+    for hook in app1.on_startup:
+        await hook(app1)
+    try:
+        registry1: CardRegistry = app1["card_registry"]
+        mgr1: SessionManager = app1["session_manager"]
+        terminal = TerminalCard(session_manager=mgr1, cmd="bash", starred=True)
+        await terminal.start(retry_delays=[])
+        registry1.register(terminal, canvas_name=canvas_name)
+
+        bp = BlueprintCard(
+            blueprint={
+                "name": "long-running",
+                "steps": [{"action": "open_widget", "widget_type": "system-info", "timeout": 30}],
+            },
+            app=app1,
+        )
+        bp.bus = app1["event_bus"]
+        registry1.register(bp, canvas_name=canvas_name)
+        await bp.start()
+        await asyncio.sleep(0.05)
+        registry1.apply_state_patch(terminal.id, {"starred": True})
+        await bp.stop()
+    finally:
+        for hook in app1.on_shutdown:
+            try:
+                await hook(app1)
+            except Exception:
+                pass
+
+    # ── Second run: same canvas dir, fresh app. on_startup hydrates. ──
+    app2 = create_app(app_config, test_mode=True, skip_canvas_schema_check=True)
+    app2["_hydrate_retry_delays"] = [0]
+    for hook in app2.on_startup:
+        await hook(app2)
+    try:
+        registry2: CardRegistry = app2["card_registry"]
+        await asyncio.sleep(0.1)  # let background start() tasks settle
+        post_restart = registry2.cards_on_canvas(canvas_name)
+        # The terminal survived because it was starred; the blueprint did not.
+        assert all(c.card_type != "blueprint" for c in post_restart), (
+            f"BlueprintCard was hydrated post-restart: {[c.card_type for c in post_restart]}"
+        )
+        # The terminal's hydrator did run.
+        assert any(c.card_type == "terminal" for c in post_restart)
+    finally:
+        for hook in app2.on_shutdown:
+            try:
+                await hook(app2)
+            except Exception:
+                pass
