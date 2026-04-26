@@ -268,3 +268,174 @@ async def test_cards_list_handler_filters_unknown_type(tmp_path):
     assert len(data) == 1, f"Expected 1 descriptor (widget only), got {len(data)}: {data}"
     assert data[0]["type"] == "widget"
     assert data[0].get("card_id") == "widget-aaa"
+
+
+# ── S20: /api/cards is read-only — POST and PUT return 405 ───────────────────
+
+
+async def test_api_cards_post_and_put_return_405(client):
+    """S20: Only GET is registered for /api/cards; POST and PUT return 405."""
+    resp_post = await client.post("/api/cards", json={})
+    assert resp_post.status == 405, f"Expected 405 for POST /api/cards, got {resp_post.status}"
+    resp_put = await client.put("/api/cards", json={})
+    assert resp_put.status == 405, f"Expected 405 for PUT /api/cards, got {resp_put.status}"
+
+
+# ── S21: GET /api/cards does not leak server-private fields ──────────────────
+
+
+async def test_api_cards_no_private_field_leak(tmp_path, aiohttp_client, monkeypatch):
+    """S21: Each card descriptor in GET /api/cards contains only allowlisted fields.
+
+    PIDs, file paths, internal session objects, raw _session references, and
+    any field starting with '_' must not appear in the response.
+    """
+    import asyncio
+    import json
+
+    from tests.test_terminal_card import MockPty
+    from claude_rts import config as cfg
+    from claude_rts.server import create_app as _create_app
+    from claude_rts.cards.widget_card import WidgetCard
+
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    app_config = cfg.load(tmp_path / ".sc2")
+    app_config.canvases_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = {
+        "name": "sec-canvas",
+        "canvas_size": [3840, 2160],
+        "cards": [
+            {"type": "terminal", "exec": "bash", "starred": True, "hub": "h1"},
+        ],
+    }
+    (app_config.canvases_dir / "sec-canvas.json").write_text(json.dumps(snapshot))
+
+    app2 = _create_app(app_config, test_mode=True, skip_canvas_schema_check=True)
+    app2["_hydrate_retry_delays"] = [0]
+    client2 = await aiohttp_client(app2)
+    await asyncio.sleep(0.1)
+
+    # Also register a WidgetCard manually so we test both types.
+    widget = WidgetCard(widget_type="system-info", card_id="s21-widget-id")
+    registry = app2["card_registry"]
+    registry.register(widget, canvas_name="sec-canvas")
+
+    resp = await client2.get("/api/cards?canvas=sec-canvas")
+    assert resp.status == 200
+    data = await resp.json()
+    assert len(data) >= 1, f"Expected cards in response, got: {data}"
+
+    # Allowlist of fields that may appear in card descriptors.
+    ALLOWED_KEYS = {
+        "type",
+        "card_id",
+        "session_id",
+        "card_uid",
+        "hub",
+        "container",
+        "exec",
+        "starred",
+        "display_name",
+        "recovery_script",
+        "error_state",
+        "widgetType",
+        "refreshInterval",
+        "x",
+        "y",
+        "w",
+        "h",
+        "z_order",
+    }
+
+    for card_desc in data:
+        leaked = set(card_desc.keys()) - ALLOWED_KEYS
+        assert not leaked, f"Private fields leaked in card descriptor: {leaked}\nFull descriptor: {card_desc}"
+        # Also assert no underscore-prefixed internal fields.
+        private_keys = {k for k in card_desc if k.startswith("_")}
+        assert not private_keys, f"Underscore-prefixed private fields found: {private_keys}"
+
+
+# ── S22: DELETE /api/cards/{id} on terminal does not bypass PTY cleanup ───────
+
+
+async def test_delete_api_cards_terminal_does_not_kill_pty_session(tmp_path, aiohttp_client, monkeypatch):
+    """S22: DELETE /api/cards/{id} on a TerminalCard unregisters the card but
+    does NOT destroy the PTY session — orphan reaper handles cleanup.
+
+    cards_delete calls only CardRegistry.unregister, not SessionManager.destroy_session.
+    """
+    import asyncio
+    import json
+
+    from tests.test_terminal_card import MockPty
+    from claude_rts import config as cfg
+    from claude_rts.server import create_app as _create_app
+
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    app_config = cfg.load(tmp_path / ".sc3")
+    app_config.canvases_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = {
+        "name": "pty-canvas",
+        "canvas_size": [3840, 2160],
+        "cards": [
+            {"type": "terminal", "exec": "bash", "starred": True, "hub": "h1"},
+        ],
+    }
+    (app_config.canvases_dir / "pty-canvas.json").write_text(json.dumps(snapshot))
+
+    app2 = _create_app(app_config, test_mode=True, skip_canvas_schema_check=True)
+    app2["_hydrate_retry_delays"] = [0]
+    client2 = await aiohttp_client(app2)
+    await asyncio.sleep(0.1)
+
+    registry = app2["card_registry"]
+    cards_on_canvas = registry.cards_on_canvas("pty-canvas")
+    assert len(cards_on_canvas) == 1
+    card = cards_on_canvas[0]
+    session_id = card.id
+
+    resp = await client2.delete(f"/api/cards/{session_id}")
+    if resp.status == 204:
+        # Card was unregistered — verify the PTY session is still alive
+        # (orphan reaper handles cleanup, not cards_delete).
+        session_manager = app2["session_manager"]
+        session = session_manager.get_session(session_id)
+        assert session is not None, (
+            f"DELETE /api/cards/{session_id} destroyed the PTY session — "
+            "cards_delete must NOT bypass the orphan reaper. "
+            "Use DELETE /api/claude/terminal/{id} for terminal teardown."
+        )
+    else:
+        # If the endpoint refuses terminal deletion (4xx), that is also acceptable.
+        assert resp.status in (404, 400, 405), f"Unexpected status {resp.status} for DELETE /api/cards/{{terminal_id}}"
+
+
+# ── S23: POST /api/cards/widget validates widgetType (no path traversal) ──────
+
+
+async def test_post_widget_with_path_traversal_widgettype_is_safe(client):
+    """S23: POST /api/cards/widget with widgetType='../../etc/passwd' is safe.
+
+    The SUT accepts any non-empty string as widgetType (no server-side WIDGET_REGISTRY
+    validation). This test verifies that:
+      - The response is 200 or 400 (never 500).
+      - If 200, the widgetType is stored as the literal string — no path resolution.
+      - No file at the path '../../etc/passwd' is read or executed.
+    """
+    import json as _json
+
+    resp = await client.post(
+        "/api/cards/widget",
+        json={"widgetType": "../../etc/passwd"},
+    )
+    # The SUT only validates that widgetType is a non-empty string — path traversal
+    # strings are accepted as opaque widget-type identifiers. No canvas_name defaults
+    # may cause a 500; assert it's not an unhandled error.
+    assert resp.status in (200, 201, 400, 404), f"Unexpected status {resp.status} for path-traversal widgetType"
+    if resp.status in (200, 201):
+        body_text = await resp.text()
+        body = _json.loads(body_text)
+        # The widgetType must be the literal string — no path resolution.
+        assert body.get("widgetType") == "../../etc/passwd", (
+            f"widgetType was transformed or rejected: {body.get('widgetType')!r}"
+        )

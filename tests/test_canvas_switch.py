@@ -218,6 +218,95 @@ async def test_unknown_policy_falls_back_to_keep_resident(tmp_path, monkeypatch)
         assert len(registry.cards_on_canvas("beta")) == 1
 
 
+# ── S10: Canvas activate is fast (< 50 ms) for already-resident canvas ─────────
+
+
+async def test_activate_already_resident_is_fast(tmp_path, aiohttp_client, monkeypatch):
+    """S10: POST /api/canvases/{name}/activate on a resident canvas returns in < 50 ms.
+
+    The already_resident fast path skips hydration, so the handler should
+    complete well under 50 ms wall-clock time even under aiohttp_client overhead.
+    """
+    import time
+
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    app_config = config.load(tmp_path / ".sc")
+    _write_canvas(app_config, "alpha", [{"type": "terminal", "exec": "bash", "starred": True, "hub": "h1"}])
+    _set_policy(app_config, "keep_resident")
+
+    app = create_app(app_config, test_mode=True, skip_canvas_schema_check=True)
+    app["_hydrate_retry_delays"] = [0]
+    client = await aiohttp_client(app)
+    await asyncio.sleep(0.05)
+
+    # First call to confirm the canvas is resident.
+    resp0 = await client.post("/api/canvases/alpha/activate")
+    assert resp0.status == 200
+    body0 = await resp0.json()
+    assert body0["already_resident"] is True
+
+    # Measure the second activate (pure fast-path, no hydration).
+    t0 = time.monotonic()
+    resp = await client.post("/api/canvases/alpha/activate")
+    elapsed = time.monotonic() - t0
+
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["already_resident"] is True
+    assert elapsed < 0.050, (
+        f"Activate fast-path took {elapsed:.3f}s — expected < 50 ms. "
+        "If this assertion fails on a slow CI machine, the threshold may "
+        "need to be relaxed, but the SUT path should still be O(registry-lookup)."
+    )
+
+
+# ── S12: Switching away from keep_resident canvas does NOT stop PTYs ──────────
+
+
+async def test_switching_canvas_keeps_other_canvas_ptys_alive(tmp_path, aiohttp_client, monkeypatch):
+    """S12: After activating canvas B, canvas A's terminal sessions remain alive.
+
+    The keep_resident policy guarantees no implicit unload on canvas switch.
+    """
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    app_config = config.load(tmp_path / ".sc")
+    _write_canvas(app_config, "alpha", [{"type": "terminal", "exec": "bash", "starred": True, "hub": "h1"}])
+    _write_canvas(app_config, "beta", [{"type": "terminal", "exec": "echo b", "starred": True, "hub": "h2"}])
+    _set_policy(app_config, "keep_resident")
+
+    from claude_rts.sessions import SessionManager
+
+    app = create_app(app_config, test_mode=True, skip_canvas_schema_check=True)
+    app["_hydrate_retry_delays"] = [0]
+    client = await aiohttp_client(app)
+    await asyncio.sleep(0.05)
+
+    registry: CardRegistry = app["card_registry"]
+    alpha_cards = registry.cards_on_canvas("alpha")
+    assert len(alpha_cards) == 1, "Expected 1 card on alpha canvas"
+    alpha_card = alpha_cards[0]
+    alpha_session_id = alpha_card.id
+
+    # Simulate user switching to canvas B via the activate endpoint.
+    resp = await client.post("/api/canvases/beta/activate")
+    assert resp.status == 200
+    body = await resp.json()
+    # Beta was already resident under keep_resident.
+    assert body["already_resident"] is True
+
+    # Alpha's session must still be alive.
+    session_manager: SessionManager = app["session_manager"]
+    session = session_manager.get_session(alpha_session_id)
+    assert session is not None, (
+        f"Alpha session '{alpha_session_id}' was destroyed after canvas switch — "
+        "keep_resident must preserve all sessions"
+    )
+    assert session.alive is True, f"Alpha session '{alpha_session_id}' is no longer alive after canvas switch"
+
+    # Canvas A cards remain in the registry.
+    assert len(registry.cards_on_canvas("alpha")) >= 1, "Alpha canvas cards were unregistered after switching to beta"
+
+
 # ── Helper context manager to run the app lifecycle ─────────────────────
 
 

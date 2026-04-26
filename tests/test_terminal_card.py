@@ -578,6 +578,130 @@ async def test_persist_callback_only_includes_starred_cards(monkeypatch):
 # ── Fix 2 (#254 e2e regressions): registry rekey on TerminalCard.start() ──
 
 
+# ── S5: PTY retry jitter — sleep duration within ±20% band ──────────────────
+
+
+async def test_start_retry_jitter_sleep_within_bounds(monkeypatch):
+    """S5: TerminalCard.start() applies ±20% jitter to retry delays.
+
+    For delays=[10, 30, 90], the actual asyncio.sleep calls must fall within
+    [8..12], [24..36], [72..108] seconds respectively.
+
+    Uses fixed random.uniform so the jitter factor is deterministic (+10%):
+    jittered = delay * (1.0 + 0.1) = delay * 1.1.
+    """
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    # Fix the jitter factor to +10% so expected sleeps are deterministic.
+    monkeypatch.setattr("claude_rts.cards.terminal_card.random.uniform", lambda a, b: 0.1)
+
+    sleep_calls: list[float] = []
+
+    async def _fake_sleep(d: float) -> None:
+        sleep_calls.append(d)
+
+    monkeypatch.setattr("claude_rts.cards.terminal_card.asyncio.sleep", _fake_sleep)
+
+    mgr = SessionManager()
+
+    def _always_fail(*args, **kwargs):
+        raise RuntimeError("container_unavailable_in_test")
+
+    mgr.create_session = _always_fail
+
+    card = TerminalCard(session_manager=mgr, cmd="bash")
+    await card.start(retry_delays=[10, 30, 90])
+
+    # 3 delays → 3 sleep calls.
+    assert len(sleep_calls) == 3, f"Expected 3 sleep calls, got {len(sleep_calls)}: {sleep_calls}"
+    # +10% jitter: 10*1.1=11, 30*1.1=33, 90*1.1=99
+    assert 8.0 <= sleep_calls[0] <= 12.0, f"Sleep[0]={sleep_calls[0]:.2f} not in [8, 12] — jitter ±20% of 10"
+    assert 24.0 <= sleep_calls[1] <= 36.0, f"Sleep[1]={sleep_calls[1]:.2f} not in [24, 36] — jitter ±20% of 30"
+    assert 72.0 <= sleep_calls[2] <= 108.0, f"Sleep[2]={sleep_calls[2]:.2f} not in [72, 108] — jitter ±20% of 90"
+    mgr.stop_all()
+
+
+# ── S6: Container available mid-retry — error_state cleared ──────────────────
+
+
+async def test_start_success_after_retry_clears_error_state(monkeypatch):
+    """S6: If create_session fails on attempts 1-2 but succeeds on attempt 3,
+    error_state is None and on_error_state callback is NOT called.
+    """
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    attempt_count = {"n": 0}
+    real_create = mgr.create_session
+
+    def _flaky_create(*args, **kwargs):
+        attempt_count["n"] += 1
+        if attempt_count["n"] < 3:
+            raise RuntimeError("container_not_ready")
+        return real_create(*args, **kwargs)
+
+    mgr.create_session = _flaky_create
+
+    card = TerminalCard(session_manager=mgr, cmd="bash")
+    error_calls: list = []
+
+    def _on_error(c):
+        error_calls.append(c.error_state)
+
+    await card.start(retry_delays=[0, 0, 0], on_error_state=_on_error)
+
+    assert card.error_state is None, f"error_state should be None after successful retry, got: {card.error_state}"
+    assert card.session is not None, "Session should be non-None after successful start"
+    assert card.alive is True, "Card should be alive after successful start"
+    assert error_calls == [], f"on_error_state should NOT have been called on success, got: {error_calls}"
+    assert attempt_count["n"] == 3, f"Expected 3 create_session attempts, got: {attempt_count['n']}"
+    await card.stop()
+    mgr.stop_all()
+
+
+# ── S24: CardRegistry._order invariant across register/unregister/rekey ────────
+
+
+def test_card_registry_order_invariant_across_cycles():
+    """S24: After 100 register/rekey/unregister cycles, len(_order)==len(_cards).
+
+    This is a pure unit test — no async, no aiohttp. Verifies that CardRegistry
+    does not accumulate stale entries in _order across rekey operations.
+    """
+    mgr = SessionManager()
+    registry = CardRegistry()
+
+    for i in range(100):
+        card_id = f"card-{i}"
+        # Create a card with a fixed snapshot id (pre-start id).
+        card = TerminalCard(session_manager=mgr, cmd="bash", card_id=card_id)
+        registry.register(card, canvas_name="test-canvas")
+
+        assert len(registry._order) == len(registry._cards), (
+            f"Cycle {i} after register: _order={len(registry._order)} != _cards={len(registry._cards)}"
+        )
+
+        # Simulate the rekey that happens when start() is called and assigns
+        # a real session_id (different from the snapshot card_id).
+        new_id = f"session-{i}"
+        registry.rekey(card_id, new_id)
+        card._id = new_id  # keep in sync with what TerminalCard.start() does
+
+        assert len(registry._order) == len(registry._cards), (
+            f"Cycle {i} after rekey: _order={len(registry._order)} != _cards={len(registry._cards)}"
+        )
+
+        registry.unregister(new_id)
+
+        assert len(registry._order) == len(registry._cards), (
+            f"Cycle {i} after unregister: _order={len(registry._order)} != _cards={len(registry._cards)}"
+        )
+
+    # Final state: registry is completely empty.
+    assert registry._order == [], f"_order not empty after 100 cycles: {registry._order}"
+    assert registry._cards == {}, f"_cards not empty after 100 cycles: {registry._cards}"
+
+    mgr.stop_all()
+
+
 async def test_registry_rekey_on_start(monkeypatch):
     """When a TerminalCard is registered before start(), the registry key is
     updated to the real session_id after start() completes.
