@@ -3,15 +3,14 @@
   "canvas_size": [3840, 2160],
   "cards": [
     {
-      "type": "terminal",
-      "hub": "supreme-claudemander-util",
-      "container": "supreme-claudemander-util",
-      "exec": "docker exec -it supreme-claudemander-util bash -l",
+      "type": "widget",
+      "widgetType": "system-info",
       "starred": true,
       "x": 100,
       "y": 100,
       "w": 400,
-      "h": 300
+      "h": 300,
+      "card_id": "15ccd2b7-d36d-42e1-9993-207def3ae336"
     }
   ]
 }

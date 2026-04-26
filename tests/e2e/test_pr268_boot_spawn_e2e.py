@@ -4,7 +4,7 @@ Covers:
   S1  — Cold boot: no /ws/session/new for boot-hydrated terminals
   S2  — Warm boot (server restart): browser reconnect does not duplicate cards
   S11 — Canvas switch: no /ws/session/new for already-registered cards
-  S13 — User-initiated terminal spawn fires exactly one /ws/session/new
+  S13 — User-initiated terminal spawn creates a dormant card (no WS opened)
   S19 — Per-device fields (pan, zoom, controlGroups) absent from canvas JSON snapshot
 """
 
@@ -239,8 +239,45 @@ def test_canvas_switch_no_session_new_for_registered_cards(backend_port, dev_con
 
             # Switch from canvas-a (default) to canvas-b. Both canvases are hydrated
             # at boot under keep_resident — no /ws/session/new should open.
-            pg.evaluate("() => typeof switchCanvas === 'function' && switchCanvas('canvas-b')")
+            pg.evaluate(
+                "async () => {"
+                "  if (typeof switchCanvas === 'function') {"
+                "    await switchCanvas('canvas-b');"
+                "  }"
+                "}"
+            )
             time.sleep(0.5)  # brief wait for any WS opens to be captured
+
+            # Toothlessness guard: if canvas-b rendered 0 cards, the
+            # "no /ws/session/new" assertion below would hold vacuously
+            # (switchCanvas's render loop never iterates). Fail loudly so
+            # a broken fixture (e.g. a card that hub-filters out of
+            # /api/cards) cannot silently disarm this test.
+            #
+            # Poll briefly for the renderer to settle — switchCanvas's render
+            # loop is async (per-descriptor await), so a flake on the 0.5s
+            # sleep above shouldn't be allowed to wrongly fail the guard.
+            try:
+                pg.wait_for_function(
+                    "() => (typeof cards !== 'undefined' && cards.length > 0)",
+                    timeout=5000,
+                )
+            except Exception:
+                pass  # fall through to the explicit assertion below
+            rendered_count = pg.evaluate("() => (typeof cards !== 'undefined' ? cards.length : 0)")
+            descriptors = pg.evaluate(
+                "async () => {"
+                "  const r = await fetch('/api/cards?canvas=canvas-b');"
+                "  if (!r.ok) return [];"
+                "  return await r.json();"
+                "}"
+            )
+            assert rendered_count > 0 and len(descriptors) > 0, (
+                f"Toothlessness guard: canvas-b rendered {rendered_count} cards "
+                f"and /api/cards?canvas=canvas-b returned {len(descriptors)} "
+                f"descriptors. Both must be > 0 for this test to be meaningful "
+                f"— otherwise the 'no /ws/session/new' assertion holds vacuously."
+            )
 
             session_new_opens = [url for url in switch_ws_opens if "/ws/session/new" in url]
             assert session_new_opens == [], (
@@ -264,20 +301,31 @@ def test_canvas_switch_no_session_new_for_registered_cards(backend_port, dev_con
                 pass
 
 
-# ── S13: User-initiated terminal spawn calls /ws/session/new exactly once ─────
+# ── S13: User-initiated terminal spawn creates a dormant card ─────────────────
 
 
-def test_user_spawn_calls_session_new_exactly_once(backend_server, backend_port):
-    """S13: Clicking the context-menu spawn item opens exactly one /ws/session/new.
+def test_user_spawn_creates_dormant_card(backend_server, backend_port):
+    """S13 (epic #254): Context-menu spawn creates a dormant card; NO WS opens.
 
-    The stress-test preset has hubs registered (supreme-claudemander-util),
-    so the context menu will have spawn items available.
+    Per epic #254's dormant-by-default model, ``CARD_TYPE_REGISTRY.spawn(
+    'terminal', { hub, x, y })`` produces a card with ``starred=false``.
+    ``TerminalCard.onInit()`` then short-circuits to ``_renderDormant()``
+    without calling ``_activate()`` / ``connectWs()``. The correct invariant
+    is therefore that NO ``/ws/session/new`` WebSocket is opened at spawn
+    time, and the new card appears in dormant state.
     """
     headed = os.environ.get("HEADED", "").lower() in ("1", "true")
+    session_new_urls: list[str] = []
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=not headed)
         pg = browser.new_page()
+
+        # Collect every WS that matches /ws/session/new across the whole flow.
+        pg.on(
+            "websocket",
+            lambda ws: session_new_urls.append(ws.url) if "/ws/session/new" in ws.url else None,
+        )
 
         pg.goto(f"http://localhost:{backend_port}")
         pg.wait_for_load_state("networkidle")
@@ -288,31 +336,43 @@ def test_user_spawn_calls_session_new_exactly_once(backend_server, backend_port)
 
         # Ensure hubs are loaded before opening the context menu — hubs are
         # fetched asynchronously during boot and may still be an empty array
-        # when __claudeRtsBootComplete fires.  Without this wait,
-        # open_context_menu times out waiting for .ctx-item[data-hub] because
-        # no hub items are rendered yet.
+        # when __claudeRtsBootComplete fires.
         pg.wait_for_function("() => typeof hubs !== 'undefined' && hubs.length > 0", timeout=5000)
 
-        # Use expect_websocket context manager so we don't miss synchronously-opened WS
-        # connections that complete handshake before a pg.on("websocket") callback fires.
-        with pg.expect_websocket(
-            predicate=lambda ws: "/ws/session/new" in ws.url,
-            timeout=10000,
-        ) as ws_info:
-            # Open context menu and click the first hub-based spawn item.
-            open_context_menu(pg, 500, 500)
+        # Open context menu and click the first hub-based spawn item.
+        open_context_menu(pg, 500, 500)
+        first_spawn_item = pg.locator("#context-menu.visible .ctx-item[data-hub]").first
+        first_spawn_item.wait_for(state="visible", timeout=5000)
+        first_spawn_item.click()
 
-            first_spawn_item = pg.locator("#context-menu.visible .ctx-item[data-hub]").first
-            first_spawn_item.wait_for(state="visible", timeout=5000)
-            first_spawn_item.click()
-
-        # ws_info.value raises TimeoutError if no matching WS was opened.
-        assert "/ws/session/new" in ws_info.value.url, f"Expected /ws/session/new WebSocket, got: {ws_info.value.url}"
-
-        # Wait for a new card to appear (Playwright auto-waits).
+        # (1) A new card is appended to cards[].
         pg.wait_for_function(
             f"() => cards.length > {initial_count}",
             timeout=10000,
+        )
+
+        # (2) Give any spurious /ws/session/new time to manifest before asserting.
+        time.sleep(0.5)
+        assert not session_new_urls, (
+            f"Expected NO /ws/session/new during dormant spawn, got: {session_new_urls}"
+        )
+
+        # (3) The new card is dormant: starred === false AND DOM has the
+        # dormant placeholder ("Dormant — unstarred" label rendered by
+        # TerminalCard._renderDormant).
+        last_starred = pg.evaluate("() => cards[cards.length - 1].starred")
+        assert last_starred is False, f"Expected new card.starred=false, got {last_starred!r}"
+
+        last_card_id = pg.evaluate("() => cards[cards.length - 1].id")
+        dormant_text = pg.evaluate(
+            "(cardId) => { "
+            "const el = document.querySelector(`[data-card-id=\"${cardId}\"]`); "
+            "return el ? el.innerText : null; }",
+            last_card_id,
+        )
+        assert dormant_text is not None, f"Card DOM not found for id={last_card_id}"
+        assert "Dormant" in dormant_text, (
+            f"Expected dormant placeholder in card DOM, got: {dormant_text!r}"
         )
 
         pg.close()
