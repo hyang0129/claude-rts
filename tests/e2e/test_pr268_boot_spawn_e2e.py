@@ -33,6 +33,12 @@ def dev_config_preset():
     return "stress-test"
 
 
+@pytest.fixture(scope="module")
+def dev_config_preset_canvas_switch():
+    """Use canvas-switch-test preset — two canvases (canvas-a, canvas-b) for S11."""
+    return "canvas-switch-test"
+
+
 # ── S1: Cold boot — no /ws/session/new for boot-hydrated terminals ────────────
 
 
@@ -121,8 +127,9 @@ def test_warm_boot_no_duplicate_cards(backend_port, dev_config_preset):
             pg.wait_for_selector("#canvas", timeout=15000)
             pg.wait_for_function("() => window.__claudeRtsBootComplete === true", timeout=15000)
 
-            # Record initial card IDs.
-            initial_ids = pg.evaluate("() => cards.map(c => c.sessionId || c.cardId).filter(Boolean)")
+            # Record initial stable card UIDs (cardUid persists across server restarts;
+            # sessionId is ephemeral — the PTY session is recreated on each restart).
+            initial_ids = pg.evaluate("() => cards.map(c => c.cardUid || c.cardId).filter(Boolean)")
 
             # Restart the server.
             proc.terminate()
@@ -142,7 +149,7 @@ def test_warm_boot_no_duplicate_cards(backend_port, dev_config_preset):
             pg.wait_for_selector("#canvas", timeout=15000)
             pg.wait_for_function("() => window.__claudeRtsBootComplete === true", timeout=15000)
 
-            card_ids = pg.evaluate("() => cards.map(c => c.sessionId || c.cardId).filter(Boolean)")
+            card_ids = pg.evaluate("() => cards.map(c => c.cardUid || c.cardId).filter(Boolean)")
 
             pg.close()
             browser.close()
@@ -176,39 +183,85 @@ def test_warm_boot_no_duplicate_cards(backend_port, dev_config_preset):
 # ── S11: Canvas switch does not fire /ws/session/new for registered cards ─────
 
 
-def test_canvas_switch_no_session_new_for_registered_cards(backend_server, backend_port):
+def test_canvas_switch_no_session_new_for_registered_cards(backend_port, dev_config_preset_canvas_switch):
     """S11: Switching between two hydrated canvases never opens /ws/session/new.
 
-    TODO(S11): The stress-test preset only has one canvas. This test requires
-    a dev-config preset with two canvases both hydrated at boot (keep_resident).
-    The xfail reflects the missing preset, not a SUT bug.
+    Uses the canvas-switch-test preset which has two canvases (canvas-a and
+    canvas-b) both hydrated at boot under keep_resident policy. Switching
+    from canvas-a to canvas-b must use the attach path (/ws/session/{id})
+    — never /ws/session/new — because the cards on canvas-b were already
+    registered by the server at startup.
     """
     headed = os.environ.get("HEADED", "").lower() in ("1", "true")
+    env = os.environ.copy()
+    env["CLAUDE_RTS_TEST_MODE"] = "1"
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=not headed)
-        pg = browser.new_page()
+    switch_port = backend_port + 80  # distinct from module-scoped server
 
-        # Collect only the WS opens that happen AFTER boot.
-        switch_ws_opens: list[str] = []
+    stdout_f = tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False, prefix="s11-stdout-")
+    stderr_f = tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False, prefix="s11-stderr-")
 
-        pg.goto(f"http://localhost:{backend_port}")
-        pg.wait_for_load_state("networkidle")
-        pg.wait_for_selector("#canvas", timeout=15000)
-        pg.wait_for_function("() => window.__claudeRtsBootComplete === true", timeout=15000)
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "claude_rts",
+            "--port",
+            str(switch_port),
+            "--no-browser",
+            "--dev-config",
+            dev_config_preset_canvas_switch,
+            "--test-mode",
+        ],
+        env=env,
+        stdout=stdout_f,
+        stderr=stderr_f,
+    )
+    try:
+        if not _wait_for_server(switch_port, timeout=30.0):
+            proc.terminate()
+            pytest.skip("canvas-switch-test server did not start — skipping S11")
 
-        # Start collecting after boot so boot-time attaches are excluded.
-        pg.on("websocket", lambda ws: switch_ws_opens.append(ws.url))
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=not headed)
+            pg = browser.new_page()
 
-        # The stress-test preset only has one canvas — this will fail, which is expected.
-        pg.evaluate("() => typeof switchCanvas === 'function' && switchCanvas('nonexistent-canvas-b')")
-        time.sleep(0.5)  # brief wait for any WS opens to be captured
+            # Collect only the WS opens that happen AFTER boot.
+            switch_ws_opens: list[str] = []
 
-        session_new_opens = [url for url in switch_ws_opens if "/ws/session/new" in url]
-        assert session_new_opens == [], f"Unexpected /ws/session/new during canvas switch: {session_new_opens}"
+            pg.goto(f"http://localhost:{switch_port}")
+            pg.wait_for_load_state("networkidle")
+            pg.wait_for_selector("#canvas", timeout=15000)
+            pg.wait_for_function("() => window.__claudeRtsBootComplete === true", timeout=15000)
 
-        pg.close()
-        browser.close()
+            # Start collecting AFTER boot so boot-time attaches are excluded.
+            pg.on("websocket", lambda ws: switch_ws_opens.append(ws.url))
+
+            # Switch from canvas-a (default) to canvas-b. Both canvases are hydrated
+            # at boot under keep_resident — no /ws/session/new should open.
+            pg.evaluate("() => typeof switchCanvas === 'function' && switchCanvas('canvas-b')")
+            time.sleep(0.5)  # brief wait for any WS opens to be captured
+
+            session_new_opens = [url for url in switch_ws_opens if "/ws/session/new" in url]
+            assert session_new_opens == [], (
+                f"Unexpected /ws/session/new during canvas switch: {session_new_opens}\n"
+                f"All WS URLs after boot: {switch_ws_opens}"
+            )
+
+            pg.close()
+            browser.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        for f in (stdout_f, stderr_f):
+            try:
+                f.close()
+                os.unlink(f.name)
+            except OSError:
+                pass
 
 
 # ── S13: User-initiated terminal spawn calls /ws/session/new exactly once ─────
@@ -232,6 +285,13 @@ def test_user_spawn_calls_session_new_exactly_once(backend_server, backend_port)
         pg.wait_for_function("() => window.__claudeRtsBootComplete === true", timeout=15000)
 
         initial_count = pg.evaluate("() => cards.length")
+
+        # Ensure hubs are loaded before opening the context menu — hubs are
+        # fetched asynchronously during boot and may still be an empty array
+        # when __claudeRtsBootComplete fires.  Without this wait,
+        # open_context_menu times out waiting for .ctx-item[data-hub] because
+        # no hub items are rendered yet.
+        pg.wait_for_function("() => typeof hubs !== 'undefined' && hubs.length > 0", timeout=5000)
 
         # Use expect_websocket context manager so we don't miss synchronously-opened WS
         # connections that complete handshake before a pg.on("websocket") callback fires.

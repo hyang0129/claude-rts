@@ -938,16 +938,17 @@ async def test_mid_hydration_query_returns_card_without_error_state(tmp_path, ai
     Cards are registered before start() runs (hydrate_canvas_into_registry
     register-before-start ordering guarantee). We force start() into the retry-sleep
     phase by:
-      1. Patching asyncio.sleep in terminal_card: calls with delay >= 100 s yield
-         control once then return immediately (so tests don't actually wait 999 s).
+      1. Patching asyncio.sleep in terminal_card: calls with delay >= 100 s signal
+         ``sleep_started`` (an asyncio.Event), then block on ``sleep_continue``
+         so the background task is genuinely suspended while the test fires the GET.
       2. Setting retry_delays=[999] so start() sleeps 999 s between attempts.
       3. Patching SessionManager.create_session at class level so the first call
-         fails — start() then enters the 999 s sleep (patched to yield once).
+         fails — start() then enters the 999 s sleep (held by sleep_continue).
 
-    While start() is "sleeping" (yields once then continues), the GET fires after
-    the yield. The card must be in the registry with error_state=None because:
-    - error_state is only set on exhaustion (all retries failed), not mid-sleep.
-    - The card is registered before start() is invoked.
+    The test awaits ``sleep_started`` before issuing the GET, guaranteeing the
+    coroutine is suspended in the retry-sleep rather than having already resumed
+    and cleared error_state. After the GET, ``sleep_continue`` is set so the
+    background task can finish and test cleanup completes normally.
     """
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
     app_config = config.load(tmp_path / ".sc")
@@ -961,17 +962,23 @@ async def test_mid_hydration_query_returns_card_without_error_state(tmp_path, ai
     }
     (app_config.canvases_dir / "test-canvas.json").write_text(json.dumps(snapshot))
 
-    # Patch asyncio.sleep in terminal_card module: large delays yield control once
-    # then return immediately, keeping the test fast.
+    # Event pair: background task signals sleep_started when it enters the retry
+    # sleep; the test unblocks it via sleep_continue after the GET completes.
+    sleep_started = asyncio.Event()
+    sleep_continue = asyncio.Event()
     original_sleep = asyncio.sleep
 
-    async def _fast_sleep(delay, *args, **kwargs):
+    async def _gated_sleep(delay, *args, **kwargs):
         if delay >= 100:
-            await original_sleep(0)  # yield once without waiting
-        else:
-            await original_sleep(delay, *args, **kwargs)
+            # Signal that we have entered the retry sleep, then wait until the
+            # test has completed its GET — this keeps the task genuinely suspended
+            # so error_state cannot be cleared before the GET response arrives.
+            sleep_started.set()
+            await sleep_continue.wait()
+            return
+        await original_sleep(delay, *args, **kwargs)
 
-    monkeypatch.setattr("claude_rts.cards.terminal_card.asyncio.sleep", _fast_sleep)
+    monkeypatch.setattr("claude_rts.cards.terminal_card.asyncio.sleep", _gated_sleep)
 
     # Patch SessionManager.create_session at the class level so the first call
     # raises (triggering the retry sleep) and the second succeeds.
@@ -987,17 +994,21 @@ async def test_mid_hydration_query_returns_card_without_error_state(tmp_path, ai
     monkeypatch.setattr(SessionManager, "create_session", _flaky_create)
 
     app = create_app(app_config, test_mode=True, skip_canvas_schema_check=True)
-    # retry_delays=[999]: after first failure start() sleeps 999 s (patched to yield once).
+    # retry_delays=[999]: after first failure start() sleeps 999 s (held by sleep_continue).
     app["_hydrate_retry_delays"] = [999]
     client = await aiohttp_client(app)
 
-    # Yield once so the background _start_card_bg task gets to run up to the
-    # sleep yield and pauses — giving the GET a window to query the registered card.
-    await asyncio.sleep(0)
+    # Wait until the background _start_card_bg task has entered the retry sleep
+    # and is genuinely suspended — only then fire the GET so error_state cannot
+    # have been cleared by a second attempt completing before us.
+    await asyncio.wait_for(sleep_started.wait(), timeout=10.0)
 
     resp = await client.get("/api/cards?canvas=test-canvas")
     assert resp.status == 200, await resp.text()
     data = await resp.json()
+
+    # Unblock the background task so the app can shut down cleanly.
+    sleep_continue.set()
 
     assert len(data) >= 1, f"Expected at least 1 card immediately after boot: {data}"
     assert all(d.get("error_state") is None for d in data), (

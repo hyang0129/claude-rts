@@ -1,0 +1,17 @@
+{
+  "name": "canvas-b",
+  "canvas_size": [3840, 2160],
+  "cards": [
+    {
+      "type": "terminal",
+      "hub": "supreme-claudemander-util",
+      "container": "supreme-claudemander-util",
+      "exec": "docker exec -it supreme-claudemander-util bash -l",
+      "starred": true,
+      "x": 100,
+      "y": 100,
+      "w": 400,
+      "h": 300
+    }
+  ]
+}
