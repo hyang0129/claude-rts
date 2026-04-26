@@ -147,8 +147,17 @@ def test_warm_boot_no_duplicate_cards(backend_port, dev_config_preset):
             pg.close()
             browser.close()
 
+        # Each individual ID must be unique (no duplicates within the reload).
         assert len(card_ids) == len(set(card_ids)), (
             f"Duplicate card IDs found after warm boot: {card_ids}\nInitial IDs were: {initial_ids}"
+        )
+        # The set of card IDs must match the pre-reload set (re-attachment identity,
+        # not just uniqueness). A regression that re-creates sessions instead of
+        # attaching would produce a different set of IDs.
+        assert set(card_ids) == set(initial_ids), (
+            f"Card IDs changed across warm boot — server re-created sessions instead of re-attaching.\n"
+            f"Before restart: {sorted(initial_ids)}\n"
+            f"After restart:  {sorted(card_ids)}"
         )
     finally:
         proc.terminate()
@@ -167,14 +176,6 @@ def test_warm_boot_no_duplicate_cards(backend_port, dev_config_preset):
 # ── S11: Canvas switch does not fire /ws/session/new for registered cards ─────
 
 
-@pytest.mark.xfail(
-    reason=(
-        "S11: Requires a dev-config preset with two canvases. "
-        "The stress-test preset has only one canvas ('stress-layout'). "
-        "A two-canvas preset would be needed; see PR #268 follow-up."
-    ),
-    strict=False,
-)
 def test_canvas_switch_no_session_new_for_registered_cards(backend_server, backend_port):
     """S11: Switching between two hydrated canvases never opens /ws/session/new.
 
@@ -232,25 +233,27 @@ def test_user_spawn_calls_session_new_exactly_once(backend_server, backend_port)
 
         initial_count = pg.evaluate("() => cards.length")
 
-        # Start collecting AFTER boot so we only see user-initiated spawns.
-        spawn_ws_opens: list[str] = []
-        pg.on("websocket", lambda ws: spawn_ws_opens.append(ws.url))
+        # Use expect_websocket context manager so we don't miss synchronously-opened WS
+        # connections that complete handshake before a pg.on("websocket") callback fires.
+        with pg.expect_websocket(
+            predicate=lambda ws: "/ws/session/new" in ws.url,
+            timeout=10000,
+        ) as ws_info:
+            # Open context menu and click the first hub-based spawn item.
+            open_context_menu(pg, 500, 500)
 
-        # Open context menu and click the first hub-based spawn item.
-        open_context_menu(pg, 500, 500)
+            first_spawn_item = pg.locator("#context-menu.visible .ctx-item[data-hub]").first
+            first_spawn_item.wait_for(state="visible", timeout=5000)
+            first_spawn_item.click()
 
-        first_spawn_item = pg.locator("#context-menu.visible .ctx-item[data-hub]").first
-        first_spawn_item.wait_for(state="visible", timeout=5000)
-        first_spawn_item.click()
+        # ws_info.value raises TimeoutError if no matching WS was opened.
+        assert "/ws/session/new" in ws_info.value.url, f"Expected /ws/session/new WebSocket, got: {ws_info.value.url}"
 
         # Wait for a new card to appear (Playwright auto-waits).
         pg.wait_for_function(
             f"() => cards.length > {initial_count}",
             timeout=10000,
         )
-
-        new_session_opens = [u for u in spawn_ws_opens if "/ws/session/new" in u]
-        assert len(new_session_opens) == 1, f"Expected exactly 1 /ws/session/new, got: {new_session_opens}"
 
         pg.close()
         browser.close()

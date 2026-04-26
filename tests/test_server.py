@@ -428,14 +428,16 @@ async def test_post_widget_with_path_traversal_widgettype_is_safe(client):
         "/api/cards/widget",
         json={"widgetType": "../../etc/passwd"},
     )
-    # The SUT only validates that widgetType is a non-empty string — path traversal
-    # strings are accepted as opaque widget-type identifiers. No canvas_name defaults
-    # may cause a 500; assert it's not an unhandled error.
-    assert resp.status in (200, 201, 400, 404), f"Unexpected status {resp.status} for path-traversal widgetType"
-    if resp.status in (200, 201):
-        body_text = await resp.text()
-        body = _json.loads(body_text)
-        # The widgetType must be the literal string — no path resolution.
-        assert body.get("widgetType") == "../../etc/passwd", (
-            f"widgetType was transformed or rejected: {body.get('widgetType')!r}"
-        )
+    # The SUT accepts any non-empty string as widgetType (no server-side path
+    # validation). A path-traversal string is stored as the literal opaque
+    # identifier. Assert the response is 200/201 (created safely), not an error.
+    assert resp.status in (200, 201), (
+        f"Expected 200/201 for path-traversal widgetType (stored as literal string), "
+        f"got {resp.status}: {await resp.text()}"
+    )
+    body_text = await resp.text()
+    body = _json.loads(body_text)
+    # The widgetType must be the literal string — no path resolution or interpretation.
+    assert body.get("widgetType") == "../../etc/passwd", (
+        f"widgetType was transformed or not stored as literal: {body.get('widgetType')!r}"
+    )

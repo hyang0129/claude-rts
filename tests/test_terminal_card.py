@@ -624,35 +624,48 @@ async def test_start_retry_jitter_sleep_within_bounds(monkeypatch):
 
 
 async def test_start_success_after_retry_clears_error_state(monkeypatch):
-    """S6: If create_session fails on attempts 1-2 but succeeds on attempt 3,
-    error_state is None and on_error_state callback is NOT called.
+    """S6: A subsequent successful start() clears the error_state set by exhaustion.
+
+    Strategy:
+      1. First call to start(retry_delays=[0]) exhausts both attempts (2 total: 1
+         initial + 1 retry) — error_state is set to 'container_unavailable'.
+      2. Restore mgr.create_session to the real implementation.
+      3. Second call to start() succeeds — error_state transitions back to None.
+
+    This exercises the `self.error_state = None` clear on the success path and
+    verifies the test would catch a regression that omits that clear.
     """
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
     mgr = SessionManager()
-    attempt_count = {"n": 0}
     real_create = mgr.create_session
 
-    def _flaky_create(*args, **kwargs):
-        attempt_count["n"] += 1
-        if attempt_count["n"] < 3:
-            raise RuntimeError("container_not_ready")
-        return real_create(*args, **kwargs)
+    def _always_fail(*args, **kwargs):
+        raise RuntimeError("container_not_ready")
 
-    mgr.create_session = _flaky_create
-
+    mgr.create_session = _always_fail
     card = TerminalCard(session_manager=mgr, cmd="bash")
     error_calls: list = []
 
     def _on_error(c):
         error_calls.append(c.error_state)
 
-    await card.start(retry_delays=[0, 0, 0], on_error_state=_on_error)
+    # First start: retry_delays=[0] → 2 total attempts (1 initial + 1 retry) → exhaustion.
+    await card.start(retry_delays=[0], on_error_state=_on_error)
 
-    assert card.error_state is None, f"error_state should be None after successful retry, got: {card.error_state}"
+    # error_state must be set after exhaustion.
+    assert card.error_state is not None, "error_state should be set after retry exhaustion"
+    assert card.error_state["kind"] == "container_unavailable", f"Unexpected error_state kind: {card.error_state!r}"
+    assert len(error_calls) == 1, f"Expected 1 on_error_state callback, got: {error_calls}"
+
+    # Restore the real create_session so the second start() succeeds.
+    mgr.create_session = real_create
+
+    # Second start: succeeds → error_state must transition back to None.
+    await card.start(retry_delays=[0], on_error_state=_on_error)
+
+    assert card.error_state is None, f"error_state should be None after successful start(), got: {card.error_state}"
     assert card.session is not None, "Session should be non-None after successful start"
     assert card.alive is True, "Card should be alive after successful start"
-    assert error_calls == [], f"on_error_state should NOT have been called on success, got: {error_calls}"
-    assert attempt_count["n"] == 3, f"Expected 3 create_session attempts, got: {attempt_count['n']}"
     await card.stop()
     mgr.stop_all()
 

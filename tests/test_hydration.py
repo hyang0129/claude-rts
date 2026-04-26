@@ -11,6 +11,7 @@ Covers:
 
 import asyncio
 import json
+import uuid
 
 import pytest
 
@@ -528,9 +529,22 @@ async def test_stale_snapshot_entry_gets_stable_uuid_and_persists(tmp_path, aioh
 
     # Verify the on-disk snapshot now contains the card_id.
     on_disk = json.loads((app_config.canvases_dir / "test-canvas.json").read_text())
-    assert any(e.get("card_id") == card_id for e in on_disk.get("cards", [])), (
+    persisted_cards = on_disk.get("cards", [])
+    assert any(e.get("card_id") == card_id for e in persisted_cards), (
         f"card_id '{card_id}' not found in persisted snapshot: {on_disk}"
     )
+
+    # card_uid must be persisted and be a valid UUID string.
+    matching_entry = next((e for e in persisted_cards if e.get("card_id") == card_id), None)
+    assert matching_entry is not None, f"No persisted entry for card_id '{card_id}'"
+    assert "card_uid" in matching_entry, f"'card_uid' not persisted for card_id '{card_id}': {matching_entry}"
+    persisted_uid = matching_entry["card_uid"]
+    assert isinstance(persisted_uid, str) and persisted_uid, f"'card_uid' is empty or not a string: {persisted_uid!r}"
+    # Verify it is a properly-formatted UUID (raises ValueError on bad format).
+    try:
+        uuid.UUID(persisted_uid)
+    except ValueError:
+        raise AssertionError(f"'card_uid' is not a valid UUID: {persisted_uid!r}")
 
 
 # ── S4: MCP tool observability — list_terminals returns hydrated cards ────────
@@ -611,13 +625,13 @@ async def test_card_deleted_mid_retry_is_absent_from_registry(tmp_path, aiohttp_
 # ── S8: retry_pty on a LIVE terminal ─────────────────────────────────────────
 
 
-async def test_retry_pty_on_live_terminal_documents_current_behavior(tmp_path, aiohttp_client, monkeypatch):
-    """S8: PUT /api/cards/{id}/state {"action":"retry_pty"} on a live TerminalCard.
+async def test_retry_pty_on_live_terminal_succeeds(tmp_path, aiohttp_client, monkeypatch):
+    """S8: PUT /api/cards/{id}/state {"action":"retry_pty"} on a live TerminalCard returns 200.
 
     The SUT (_dispatch_card_action) clears error_state and re-runs start() —
     it does NOT guard against the terminal already being alive. This test
-    documents the current behavior (200 with re-start path) so a future
-    alive-guard regression is caught.
+    pins the contract (200 OK) so a regression that adds an alive-guard and
+    returns 400 is caught.
     """
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
     app_config = config.load(tmp_path / ".sc")
@@ -643,9 +657,9 @@ async def test_retry_pty_on_live_terminal_documents_current_behavior(tmp_path, a
 
     resp = await client.put(f"/api/cards/{session_id}/state", json={"action": "retry_pty"})
     # The SUT does NOT reject retry_pty on a live terminal — it simply
-    # clears error_state and re-runs start(). Document this as 200.
-    # If a future alive-guard is added, update this assertion to 400.
-    assert resp.status in (200, 400), f"Unexpected status {resp.status} for retry_pty on live terminal"
+    # clears error_state and re-runs start(). The contract is 200 OK.
+    # If a future alive-guard is added that returns 400, update this assertion.
+    assert resp.status == 200, f"Expected 200 for retry_pty on live terminal, got {resp.status}"
 
 
 # ── S9: retry_pty on a WidgetCard returns 400 ────────────────────────────────
@@ -761,10 +775,18 @@ async def test_clean_boot_no_deprecation_warning(tmp_path, monkeypatch):
 
 
 async def test_registry_entries_take_priority_over_snapshot(tmp_path, aiohttp_client, monkeypatch):
-    """S16: PUT /api/cards/{id}/state immediately reflected by GET /api/cards.
+    """S16: GET /api/cards returns registry values, not stale on-disk snapshot values.
 
-    The registry descriptor (post-mutation) wins over any stale on-disk
-    snapshot value in cards_list_handler.
+    To create a genuine divergence we:
+      1. PUT a mutation through the registry (x=200, y=300).
+      2. Directly overwrite the on-disk snapshot with conflicting stale values
+         (x=999, y=999) via config.write_canvas — bypassing apply_state_patch so
+         the registry in memory is NOT updated.
+      3. Assert GET /api/cards returns the registry values (200/300), not the
+         stale disk values (999/999).
+
+    This catches a regression in cards_list_handler that reads from disk instead
+    of the registry.
     """
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
     app_config = config.load(tmp_path / ".sc")
@@ -796,19 +818,51 @@ async def test_registry_entries_take_priority_over_snapshot(tmp_path, aiohttp_cl
     cards = registry.cards_on_canvas("test-canvas")
     assert len(cards) == 1
     card_id = cards[0].id
+    card = cards[0]
 
-    # Mutate position.
+    # Step 1: Mutate position via PUT so registry holds x=200, y=300.
     resp = await client.put(f"/api/cards/{card_id}/state", json={"x": 200, "y": 300})
     assert resp.status == 200, await resp.text()
+    assert card.x == 200 and card.y == 300, "Registry in-memory card should reflect mutation"
 
-    # Immediately GET /api/cards — no sleep — registry must win.
+    # Step 2: Overwrite on-disk snapshot with conflicting stale values (x=999, y=999)
+    # directly via config.write_canvas — bypasses apply_state_patch so the in-memory
+    # registry is NOT updated and the two sources now genuinely disagree.
+    stale_snapshot = {
+        "name": "test-canvas",
+        "canvas_size": [3840, 2160],
+        "cards": [
+            {
+                "type": "terminal",
+                "exec": "bash",
+                "starred": True,
+                "hub": "h1",
+                "card_id": card_id,
+                "x": 999,
+                "y": 999,
+                "w": 400,
+                "h": 300,
+            }
+        ],
+    }
+    from claude_rts.config import write_canvas
+
+    write_canvas(app_config, "test-canvas", stale_snapshot)
+
+    # Step 3: GET /api/cards must return the registry values (200/300), not disk (999/999).
     resp2 = await client.get("/api/cards?canvas=test-canvas")
     assert resp2.status == 200
     data = await resp2.json()
     card_desc = next((d for d in data if d.get("card_id") == card_id), None)
     assert card_desc is not None, f"card_id '{card_id}' not found in response: {data}"
-    assert card_desc["x"] == 200, f"Expected x=200, got x={card_desc.get('x')}"
-    assert card_desc["y"] == 300, f"Expected y=300, got y={card_desc.get('y')}"
+    assert card_desc["x"] == 200, (
+        f"Expected registry value x=200, got x={card_desc.get('x')} — "
+        "cards_list_handler is reading from stale disk snapshot instead of registry"
+    )
+    assert card_desc["y"] == 300, (
+        f"Expected registry value y=300, got y={card_desc.get('y')} — "
+        "cards_list_handler is reading from stale disk snapshot instead of registry"
+    )
 
 
 # ── S17: Snapshot-only widget entries pass through the cards_list_handler shim ─
@@ -817,12 +871,17 @@ async def test_registry_entries_take_priority_over_snapshot(tmp_path, aiohttp_cl
 async def test_snapshot_only_widget_entry_returned_by_shim(tmp_path, aiohttp_client, monkeypatch):
     """S17: A widget entry with a card_id not in the registry is still returned
     by GET /api/cards via the transitional shim path.
+
+    Uses ``canvas_switch_policy: lazy_hydrate`` so ``widget-canvas`` is NOT
+    hydrated at boot (only the default canvas is). This guarantees the widget card
+    is genuinely absent from the registry when GET /api/cards fires, exercising
+    the shim path that appends snapshot-only entries.
     """
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
     app_config = config.load(tmp_path / ".sc")
     app_config.canvases_dir.mkdir(parents=True, exist_ok=True)
     # Canvas with a widget entry that has a card_id that will NOT be hydrated
-    # into the registry (the server only hydrates terminals at startup).
+    # into the registry under lazy_hydrate (non-default canvas is skipped at boot).
     snapshot = {
         "name": "widget-canvas",
         "canvas_size": [3840, 2160],
@@ -841,11 +900,12 @@ async def test_snapshot_only_widget_entry_returned_by_shim(tmp_path, aiohttp_cli
     }
     (app_config.canvases_dir / "widget-canvas.json").write_text(json.dumps(snapshot))
 
-    # Use a separate default canvas so "widget-canvas" is NOT hydrated at startup.
+    # Use a separate default canvas with lazy_hydrate so "widget-canvas" is NOT
+    # hydrated at startup — the widget card will be absent from the registry.
     (app_config.canvases_dir / "default.json").write_text(
         json.dumps({"name": "default", "canvas_size": [3840, 2160], "cards": []})
     )
-    cfg_data = {"default_canvas": "default"}
+    cfg_data = {"default_canvas": "default", "canvas_switch_policy": "lazy_hydrate"}
     app_config.config_dir.mkdir(parents=True, exist_ok=True)
     app_config.config_file.write_text(json.dumps(cfg_data))
 
@@ -853,6 +913,12 @@ async def test_snapshot_only_widget_entry_returned_by_shim(tmp_path, aiohttp_cli
     app["_hydrate_retry_delays"] = [0]
     client = await aiohttp_client(app)
     await asyncio.sleep(0.05)
+
+    # Verify the widget card is NOT in the registry (lazy_hydrate did not load it).
+    registry: CardRegistry = app["card_registry"]
+    assert registry.cards_on_canvas("widget-canvas") == [], (
+        "widget-canvas should not be hydrated at boot under lazy_hydrate policy"
+    )
 
     resp = await client.get("/api/cards?canvas=widget-canvas")
     assert resp.status == 200, await resp.text()
@@ -867,11 +933,21 @@ async def test_snapshot_only_widget_entry_returned_by_shim(tmp_path, aiohttp_cli
 
 
 async def test_mid_hydration_query_returns_card_without_error_state(tmp_path, aiohttp_client, monkeypatch):
-    """S18: GET /api/cards immediately after on_startup returns cards with error_state=None.
+    """S18: GET /api/cards while start() is suspended in its retry-sleep returns error_state=None.
 
     Cards are registered before start() runs (hydrate_canvas_into_registry
-    register-before-start ordering guarantee), so an immediate query must
-    not show error_state='container_unavailable'.
+    register-before-start ordering guarantee). We force start() into the retry-sleep
+    phase by:
+      1. Patching asyncio.sleep in terminal_card: calls with delay >= 100 s yield
+         control once then return immediately (so tests don't actually wait 999 s).
+      2. Setting retry_delays=[999] so start() sleeps 999 s between attempts.
+      3. Patching SessionManager.create_session at class level so the first call
+         fails — start() then enters the 999 s sleep (patched to yield once).
+
+    While start() is "sleeping" (yields once then continues), the GET fires after
+    the yield. The card must be in the registry with error_state=None because:
+    - error_state is only set on exhaustion (all retries failed), not mid-sleep.
+    - The card is registered before start() is invoked.
     """
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
     app_config = config.load(tmp_path / ".sc")
@@ -885,14 +961,46 @@ async def test_mid_hydration_query_returns_card_without_error_state(tmp_path, ai
     }
     (app_config.canvases_dir / "test-canvas.json").write_text(json.dumps(snapshot))
 
+    # Patch asyncio.sleep in terminal_card module: large delays yield control once
+    # then return immediately, keeping the test fast.
+    original_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay, *args, **kwargs):
+        if delay >= 100:
+            await original_sleep(0)  # yield once without waiting
+        else:
+            await original_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr("claude_rts.cards.terminal_card.asyncio.sleep", _fast_sleep)
+
+    # Patch SessionManager.create_session at the class level so the first call
+    # raises (triggering the retry sleep) and the second succeeds.
+    attempt_counter = {"n": 0}
+    _real_create = SessionManager.create_session
+
+    def _flaky_create(self, *args, **kwargs):
+        attempt_counter["n"] += 1
+        if attempt_counter["n"] == 1:
+            raise RuntimeError("container_not_ready_yet")
+        return _real_create(self, *args, **kwargs)
+
+    monkeypatch.setattr(SessionManager, "create_session", _flaky_create)
+
     app = create_app(app_config, test_mode=True, skip_canvas_schema_check=True)
-    app["_hydrate_retry_delays"] = [0]
+    # retry_delays=[999]: after first failure start() sleeps 999 s (patched to yield once).
+    app["_hydrate_retry_delays"] = [999]
     client = await aiohttp_client(app)
-    # No asyncio.sleep — immediate query after aiohttp_client startup.
+
+    # Yield once so the background _start_card_bg task gets to run up to the
+    # sleep yield and pauses — giving the GET a window to query the registered card.
+    await asyncio.sleep(0)
 
     resp = await client.get("/api/cards?canvas=test-canvas")
     assert resp.status == 200, await resp.text()
     data = await resp.json()
 
     assert len(data) >= 1, f"Expected at least 1 card immediately after boot: {data}"
-    assert all(d.get("error_state") is None for d in data), f"Unexpected error_state on freshly registered card: {data}"
+    assert all(d.get("error_state") is None for d in data), (
+        f"Unexpected error_state on freshly registered card "
+        f"(should be None while start() is sleeping mid-retry): {data}"
+    )
