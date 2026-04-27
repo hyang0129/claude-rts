@@ -1642,26 +1642,6 @@ async def test_containers_get(request: web.Request) -> web.Response:
     return web.json_response(containers)
 
 
-async def test_container_stats_put(request: web.Request) -> web.Response:
-    """PUT /api/test/container-stats — inject fake container stats for E2E tests."""
-    data = await request.json()
-    stats = data if isinstance(data, list) else data.get("containers", [])
-    request.app["_test_container_stats"] = stats
-    return web.json_response({"status": "ok", "count": len(stats)})
-
-
-async def test_container_create_put(request: web.Request) -> web.Response:
-    """PUT /api/test/container-create — enable test-mode container creation mock.
-
-    Accepts: {"create_config": {...}, "labels": {...}}
-    Sets _test_container_create and _test_container_labels on the app.
-    """
-    data = await request.json()
-    request.app["_test_container_create"] = data.get("create_config", {})
-    request.app["_test_container_labels"] = data.get("labels", {})
-    return web.json_response({"status": "ok"})
-
-
 async def profiles_discover_handler(request: web.Request) -> web.Response:
     """GET /api/profiles/discover — re-scan /profiles in the util container."""
     app_config: AppConfig = request.app["app_config"]
@@ -3163,8 +3143,6 @@ def create_app(
         app.router.add_put("/api/test/containers", test_containers_put)
         app.router.add_get("/api/test/containers", test_containers_get)
         app.router.add_post("/api/test/canvases/{name}", test_canvas_seed)
-        app.router.add_put("/api/test/container-stats", test_container_stats_put)
-        app.router.add_put("/api/test/container-create", test_container_create_put)
 
     # Lifecycle hooks
     async def on_startup(app: web.Application) -> None:
