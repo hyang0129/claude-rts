@@ -1,5 +1,10 @@
 """TerminalCard: first-class card wrapping an interactive PTY session."""
 
+from __future__ import annotations
+
+import asyncio
+import random
+
 from loguru import logger
 from .base import BaseCard
 
@@ -142,27 +147,115 @@ class TerminalCard(BaseCard):
         for _field in ("x", "y", "w", "h", "z_order"):
             if _field in self._explicit_geometry:
                 desc[_field] = int(getattr(self, _field))
+        # Epic #254 child 2 (#257): server-computed recovery metadata. Only
+        # emitted when set — downstream (Child #3) surfaces it as a retry
+        # button. Not persisted to disk (the persist callback filters it out).
+        if self.error_state is not None:
+            desc["error_state"] = dict(self.error_state)
         return desc
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
-    async def start(self) -> None:
-        """Allocate a PTY session via SessionManager."""
-        session = self._session_manager.create_session(
-            self.cmd,
-            hub=self.hub,
-            container=self.container,
-        )
-        self._session = session
-        # Align card id with session_id so lookups are unified.
-        self._id = session.session_id
-        logger.info(
-            "TerminalCard {}: started (cmd={!r}, hub={}, container={})",
-            self.id,
-            self.cmd,
-            self.hub,
-            self.container,
-        )
+    # Epic #254 child 2 (#257): production retry schedule for eager PTY
+    # creation. Tests override via the ``retry_delays`` kwarg on ``start()``.
+    DEFAULT_RETRY_DELAYS: tuple[float, ...] = (10.0, 30.0, 90.0)
+
+    async def start(
+        self,
+        retry_delays: tuple[float, ...] | list[float] | None = None,
+        on_error_state: "object" = None,
+    ) -> None:
+        """Allocate a PTY session via SessionManager with bounded retry.
+
+        The first attempt runs immediately. On failure, the card sleeps for
+        ``retry_delays[0]`` seconds (with ±20% jitter), retries; if that also
+        fails, sleeps ``retry_delays[1]``, retries; then ``retry_delays[2]``.
+        On exhaustion, sets ``self.error_state`` to the locked schema
+        (``{"kind": "container_unavailable", "attempts": N, "last_error": str}``)
+        and invokes ``on_error_state(self)`` if provided so the caller can
+        emit a ``card_updated`` broadcast. ``error_state`` is server-computed
+        recovery metadata — it is NOT persisted to the canvas JSON snapshot.
+
+        ``retry_delays`` is injectable for tests (near-zero delays). Defaults
+        to ``DEFAULT_RETRY_DELAYS`` in production. Max attempts =
+        ``1 + len(retry_delays)``.
+        """
+        delays = list(retry_delays if retry_delays is not None else self.DEFAULT_RETRY_DELAYS)
+        max_attempts = 1 + len(delays)
+        last_error: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                session = self._session_manager.create_session(
+                    self.cmd,
+                    hub=self.hub,
+                    container=self.container,
+                )
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "TerminalCard hydration attempt {}/{} failed for cmd={!r} container={}: {}",
+                    attempt,
+                    max_attempts,
+                    self.cmd,
+                    self.container,
+                    exc,
+                )
+                if attempt < max_attempts:
+                    delay = delays[attempt - 1]
+                    # ±20% jitter — skip when the base delay is ~0 so tests are fast.
+                    if delay > 0:
+                        jittered = delay * (1.0 + random.uniform(-0.2, 0.2))
+                    else:
+                        jittered = delay
+                    await asyncio.sleep(jittered)
+                    continue
+                # Exhausted — land in error_state and signal the caller.
+                self.error_state = {
+                    "kind": "container_unavailable",
+                    "attempts": max_attempts,
+                    "last_error": str(exc),
+                }
+                logger.error(
+                    "TerminalCard hydration exhausted retries for cmd={!r} container={}: {}",
+                    self.cmd,
+                    self.container,
+                    exc,
+                )
+                if on_error_state is not None:
+                    try:
+                        result = on_error_state(self)
+                        # Support sync or async callbacks.
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception:
+                        logger.exception("TerminalCard on_error_state callback failed")
+                return
+
+            # Success path.
+            self._session = session
+            # Align card id with session_id so lookups are unified.
+            # If the card was already registered under a snapshot id, rotate
+            # the registry key so get_terminal(session_id) still finds it.
+            if getattr(self, "_registry", None) is not None and self._id != session.session_id:
+                self._registry.rekey(self._id, session.session_id)
+            self._id = session.session_id
+            # Clear any prior error_state (e.g. successful retry after transient failure).
+            self.error_state = None
+            logger.info(
+                "TerminalCard {}: started (cmd={!r}, hub={}, container={}, attempt={}/{})",
+                self.id,
+                self.cmd,
+                self.hub,
+                self.container,
+                attempt,
+                max_attempts,
+            )
+            return
+
+        # Unreachable — loop always returns. Fallback for safety.
+        if last_error is not None:
+            raise last_error
 
     async def stop(self) -> None:
         """Destroy the underlying PTY session.
@@ -193,3 +286,44 @@ class TerminalCard(BaseCard):
     def alive(self) -> bool:
         """True if the underlying PTY session is still running."""
         return self._session is not None and self._session.alive
+
+    # ── Hydration ──────────────────────────────────────────────────────
+
+    @classmethod
+    def from_descriptor(cls, data: dict, session_manager=None, **kwargs) -> "TerminalCard":
+        """Reconstruct a TerminalCard from a canvas-JSON snapshot entry.
+
+        Epic #254 child 2 (#257): this is the hydration entry point called by
+        ``hydrate_canvas_into_registry`` at server startup. It builds the card
+        from the on-disk snapshot without starting the PTY — the caller
+        invokes ``start()`` separately so the retry loop and error handling
+        apply uniformly.
+
+        ``data`` is expected to carry the subset of ``to_descriptor()`` keys
+        the persist hook writes: ``card_id`` (optional; auto-generated if
+        missing), ``hub``, ``container``, ``exec`` (the shell cmd), ``starred``,
+        ``display_name``, ``recovery_script``, geometry (``x``/``y``/``w``/``h``/
+        ``z_order``), and ``card_uid``. Missing keys fall back to sensible
+        defaults.
+        """
+        if session_manager is None:
+            raise TypeError("TerminalCard.from_descriptor requires session_manager=")
+        cmd = data.get("exec") or data.get("cmd") or ""
+        layout = {
+            k: data[k]
+            for k in ("x", "y", "w", "h", "z_order")
+            if isinstance(data.get(k), int) and not isinstance(data.get(k), bool)
+        }
+        card = cls(
+            session_manager=session_manager,
+            cmd=cmd,
+            hub=data.get("hub") or None,
+            container=data.get("container") or None,
+            card_id=data.get("card_id") or data.get("session_id"),
+            layout=layout or None,
+            display_name=data.get("display_name") or None,
+            recovery_script=data.get("recovery_script") or None,
+            starred=bool(data.get("starred", False)),
+            card_uid=data.get("card_uid") or None,
+        )
+        return card

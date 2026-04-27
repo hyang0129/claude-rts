@@ -31,6 +31,9 @@ class BaseCard(abc.ABC):
     def __init__(self, card_id: str | None = None, bus: EventBus | None = None):
         self._id = card_id or uuid.uuid4().hex[:8]
         self._bus = bus
+        # Set by CardRegistry.register(); allows the card to call rekey() on
+        # id mutation (TerminalCard.start() aligns _id to session_id).
+        self._registry = None
         # Server-owned state (epic #236). Every field listed here must appear
         # in ``MUTABLE_FIELDS`` on the subclass that wants it mutable through
         # ``PUT /api/cards/{id}/state`` (see docs/state-model.md).
@@ -47,6 +50,13 @@ class BaseCard(abc.ABC):
         self.w: int = 0
         self.h: int = 0
         self.z_order: int = 0
+        # Epic #254 child 2 (#257): recovery metadata for eager PTY creation.
+        # Server-computed (not client-mutable, not in MUTABLE_FIELDS), not
+        # persisted to the canvas JSON snapshot, and reset to ``None`` on every
+        # server restart. Schema is locked to three keys:
+        #   {"kind": str, "attempts": int, "last_error": str}
+        # Child #3 consumes ``kind`` and ``attempts`` to render a retry button.
+        self.error_state: dict | None = None
 
     @property
     def id(self) -> str:
@@ -68,3 +78,17 @@ class BaseCard(abc.ABC):
     @abc.abstractmethod
     async def stop(self) -> None:
         """Stop the card's background activity and clean up."""
+
+    @classmethod
+    @abc.abstractmethod
+    def from_descriptor(cls, data: dict, **kwargs) -> "BaseCard":
+        """Reconstruct a card from a canvas-JSON snapshot entry.
+
+        Epic #254 child 2 (#257): the hydration path calls ``from_descriptor``
+        to build a card from disk, then invokes ``start()`` separately. Implementations
+        must NOT start any background activity themselves — the caller owns
+        lifecycle ordering so retry and error handling apply uniformly.
+
+        Subclasses accept type-specific keyword arguments (e.g. ``session_manager``
+        for ``TerminalCard``).
+        """

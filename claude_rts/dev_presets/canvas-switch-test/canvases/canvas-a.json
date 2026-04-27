@@ -1,0 +1,16 @@
+{
+  "name": "canvas-a",
+  "canvas_size": [3840, 2160],
+  "cards": [
+    {
+      "type": "widget",
+      "widgetType": "system-info",
+      "starred": true,
+      "x": 50,
+      "y": 50,
+      "w": 400,
+      "h": 300,
+      "card_id": "be06bc79-bbef-4135-b7e9-3ca70b2d80aa"
+    }
+  ]
+}

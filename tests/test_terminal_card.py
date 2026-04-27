@@ -573,3 +573,189 @@ async def test_persist_callback_only_includes_starred_cards(monkeypatch):
     await starred.stop()
     await unstarred.stop()
     mgr.stop_all()
+
+
+# ── Fix 2 (#254 e2e regressions): registry rekey on TerminalCard.start() ──
+
+
+# ── S5: PTY retry jitter — sleep duration within ±20% band ──────────────────
+
+
+async def test_start_retry_jitter_sleep_within_bounds(monkeypatch):
+    """S5: TerminalCard.start() applies ±20% jitter to retry delays.
+
+    For delays=[10, 30, 90], the actual asyncio.sleep calls must fall within
+    [8..12], [24..36], [72..108] seconds respectively.
+
+    Uses fixed random.uniform so the jitter factor is deterministic (+10%):
+    jittered = delay * (1.0 + 0.1) = delay * 1.1.
+    """
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    # Fix the jitter factor to +10% so expected sleeps are deterministic.
+    monkeypatch.setattr("claude_rts.cards.terminal_card.random.uniform", lambda a, b: 0.1)
+
+    sleep_calls: list[float] = []
+
+    async def _fake_sleep(d: float) -> None:
+        sleep_calls.append(d)
+
+    monkeypatch.setattr("claude_rts.cards.terminal_card.asyncio.sleep", _fake_sleep)
+
+    mgr = SessionManager()
+
+    def _always_fail(*args, **kwargs):
+        raise RuntimeError("container_unavailable_in_test")
+
+    mgr.create_session = _always_fail
+
+    card = TerminalCard(session_manager=mgr, cmd="bash")
+    await card.start(retry_delays=[10, 30, 90])
+
+    # 3 delays → 3 sleep calls.
+    assert len(sleep_calls) == 3, f"Expected 3 sleep calls, got {len(sleep_calls)}: {sleep_calls}"
+    # +10% jitter: 10*1.1=11, 30*1.1=33, 90*1.1=99
+    assert 8.0 <= sleep_calls[0] <= 12.0, f"Sleep[0]={sleep_calls[0]:.2f} not in [8, 12] — jitter ±20% of 10"
+    assert 24.0 <= sleep_calls[1] <= 36.0, f"Sleep[1]={sleep_calls[1]:.2f} not in [24, 36] — jitter ±20% of 30"
+    assert 72.0 <= sleep_calls[2] <= 108.0, f"Sleep[2]={sleep_calls[2]:.2f} not in [72, 108] — jitter ±20% of 90"
+    mgr.stop_all()
+
+
+# ── S6: Container available mid-retry — error_state cleared ──────────────────
+
+
+async def test_start_success_after_retry_clears_error_state(monkeypatch):
+    """S6: A subsequent successful start() clears the error_state set by exhaustion.
+
+    Strategy:
+      1. First call to start(retry_delays=[0]) exhausts both attempts (2 total: 1
+         initial + 1 retry) — error_state is set to 'container_unavailable'.
+      2. Restore mgr.create_session to the real implementation.
+      3. Second call to start() succeeds — error_state transitions back to None.
+
+    This exercises the `self.error_state = None` clear on the success path and
+    verifies the test would catch a regression that omits that clear.
+    """
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    real_create = mgr.create_session
+
+    def _always_fail(*args, **kwargs):
+        raise RuntimeError("container_not_ready")
+
+    mgr.create_session = _always_fail
+    card = TerminalCard(session_manager=mgr, cmd="bash")
+    error_calls: list = []
+
+    def _on_error(c):
+        error_calls.append(c.error_state)
+
+    # First start: retry_delays=[0] → 2 total attempts (1 initial + 1 retry) → exhaustion.
+    await card.start(retry_delays=[0], on_error_state=_on_error)
+
+    # error_state must be set after exhaustion.
+    assert card.error_state is not None, "error_state should be set after retry exhaustion"
+    assert card.error_state["kind"] == "container_unavailable", f"Unexpected error_state kind: {card.error_state!r}"
+    assert len(error_calls) == 1, f"Expected 1 on_error_state callback, got: {error_calls}"
+
+    # Restore the real create_session so the second start() succeeds.
+    mgr.create_session = real_create
+
+    # Second start: succeeds → error_state must transition back to None.
+    await card.start(retry_delays=[0], on_error_state=_on_error)
+
+    assert card.error_state is None, f"error_state should be None after successful start(), got: {card.error_state}"
+    assert card.session is not None, "Session should be non-None after successful start"
+    assert card.alive is True, "Card should be alive after successful start"
+    await card.stop()
+    mgr.stop_all()
+
+
+# ── S24: CardRegistry._order invariant across register/unregister/rekey ────────
+
+
+def test_card_registry_order_invariant_across_cycles():
+    """S24: After 100 register/rekey/unregister cycles, len(_order)==len(_cards).
+
+    This is a pure unit test — no async, no aiohttp. Verifies that CardRegistry
+    does not accumulate stale entries in _order across rekey operations.
+    """
+    mgr = SessionManager()
+    registry = CardRegistry()
+
+    for i in range(100):
+        card_id = f"card-{i}"
+        # Create a card with a fixed snapshot id (pre-start id).
+        card = TerminalCard(session_manager=mgr, cmd="bash", card_id=card_id)
+        registry.register(card, canvas_name="test-canvas")
+
+        assert len(registry._order) == len(registry._cards), (
+            f"Cycle {i} after register: _order={len(registry._order)} != _cards={len(registry._cards)}"
+        )
+
+        # Simulate the rekey that happens when start() is called and assigns
+        # a real session_id (different from the snapshot card_id).
+        new_id = f"session-{i}"
+        registry.rekey(card_id, new_id)
+        card._id = new_id  # keep in sync with what TerminalCard.start() does
+
+        assert len(registry._order) == len(registry._cards), (
+            f"Cycle {i} after rekey: _order={len(registry._order)} != _cards={len(registry._cards)}"
+        )
+
+        registry.unregister(new_id)
+
+        assert len(registry._order) == len(registry._cards), (
+            f"Cycle {i} after unregister: _order={len(registry._order)} != _cards={len(registry._cards)}"
+        )
+
+    # Final state: registry is completely empty.
+    assert registry._order == [], f"_order not empty after 100 cycles: {registry._order}"
+    assert registry._cards == {}, f"_cards not empty after 100 cycles: {registry._cards}"
+
+    mgr.stop_all()
+
+
+async def test_registry_rekey_on_start(monkeypatch):
+    """When a TerminalCard is registered before start(), the registry key is
+    updated to the real session_id after start() completes.
+
+    Asserts:
+    - get_terminal(session_id) returns the card after start().
+    - get_terminal(snapshot_id) returns None (old key is gone).
+    - cards_on_canvas order is preserved (rekey does not move card to end).
+    """
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    reg = CardRegistry()
+
+    # Register two cards: card_a first, then card_b.
+    persist_calls: list[str] = []
+    reg.set_persist_callback(persist_calls.append)
+
+    card_a = TerminalCard(session_manager=mgr, cmd="bash", card_id="snapshot-abc")
+    card_b = TerminalCard(session_manager=mgr, cmd="bash", card_id="snapshot-xyz")
+    reg.register(card_a, canvas_name="test-canvas")
+    reg.register(card_b, canvas_name="test-canvas")
+    persist_calls.clear()  # clear registration-time persists
+
+    # Start card_a — this rekeyes it from snapshot-abc to a real session_id.
+    await card_a.start(retry_delays=[])
+    real_session_id = card_a.session_id
+    assert real_session_id != "snapshot-abc", "session_id should differ from snapshot placeholder"
+
+    # After start: lookup by session_id works, old key is gone.
+    assert reg.get_terminal(real_session_id) is card_a, "get_terminal(session_id) should return card_a"
+    assert reg.get_terminal("snapshot-abc") is None, "old snapshot key should be gone"
+    assert card_a.id == real_session_id
+
+    # Insertion order must be preserved: card_a (rekeyed) still comes BEFORE card_b.
+    on_canvas = reg.cards_on_canvas("test-canvas")
+    assert on_canvas[0] is card_a, "card_a should remain first after rekey"
+    assert on_canvas[1] is card_b, "card_b should remain second after rekey"
+
+    # Rekey must trigger a persist so the canvas JSON reflects the new session_id.
+    assert "test-canvas" in persist_calls, "rekey should have triggered canvas persist"
+
+    await card_a.stop()
+    await card_b.stop()
+    mgr.stop_all()

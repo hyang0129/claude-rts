@@ -1,4 +1,4 @@
-"""Card submodule: BaseCard, ServiceCard, ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegistry, BlueprintCard, ContainerStarterCard."""
+"""Card submodule: BaseCard, ServiceCard, ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegistry, BlueprintCard, ContainerStarterCard, WidgetCard."""
 
 from .base import BaseCard
 from .service_card import ServiceCard
@@ -9,6 +9,7 @@ from .card_registry import CardRegistry
 from .canvas_claude_card import CanvasClaudeCard
 from .blueprint_card import BlueprintCard
 from .container_starter_card import ContainerStarterCard
+from .widget_card import WidgetCard
 
 __all__ = [
     "BaseCard",
@@ -20,4 +21,5 @@ __all__ = [
     "CanvasClaudeCard",
     "BlueprintCard",
     "ContainerStarterCard",
+    "WidgetCard",
 ]

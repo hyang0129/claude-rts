@@ -44,6 +44,11 @@ class CardRegistry:
         # service card created before the user opens any canvas). The
         # persistence hook silently no-ops for cards with no canvas.
         self._canvas_map: dict[str, str | None] = {}
+        # Stable insertion order for ``cards_on_canvas``. Updated by
+        # ``register`` and ``rekey`` so that rekeys do not move cards to the
+        # end of the iteration order (Python dict moves an entry to the end
+        # when you pop-and-reassign, which would break canvas snapshot order).
+        self._order: list[str] = []
         self._bus = bus
         self._persist_callback = persist_callback
 
@@ -59,6 +64,11 @@ class CardRegistry:
         """
         self._cards[card.id] = card
         self._canvas_map[card.id] = canvas_name
+        if card.id not in self._order:
+            self._order.append(card.id)
+        # Back-reference so the card can call rekey() after id mutation (e.g.
+        # TerminalCard.start() changes self._id to the real session_id).
+        card._registry = self
         logger.debug(
             "CardRegistry: registered {} '{}' on canvas '{}'",
             card.card_type,
@@ -69,10 +79,48 @@ class CardRegistry:
             # Requires a running event loop — always true when called from aiohttp handlers.
             asyncio.ensure_future(self._bus.emit("card:registered", {"card_id": card.id, "card_type": card.card_type}))
 
+    def rekey(self, old_id: str, new_id: str) -> None:
+        """Rename a card's registry key from ``old_id`` to ``new_id``.
+
+        Called from TerminalCard.start() after ``self._id`` is updated to the
+        real session_id so that subsequent get_terminal(session_id) lookups
+        find the card.  Both ``_cards`` and ``_canvas_map`` are updated
+        atomically; if ``old_id`` is not present this is a no-op.
+        """
+        if old_id == new_id:
+            return
+        card = self._cards.pop(old_id, None)
+        if card is None:
+            return
+        canvas_name = self._canvas_map.pop(old_id, None)
+        self._cards[new_id] = card
+        self._canvas_map[new_id] = canvas_name
+        # Update _order in-place so the card keeps its original position.
+        try:
+            idx = self._order.index(old_id)
+            self._order[idx] = new_id
+        except ValueError:
+            self._order.append(new_id)
+        logger.debug(
+            "CardRegistry: rekeyed {} '{}' → '{}'",
+            card.card_type,
+            old_id,
+            new_id,
+        )
+        # Trigger a canvas persist so the on-disk JSON reflects the new
+        # session_id. Without this, the shim in cards_list_handler would
+        # see the old placeholder id in the snapshot and return it as a
+        # duplicate descriptor alongside the registry's real session_id.
+        self._persist_canvas(canvas_name)
+
     def unregister(self, card_id: str) -> BaseCard | None:
         """Remove and return a card, or None if not found."""
         card = self._cards.pop(card_id, None)
         canvas_name = self._canvas_map.pop(card_id, None)
+        try:
+            self._order.remove(card_id)
+        except ValueError:
+            pass
         if card:
             logger.debug("CardRegistry: unregistered {} '{}'", card.card_type, card_id)
             if self._bus is not None:
@@ -92,8 +140,14 @@ class CardRegistry:
         return self._canvas_map.get(card_id)
 
     def cards_on_canvas(self, canvas_name: str) -> list[BaseCard]:
-        """Return every registered card belonging to ``canvas_name``."""
-        return [self._cards[cid] for cid, cn in self._canvas_map.items() if cn == canvas_name and cid in self._cards]
+        """Return every registered card belonging to ``canvas_name``.
+
+        Cards are returned in original registration order (stable across
+        rekeys, which would otherwise move entries to the end of the dict).
+        """
+        return [
+            self._cards[cid] for cid in self._order if cid in self._cards and self._canvas_map.get(cid) == canvas_name
+        ]
 
     def set_persist_callback(self, callback: Callable[[str], None] | None) -> None:
         """Wire (or clear) the write-through hook.
@@ -236,4 +290,6 @@ class CardRegistry:
                     await card.stop()
                 except Exception:
                     logger.exception("CardRegistry: error stopping card '{}'", card_id)
+        self._canvas_map.clear()
+        self._order.clear()
         logger.info("CardRegistry: all cards stopped")

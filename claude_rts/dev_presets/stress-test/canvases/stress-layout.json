@@ -8,20 +8,26 @@
     {
       "type": "terminal",
       "hub": "supreme-claudemander-util",
+      "container": "supreme-claudemander-util",
+      "exec": "docker exec -it supreme-claudemander-util bash -l",
       "starred": true,
       "x": 50,
       "y": 50,
       "w": 300,
-      "h": 200
+      "h": 200,
+      "card_uid": "11111111-1111-4111-8111-111111111111"
     },
     {
       "type": "terminal",
       "hub": "supreme-claudemander-util",
+      "container": "supreme-claudemander-util",
+      "exec": "docker exec -it supreme-claudemander-util bash -l",
       "starred": true,
       "x": 400,
       "y": 50,
       "w": 800,
-      "h": 600
+      "h": 600,
+      "card_uid": "22222222-2222-4222-8222-222222222222"
     },
     {
       "type": "widget",
@@ -30,7 +36,8 @@
       "x": 1250,
       "y": 50,
       "w": 400,
-      "h": 300
+      "h": 300,
+      "card_id": "ead95b5a-6898-5029-b7fd-cc2624843729"
     },
     {
       "type": "widget",
@@ -39,25 +46,32 @@
       "x": 10,
       "y": 10,
       "w": 600,
-      "h": 400
+      "h": 400,
+      "card_id": "b6f68b5b-6a7f-5dfb-9534-53e413b31e41"
     },
     {
       "type": "terminal",
       "hub": "supreme-claudemander-util",
+      "container": "supreme-claudemander-util",
+      "exec": "docker exec -it supreme-claudemander-util bash -l",
       "starred": true,
       "x": 3000,
       "y": 2000,
       "w": 500,
-      "h": 400
+      "h": 400,
+      "card_uid": "33333333-3333-4333-8333-333333333333"
     },
     {
       "type": "terminal",
       "hub": "supreme-claudemander-util",
+      "container": "supreme-claudemander-util",
+      "exec": "docker exec -it supreme-claudemander-util bash -l",
       "starred": true,
       "x": 150,
       "y": 150,
       "w": 450,
-      "h": 350
+      "h": 350,
+      "card_uid": "44444444-4444-4444-8444-444444444444"
     }
   ]
 }

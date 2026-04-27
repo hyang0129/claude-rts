@@ -7,6 +7,7 @@ import platform
 import re
 import sys
 import time
+import uuid
 
 from aiohttp import web
 from loguru import logger
@@ -28,7 +29,16 @@ from .discovery import discover_hubs  # noqa: E402
 from .startup import run_startup  # noqa: E402
 from .util_container import ensure_util_container, discover_profiles, exec_in_util  # noqa: E402
 from .sessions import SessionManager  # noqa: E402
-from .cards import ServiceCardRegistry, ClaudeUsageCard, TerminalCard, CardRegistry, CanvasClaudeCard, BlueprintCard  # noqa: E402
+from .cards import (  # noqa: E402
+    ServiceCardRegistry,
+    ClaudeUsageCard,
+    TerminalCard,
+    CardRegistry,
+    CanvasClaudeCard,
+    BlueprintCard,
+    WidgetCard,
+)
+from .cards.base import BaseCard  # noqa: E402
 from .event_bus import EventBus  # noqa: E402
 from .ansi_strip import strip_ansi  # noqa: E402
 from . import blueprint as blueprint_mod  # noqa: E402
@@ -114,6 +124,192 @@ async def canvas_get_handler(request: web.Request) -> web.Response:
 # ``write_state_snapshot`` and the ``CardRegistry`` write-through hook in
 # ``on_startup`` below. ``GET`` and ``DELETE`` on canvases remain because they
 # are canvas lifecycle operations, not card-field mutations.
+
+
+async def cards_list_handler(request: web.Request) -> web.Response:
+    """GET /api/cards?canvas=X — list live registry cards for a canvas.
+
+    Epic #254 child 2 (#257): exposes server-owned card state to observers
+    (MCP tools, monitoring, curl) before any browser attaches. Returns the
+    output of ``CardRegistry.cards_on_canvas(canvas)`` filtered through
+    ``to_descriptor()`` so the response carries the full server-owned state
+    (card_id, starred, geometry, display_name, recovery_script, error_state).
+
+    Transitional shim (epic #254 integration fix): non-terminal card types
+    (widget, canvas_claude, container) are not yet hydrated into the registry
+    at startup — that work is scoped to children #260 and #261. Until those
+    land, ``cards_list_handler`` falls back to the on-disk canvas snapshot for
+    any snapshot entry whose ``card_uid`` (or session id) is NOT already
+    represented in the registry view. The client's existing
+    ``renderFromDescriptor`` / ``spawnFromSerialized`` fallback handles these
+    unhydrated entries correctly. Registry entries always win over snapshot
+    entries on overlap.
+
+    404 if the canvas name is invalid or the canvas JSON file does not exist;
+    200 with ``[]`` if the canvas is empty.
+    """
+    canvas_name = request.query.get("canvas", "").strip()
+    if not canvas_name:
+        raise web.HTTPBadRequest(text="Missing 'canvas' query parameter")
+    app_config: AppConfig = request.app["app_config"]
+    # Validate canvas existence through the same read path as the rest of the
+    # API — ``read_canvas`` already handles invalid names and missing files.
+    data = read_canvas(app_config, canvas_name)
+    if data is None:
+        raise web.HTTPNotFound(text=f"Canvas '{canvas_name}' not found")
+
+    card_registry: CardRegistry = request.app["card_registry"]
+    descriptors: list[dict] = []
+    for card in card_registry.cards_on_canvas(canvas_name):
+        if getattr(card, "hidden", False):
+            continue
+        if not hasattr(card, "to_descriptor"):
+            continue
+        try:
+            descriptors.append(card.to_descriptor())
+        except Exception:
+            logger.exception("cards_list_handler: card '{}' to_descriptor failed", card.id)
+
+    # Shim: append snapshot-only entries for card types the registry does not
+    # yet hydrate (widget, canvas_claude, container — children #260 / #261),
+    # and for terminal entries that were not hydrated at startup (e.g. canvases
+    # written after the server started, or terminals whose start() failed).
+    # Build a set of uid keys already covered by the registry so we never
+    # emit two descriptors for the same card.
+    registry_ids: set[str] = set()
+    for desc in descriptors:
+        # card_id / session_id identifies a hydrated terminal; card_uid (if
+        # present) is the persistent client-side uid that also appears in the
+        # snapshot.
+        for key in ("card_id", "session_id", "card_uid"):
+            val = desc.get(key)
+            if val:
+                registry_ids.add(val)
+
+    # Collect the hub names that are "known" (have a live registry card) so
+    # we can filter snapshot-only terminal entries to those with discoverable
+    # hubs. This mirrors the hub-validation that ``spawnFromSerialized`` did
+    # in the pre-#258 client path (``hubs.find(h => h.hub === s.hub)``).
+    # Using the registry as the hub source is fast (no subprocess) and
+    # reasonably current — any canvas hydrated at startup will have its hub
+    # names present. An empty set means no hubs are registered yet; we
+    # fall back to allowing all hubs in that case so a fully-unhydrated
+    # server still serves snapshot terminals.
+    known_hubs: set[str] = {
+        getattr(card, "hub", None) for card in card_registry.list_all() if getattr(card, "hub", None)
+    }
+
+    for snapshot_entry in data.get("cards", []):
+        entry_uid = snapshot_entry.get("card_uid") or snapshot_entry.get("card_id") or snapshot_entry.get("session_id")
+        # If the entry has a uid that the registry already covers, skip it —
+        # the live registry descriptor is authoritative.
+        if entry_uid and entry_uid in registry_ids:
+            continue
+        # Normalise legacy hub-only entries (no ``type`` field, predating the
+        # type-field refactor) so ``renderFromDescriptor`` can dispatch them.
+        # They are always terminals: the hub field is the discriminator.
+        entry_type = snapshot_entry.get("type", "")
+        entry_hub = snapshot_entry.get("hub", "")
+        if not entry_type and entry_hub:
+            snapshot_entry = dict(snapshot_entry)
+            snapshot_entry["type"] = "terminal"
+            entry_type = "terminal"
+        # For terminal snapshot entries (including type-injected legacy ones),
+        # only include those whose hub is known to the registry. This prevents
+        # ``renderFromDescriptor`` from adding fake hub entries for containers
+        # that have never been observed — mirroring the pre-#258 client-side
+        # hub check in ``spawnFromSerialized``. When no hubs are registered
+        # (fully unhydrated server), all terminal entries pass through.
+        if entry_type == "terminal" and known_hubs and entry_hub and entry_hub not in known_hubs:
+            logger.debug(
+                "cards_list_handler: snapshot terminal entry hub '{}' not in known hubs, skipping",
+                entry_hub,
+            )
+            continue
+        # Only pass through entries whose type is in the supported set.
+        # Unknown types (e.g. "foo") are silently dropped — mirroring what
+        # hydrate_canvas_into_registry does.  Legacy hub-only entries have
+        # already been normalised to type "terminal" above.
+        _SUPPORTED_TYPES = {"terminal", "widget", "canvas_claude"}
+        if entry_type not in _SUPPORTED_TYPES:
+            logger.debug(
+                "cards_list_handler: snapshot entry type '{}' not supported, skipping",
+                entry_type,
+            )
+            continue
+        # All snapshot entries not already covered by the registry are passed
+        # through. The client's renderFromDescriptor / spawnFromSerialized
+        # dispatch handles them:
+        #  - terminal (known hub): renderFromDescriptor reconnects or spawns new PTY
+        #  - widget/canvas_claude: spawnFromSerialized uses the legacy path
+        descriptors.append(snapshot_entry)
+
+    return web.json_response(descriptors)
+
+
+async def canvas_activate_handler(request: web.Request) -> web.Response:
+    """POST /api/canvases/{name}/activate — ensure ``name`` is hydrated.
+
+    Epic #254 child 4 (#259): the client calls this before
+    ``GET /api/cards?canvas=X`` on canvas switch so that the server-authored
+    hydration model holds even under ``lazy_hydrate`` policy. The handler is
+    idempotent in two ways:
+
+    1. If the canvas already has any cards in ``CardRegistry``, the handler
+       returns immediately without re-running hydration. This prevents
+       duplicate registration when the user toggles between two resident
+       canvases (the common case under ``keep_resident``).
+    2. If the canvas file does not exist, returns 404 — there is nothing to
+       hydrate. Empty canvases (file exists, ``cards: []``) succeed with
+       ``hydrated=0``.
+
+    Under ``keep_resident`` policy the canvas was already hydrated at
+    startup, so this endpoint is a cheap fast-path no-op. Under
+    ``lazy_hydrate`` policy this is the *only* path that hydrates non-default
+    canvases.
+
+    Returns ``{"name": <canvas>, "policy": <policy>, "hydrated": <int>,
+    "already_resident": <bool>}``.
+    """
+    canvas_name = request.match_info["name"]
+    app_config: AppConfig = request.app["app_config"]
+    # Validate canvas existence the same way ``cards_list_handler`` does.
+    data = read_canvas(app_config, canvas_name)
+    if data is None:
+        raise web.HTTPNotFound(text=f"Canvas '{canvas_name}' not found")
+
+    card_registry: CardRegistry = request.app["card_registry"]
+    policy = request.app.get("canvas_switch_policy", "keep_resident")
+
+    # Fast path: any registry card already on this canvas means hydration
+    # already ran (either at startup under keep_resident, or on a prior
+    # activate under lazy_hydrate). Idempotent — never re-hydrate.
+    existing = card_registry.cards_on_canvas(canvas_name)
+    if existing:
+        return web.json_response(
+            {
+                "name": canvas_name,
+                "policy": policy,
+                "hydrated": 0,
+                "already_resident": True,
+            }
+        )
+
+    retry_delays = request.app.get("_hydrate_retry_delays")
+    try:
+        hydrated = await hydrate_canvas_into_registry(request.app, canvas_name, retry_delays=retry_delays)
+    except Exception:
+        logger.exception("canvas_activate_handler: hydration failed for '{}'", canvas_name)
+        raise web.HTTPInternalServerError(text=f"Hydration failed for canvas '{canvas_name}'")
+
+    return web.json_response(
+        {
+            "name": canvas_name,
+            "policy": policy,
+            "hydrated": hydrated,
+            "already_resident": False,
+        }
+    )
 
 
 async def canvas_delete_handler(request: web.Request) -> web.Response:
@@ -1148,8 +1344,33 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
     # is re-seeded from disk. On first spawn both are empty strings.
     spawn_display_name = request.query.get("display_name", "")
     spawn_recovery_script = request.query.get("recovery_script", "")
+    # Epic #254 child 2 (#257): attach-vs-create deduplication. Hydrated cards
+    # already exist in ``CardRegistry`` at startup; a browser calling
+    # ``/ws/session/new?card_id=<id>`` (or, pending Child #3 client
+    # inversion, ``card_uid=<uid>``) must attach to the existing session
+    # instead of spawning a duplicate TerminalCard. This is the coexistence
+    # seam that keeps the hydration path (Child #2) working against the
+    # pre-inversion client (before Child #3 ships).
+    spawn_card_id = request.query.get("card_id", "").strip()
     if not cmd:
         raise web.HTTPBadRequest(text="Missing 'cmd' query parameter")
+
+    # Epic #254 child 3 (#258): deprecation warning for courier query params.
+    # Post-migration the client boot and switchCanvas paths render from the
+    # server registry via ``GET /api/cards?canvas=X``; ``/ws/session/new`` is
+    # reserved for user-initiated spawn which never forwards snapshot state.
+    # Per resolved U3, this PR logs (no hard reject) so orphan call sites
+    # surface before enforcement lands in a follow-up.
+    _deprecated_courier = [
+        name for name in ("starred", "card_uid", "display_name", "recovery_script") if request.query.get(name, "") != ""
+    ]
+    if _deprecated_courier:
+        logger.warning(
+            "session_new_handler: deprecated courier query params {} - boot and "
+            "switchCanvas should use GET /api/cards?canvas=X; only user-initiated "
+            "spawn is valid for /ws/session/new",
+            _deprecated_courier,
+        )
 
     mgr: SessionManager = request.app["session_manager"]
     card_registry: CardRegistry = request.app["card_registry"]
@@ -1157,14 +1378,38 @@ async def session_new_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse()
     await ws.prepare(request)
 
+    # Dedup: if a hydrated card already exists for this spawn, attach to it
+    # rather than creating a new TerminalCard.
+    existing: TerminalCard | None = None
+    if spawn_card_id:
+        existing = card_registry.get_terminal(spawn_card_id)
+    if existing is None and card_uid:
+        for term in card_registry.list_terminals():
+            if getattr(term, "card_uid", "") == card_uid:
+                existing = term
+                break
+    if existing is not None and existing.alive:
+        session = existing.session
+        await ws.send_str(json.dumps({"session_id": session.session_id, "tmux": session.tmux_backed}))
+        await mgr.attach(session.session_id, ws)
+        await _session_ws_input_loop(ws, session, mgr)
+        return ws
+
     try:
+        # Transitional fix (epic #254 integration): if no card_uid was
+        # supplied by the caller (user-initiated spawn, or post-#258 reconnect
+        # that fell through to /ws/session/new after session_not_found), assign
+        # a server-generated UUID so the snapshot always carries a stable
+        # card_uid. Pre-#258 the client generated this UUID and couriered it;
+        # post-#258 the server is the authority (DP-1 invariant).
+        effective_card_uid = card_uid or str(uuid.uuid4())
         card = TerminalCard(
             session_manager=mgr,
             cmd=cmd,
             hub=hub or None,
             container=container or None,
             starred=starred,
-            card_uid=card_uid or None,
+            card_uid=effective_card_uid,
             display_name=spawn_display_name or None,
             recovery_script=spawn_recovery_script or None,
         )
@@ -1215,14 +1460,47 @@ async def session_attach_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse()
     await ws.prepare(request)
 
-    # Try CardRegistry first, then fall back to SessionManager
+    # Try CardRegistry first, then fall back to SessionManager.
+    # After boot hydration, the registry may hold a card whose id was a
+    # placeholder at registration time and was rekeyed by start() to the
+    # real session_id.  In that race the URL session_id is the placeholder
+    # and card.id is now the real session id — use card.id for the attach.
     card = card_registry.get_terminal(session_id)
+    effective_session_id = session_id
     if card and not card.alive:
-        # Card exists but PTY died — unregister stale card
-        card_registry.unregister(session_id)
-        card = None
+        # Transitional fix (epic #254 integration): if the card exists in the
+        # registry but its session hasn't started yet (PTY background task
+        # race), wait briefly so the background _start_card_bg task can run.
+        # Without this wait, session_attach_handler would unregister the card
+        # and write a snapshot without card_uid, defeating the UUID generation
+        # in hydrate_canvas_into_registry. Only wait if no session exists yet
+        # (session = None); if the session exists but is dead, fall through to
+        # the unregister path immediately.
+        existing_session = mgr.get_session(session_id)
+        if existing_session is None and card.session is None:
+            # PTY hasn't started yet — yield the event loop a few times so
+            # the background start() task can create the session.
+            for _ in range(5):
+                await asyncio.sleep(0.05)
+                if card.alive:
+                    break
+        if not card.alive:
+            # PTY started and died, or failed to start within the wait —
+            # unregister stale card so the client can re-spawn.
+            # Exception: cards still in background retry-sleep (session=None,
+            # error_state=None) are left registered. The client receives
+            # session_not_found and reconnects independently.
+            still_retrying = card.session is None and card.error_state is None
+            if not still_retrying:
+                card_registry.unregister(session_id)
+                card = None
+    # After the wait loop, card.id may have been updated by rekey() to the
+    # real session_id (e.g. "rts-xxx") while the URL carried a placeholder.
+    # Use card.id for the SessionManager attach so we hit the correct session.
+    if card is not None and card.id != session_id:
+        effective_session_id = card.id
 
-    scrollback = await mgr.attach(session_id, ws)
+    scrollback = await mgr.attach(effective_session_id, ws)
     if scrollback is None:
         await ws.send_str(json.dumps({"error": "session_not_found"}))
         await ws.close()
@@ -1231,9 +1509,9 @@ async def session_attach_handler(request: web.Request) -> web.WebSocketResponse:
     # Replay scrollback, then signal ready
     if scrollback:
         await ws.send_bytes(scrollback)
-    await ws.send_str(json.dumps({"type": "session_attached", "session_id": session_id}))
+    await ws.send_str(json.dumps({"type": "session_attached", "session_id": effective_session_id}))
 
-    session = mgr.get_session(session_id)
+    session = mgr.get_session(effective_session_id)
     if session:
         await _session_ws_input_loop(ws, session, mgr)
     return ws
@@ -1999,6 +2277,90 @@ async def _apply_card_state_patch(request: web.Request, card_id: str, fields: di
     return applied
 
 
+async def cards_widget_create_handler(request: web.Request) -> web.Response:
+    """POST /api/cards/widget — server-authored WidgetCard spawn.
+
+    Epic #254 child 5 (#260): user-initiated widget spawn (sidebar context
+    menu) flows through this endpoint instead of constructing a client-only
+    WidgetCard. The server creates the ``WidgetCard``, registers it on the
+    target canvas, persists the snapshot via the registry's write-through
+    hook, and broadcasts ``card_created`` so every attached client renders
+    the widget from the server descriptor.
+
+    Body (JSON object):
+      - ``widgetType`` (required): registry key (``system-info`` /
+        ``container-manager`` / ``profiles`` / …).
+      - ``canvas_name`` (optional): canvas to register on. Defaults to the
+        configured ``default_canvas`` when absent.
+      - ``x``, ``y``, ``w``, ``h``, ``z_order`` (optional): integer geometry.
+      - ``starred`` (optional bool): defaults to ``False`` (epic #194 / #236).
+      - ``card_id`` (optional): caller-supplied card id; otherwise the server
+        generates one. Useful for deterministic test fixtures.
+      - ``refreshInterval`` / ``refresh_interval`` (optional int): override
+        the client's default refresh cadence for this widget instance.
+
+    Returns the new card's full descriptor (``200 OK``). Returns ``400`` if
+    ``widgetType`` is missing or non-string.
+    """
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="Invalid JSON")
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(text="Body must be a JSON object")
+
+    widget_type = body.get("widgetType") or body.get("widget_type")
+    if not isinstance(widget_type, str) or not widget_type:
+        raise web.HTTPBadRequest(text="Missing or invalid 'widgetType'")
+
+    app_config: AppConfig = request.app["app_config"]
+    canvas_name = body.get("canvas_name") or body.get("canvas")
+    if not canvas_name:
+        config_data = read_config(app_config)
+        canvas_name = config_data.get("default_canvas", "probe-qa")
+
+    layout: dict = {}
+    for _field in ("x", "y", "w", "h", "z_order"):
+        v = body.get(_field)
+        if isinstance(v, int) and not isinstance(v, bool):
+            layout[_field] = v
+
+    refresh_interval = body.get("refreshInterval") or body.get("refresh_interval")
+    if isinstance(refresh_interval, bool):
+        refresh_interval = None
+
+    try:
+        card = WidgetCard(
+            widget_type=widget_type,
+            card_id=body.get("card_id") or None,
+            layout=layout or None,
+            starred=bool(body.get("starred", False)),
+            refresh_interval=refresh_interval if isinstance(refresh_interval, int) else None,
+        )
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc))
+
+    card_registry: CardRegistry = request.app["card_registry"]
+    card_registry.register(card, canvas_name=canvas_name)
+    # Trigger a write-through so the new widget is persisted to the canvas
+    # snapshot immediately (mirrors hydrate_canvas_into_registry's pattern).
+    try:
+        card_registry.apply_state_patch(card.id, {"starred": bool(card.starred)})
+    except (LookupError, ValueError):
+        logger.warning(
+            "cards_widget_create_handler: immediate persist for '{}' failed (non-fatal)",
+            card.id,
+        )
+
+    logger.info(
+        "cards_widget_create_handler: created widget {} type={} on canvas {}",
+        card.id,
+        widget_type,
+        canvas_name,
+    )
+    return web.json_response(card.to_descriptor())
+
+
 async def cards_state_put(request: web.Request) -> web.Response:
     """PUT /api/cards/{id}/state — generic server-owned state mutation.
 
@@ -2018,9 +2380,86 @@ async def cards_state_put(request: web.Request) -> web.Response:
     if not isinstance(body, dict):
         raise web.HTTPBadRequest(text="Body must be a JSON object")
 
-    applied = await _apply_card_state_patch(request, card_id, body)
-    logger.info("cards_state_put: {} patched fields={}", card_id, list(applied.keys()))
+    # Epic #254 child 3 (#258): the ``action`` key is a command dispatch, not
+    # a field-store mutation. Resolved from open question Q3-a: route retry
+    # through the single DP-1 mutation path instead of a dedicated endpoint.
+    action = body.pop("action", None)
+    applied: dict = {}
+    if action is not None:
+        if not isinstance(action, str):
+            raise web.HTTPBadRequest(text="'action' must be a string")
+        action_result = await _dispatch_card_action(request, card_id, action)
+        applied.update(action_result)
+
+    if body:
+        field_applied = await _apply_card_state_patch(request, card_id, body)
+        applied.update(field_applied)
+
+    logger.info(
+        "cards_state_put: {} patched fields={}{}",
+        card_id,
+        list(applied.keys()),
+        f" action={action!r}" if action else "",
+    )
     return web.json_response({"status": "ok", **applied})
+
+
+async def _dispatch_card_action(request: web.Request, card_id: str, action: str) -> dict:
+    """Dispatch a server-side command action for ``PUT /api/cards/{id}/state``.
+
+    Epic #254 child 3 (#258): implements ``retry_pty`` for hydrated
+    TerminalCards in ``error_state``. Clears the error, re-runs
+    ``TerminalCard.start()`` with the default retry schedule, and broadcasts
+    ``card_updated`` on success (error_state cleared) or exhaustion
+    (error_state re-armed). Returns a dict describing the action outcome.
+    """
+    card_registry: CardRegistry = request.app["card_registry"]
+    card = card_registry.get(card_id)
+    if card is None:
+        raise web.HTTPNotFound(text="Card not found")
+
+    if action == "retry_pty":
+        if not isinstance(card, TerminalCard):
+            raise web.HTTPBadRequest(text="retry_pty is only valid on terminal cards")
+        # Clear prior error_state and broadcast the clear immediately so the
+        # client transitions out of the error UI without waiting for the
+        # (possibly long) start() attempt to complete. The subsequent
+        # on_error_state callback will re-arm error_state if retry exhausts.
+        card.error_state = None
+        await _broadcast_card_updated(request.app, card_id, {"error_state": None})
+
+        def _on_error_state(c: BaseCard, _app=request.app) -> "object":
+            return _broadcast_card_updated(_app, c.id, {"error_state": c.error_state})
+
+        try:
+            await card.start(on_error_state=_on_error_state)
+        except Exception:
+            logger.exception("cards_state_put retry_pty: start() failed for {}", card_id)
+            raise web.HTTPInternalServerError(text="retry_pty failed")
+
+        return {"action": "retry_pty", "ok": card.error_state is None}
+
+    raise web.HTTPBadRequest(text=f"Unknown action: {action!r}")
+
+
+async def cards_delete(request: web.Request) -> web.Response:
+    """DELETE /api/cards/{id} — unregister a non-terminal card (e.g. WidgetCard).
+
+    Terminal deletion uses ``DELETE /api/claude/terminal/{id}`` which also
+    tears down the PTY session.  This endpoint handles server-authored cards
+    that have no PTY (widgets, canvas-claude detach paths) so the client can
+    remove them from ``CardRegistry`` and trigger the write-through snapshot
+    update via ``CardRegistry.unregister``.
+
+    Returns 204 on success, 404 if the card is not registered.
+    """
+    card_id = request.match_info["id"]
+    card_registry: CardRegistry = request.app["card_registry"]
+    removed = card_registry.unregister(card_id)
+    if removed is None:
+        raise web.HTTPNotFound(text=f"Card '{card_id}' not found")
+    logger.info("cards_delete: unregistered card '{}'", card_id)
+    return web.Response(status=204)
 
 
 async def claude_terminal_rename(request: web.Request) -> web.Response:
@@ -2431,6 +2870,153 @@ async def _broadcast_card_updated(app: web.Application, card_id: str, fields: di
                 logger.debug("Failed to send card_updated event to a client")
 
 
+async def hydrate_canvas_into_registry(
+    app: web.Application,
+    canvas_name: str,
+    retry_delays: tuple[float, ...] | list[float] | None = None,
+) -> int:
+    """Load a canvas JSON file and populate ``CardRegistry`` with its cards.
+
+    Epic #254 child 2 (#257): the boot hydration path. For each entry in the
+    snapshot whose ``type`` is supported by a hydration-capable card class,
+    build the card via ``from_descriptor`` and register it. For TerminalCards,
+    also invoke ``start()`` — which wraps ``SessionManager.create_session`` in
+    a bounded jittered retry and, on exhaustion, lands the card in
+    ``error_state`` (broadcast via ``_broadcast_card_updated``).
+
+    Returns the number of cards hydrated (registered, regardless of PTY
+    success). Missing / malformed / unknown-type entries are logged and
+    skipped so a single bad entry does not abort startup.
+
+    Only TerminalCard dispatch ships in this child; Children #5/#6 extend the
+    dispatch table for Widget and CanvasClaude types.
+    """
+    app_config: AppConfig = app["app_config"]
+    data = read_canvas(app_config, canvas_name)
+    if data is None:
+        logger.warning("hydrate_canvas_into_registry: canvas '{}' not found or invalid", canvas_name)
+        return 0
+    cards = data.get("cards") if isinstance(data, dict) else None
+    if not isinstance(cards, list):
+        logger.warning("hydrate_canvas_into_registry: canvas '{}' has no 'cards' list", canvas_name)
+        return 0
+
+    card_registry: CardRegistry = app["card_registry"]
+    session_manager: SessionManager = app["session_manager"]
+    hydrated = 0
+
+    for idx, entry in enumerate(cards):
+        if not isinstance(entry, dict):
+            logger.warning(
+                "hydrate_canvas_into_registry: canvas '{}' entry #{} is not an object, skipping",
+                canvas_name,
+                idx,
+            )
+            continue
+        card_type = entry.get("type")
+        try:
+            if card_type == "terminal":
+                card = TerminalCard.from_descriptor(entry, session_manager=session_manager)
+                # Transitional fix (epic #254 integration): pre-#258 the client
+                # generated a UUID at spawn time and sent it via
+                # ``/ws/session/new?card_uid=<uuid>``. Post-#258, startup
+                # hydration creates the card before the client connects, so no
+                # client-generated UUID is available. Assign a stable UUID here
+                # so ``to_descriptor`` / ``_persist_canvas_snapshot`` emit
+                # ``card_uid`` on the first write-through, matching pre-#258
+                # snapshot behaviour.
+                if not card.card_uid:
+                    card.card_uid = str(uuid.uuid4())
+            elif card_type == "widget":
+                # Child #5 (#260): wire WidgetCard into hydration so widget
+                # entries survive the snapshot write-through that follows
+                # terminal registration. Without this branch the widget entry
+                # was skipped, then destroyed when ``apply_state_patch`` called
+                # ``_persist_canvas_snapshot`` with only registered (terminal)
+                # cards in the registry.
+                card = WidgetCard.from_descriptor(entry)
+            elif card_type == "canvas_claude":
+                # Child #6 (#261): canvas-claude hydration. ``from_descriptor``
+                # reconstructs the card with ``_hydrated=True`` so the
+                # subsequent ``start()`` call (issued by the
+                # ``_start_card_bg`` task below) dispatches to ``attach()``
+                # — verifying the existing tmux session and never seeding a
+                # new one. If the tmux session is gone, ``attach()`` lands
+                # the card in ``error_state`` (kind="tmux_session_missing")
+                # rather than auto-recreating; the user clicks Retry to
+                # invoke the full create path through
+                # ``/api/canvas-claude/create``.
+                card = CanvasClaudeCard.from_descriptor(entry, session_manager=session_manager)
+            else:
+                logger.debug(
+                    "hydrate_canvas_into_registry: canvas '{}' entry #{} type '{}' has no hydrator, skipping",
+                    canvas_name,
+                    idx,
+                    card_type,
+                )
+                continue
+        except Exception:
+            logger.exception(
+                "hydrate_canvas_into_registry: canvas '{}' entry #{} from_descriptor failed",
+                canvas_name,
+                idx,
+            )
+            continue
+
+        # Register the card immediately so it is visible to observers (MCP,
+        # GET /api/cards) before the PTY starts. Q1 from the #257 intent
+        # interview: ``start()`` runs as a background task so ``on_startup``
+        # does not block the event loop for up to ~130s while retries proceed.
+        card_registry.register(card, canvas_name=canvas_name)
+        hydrated += 1
+        # Transitional fix (epic #254 integration): persist the card_uid to
+        # the canvas snapshot immediately after registration so the UUID
+        # survives any subsequent reconnect-race unregister/re-spawn cycle.
+        # Without this write-through the UUID lives only in memory; a
+        # session_attach_handler unregister (PTY-not-started race) triggers a
+        # snapshot write that drops the UUID before any mutation can persist it.
+        try:
+            card_registry.apply_state_patch(card.id, {"starred": bool(card.starred)})
+        except (LookupError, ValueError):
+            logger.warning(
+                "hydrate_canvas_into_registry: immediate persist for '{}' failed (non-fatal)",
+                card.id,
+            )
+
+        # On retry-ceiling error, emit a card_updated broadcast so any
+        # observer (Child #3 client, MCP probe) sees the new error_state.
+        def _on_error_state(c: BaseCard, _app=app) -> "object":
+            return _broadcast_card_updated(_app, c.id, {"error_state": c.error_state})
+
+        async def _start_card_bg(_card=card, _idx=idx, _cn=canvas_name) -> None:
+            try:
+                await _card.start(retry_delays=retry_delays, on_error_state=_on_error_state)
+            except TypeError:
+                # Cards whose ``start`` signature does not accept retry
+                # kwargs (e.g. non-TerminalCard hydration targets added by
+                # Children #5/#6 before they gain the retry contract) fall
+                # back to a bare start.
+                try:
+                    await _card.start()
+                except Exception:
+                    logger.exception(
+                        "hydrate_canvas_into_registry: canvas '{}' entry #{} start() failed",
+                        _cn,
+                        _idx,
+                    )
+            except Exception:
+                logger.exception(
+                    "hydrate_canvas_into_registry: canvas '{}' entry #{} start() failed",
+                    _cn,
+                    _idx,
+                )
+
+        asyncio.create_task(_start_card_bg())
+
+    logger.info("hydrate_canvas_into_registry: canvas '{}' hydrated {} card(s)", canvas_name, hydrated)
+    return hydrated
+
+
 async def _broadcast_blueprint_event(app: web.Application, event_type: str, payload: dict) -> None:
     """Push blueprint events (log, completed, failed, open_widget) to /ws/control clients."""
     message = {"type": event_type, **payload}
@@ -2478,9 +3064,21 @@ def create_app(
     app.router.add_get("/api/canvases/{name}", canvas_get_handler)
     # Epic #236 child 5 (#241): no PUT — canvas JSON is server-authored.
     app.router.add_delete("/api/canvases/{name}", canvas_delete_handler)
+    # Epic #254 child 4 (#259): canvas-switch lazy-hydration entry point.
+    app.router.add_post("/api/canvases/{name}/activate", canvas_activate_handler)
 
     # Generic card state mutation (epic #236 / issue #238 — single mutation path)
     app.router.add_put("/api/cards/{id}/state", cards_state_put)
+    # Generic card deletion — unregisters non-terminal server-authored cards
+    # (e.g. WidgetCard) so reloads don't rehydrate destroyed cards.
+    app.router.add_delete("/api/cards/{id}", cards_delete)
+    # Epic #254 child 5 (#260): server-authored WidgetCard spawn endpoint.
+    # Routed before any ``/api/cards/{id}/...`` rule so ``widget`` is not
+    # captured as an id segment.
+    app.router.add_post("/api/cards/widget", cards_widget_create_handler)
+    # Epic #254 child 2 (#257): server-authored card listing for observers
+    # before any browser attaches.
+    app.router.add_get("/api/cards", cards_list_handler)
     app.router.add_get("/api/widgets/system-info", widget_system_info_handler)
     app.router.add_get("/api/widgets/container-stats", widget_container_stats_handler)
 
@@ -2607,9 +3205,18 @@ def create_app(
                 if not getattr(card, "starred", False):
                     continue
                 try:
-                    descriptors.append(card.to_descriptor())
+                    desc = card.to_descriptor()
                 except Exception:
                     logger.exception("persist_callback: card '{}' to_descriptor failed", card.id)
+                    continue
+                # Epic #254 child 2 (#257): ``error_state`` is server-computed
+                # recovery metadata (kind/attempts/last_error) and must NOT be
+                # persisted to the canvas JSON snapshot — retries reset to 0
+                # on every server restart. Strip it here so the snapshot stays
+                # clean even though ``to_descriptor`` includes it for the GET
+                # endpoint and ``card_updated`` broadcast.
+                desc.pop("error_state", None)
+                descriptors.append(desc)
             write_state_snapshot(app_config, canvas_name, descriptors)
 
         card_registry.set_persist_callback(_persist_canvas_snapshot)
@@ -2668,6 +3275,52 @@ def create_app(
         event_bus.subscribe("blueprint:open_widget", _on_blueprint_event)
 
         mgr.start_orphan_reaper()
+
+        # Epic #254 child 2 (#257): server-authored hydration — iterate every
+        # canvas JSON file and populate ``CardRegistry`` from the snapshot
+        # before any browser connects. Starred cards whose containers are
+        # unavailable enter ``error_state`` after a bounded retry; the new
+        # ``GET /api/cards?canvas=X`` endpoint exposes the live state to MCP
+        # tools and monitoring observers independent of any WebSocket attach.
+        #
+        # Retry runs as a background task so ``on_startup`` does not block
+        # the event loop for up to ~130s waiting on a missing container.
+        #
+        # Epic #254 child 4 (#259): the set of canvases hydrated at boot
+        # depends on the ``canvas_switch_policy`` config:
+        #   - ``keep_resident`` (default): every canvas file on disk is
+        #     hydrated. All canvases are observable from boot; no further
+        #     hydration ever runs. This is the "server-as-tmux-remote" model.
+        #   - ``lazy_hydrate``: only the default canvas is hydrated at boot.
+        #     Others are hydrated on first switch via
+        #     ``POST /api/canvases/{name}/activate``. Subsequent activates
+        #     are idempotent (a canvas already resident is a no-op).
+        hydrate_retry_delays = app.get("_hydrate_retry_delays")
+        canvas_switch_policy = config.get("canvas_switch_policy", "keep_resident")
+        if canvas_switch_policy not in ("keep_resident", "lazy_hydrate"):
+            logger.warning(
+                "on_startup: unknown canvas_switch_policy '{}', falling back to 'keep_resident'",
+                canvas_switch_policy,
+            )
+            canvas_switch_policy = "keep_resident"
+        app["canvas_switch_policy"] = canvas_switch_policy
+
+        all_canvas_names = list_canvases(app_config)
+        if canvas_switch_policy == "lazy_hydrate":
+            default_canvas = config.get("default_canvas", "probe-qa")
+            canvas_names = [default_canvas] if default_canvas in all_canvas_names else []
+            logger.info(
+                "on_startup: canvas_switch_policy=lazy_hydrate; hydrating only default canvas '{}'",
+                default_canvas,
+            )
+        else:
+            canvas_names = all_canvas_names
+
+        for _cn in canvas_names:
+            try:
+                await hydrate_canvas_into_registry(app, _cn, retry_delays=hydrate_retry_delays)
+            except Exception:
+                logger.exception("on_startup: hydrate_canvas_into_registry failed for '{}'", _cn)
 
         # Probe tmux availability and recover existing sessions
         if mgr.tmux_enabled:

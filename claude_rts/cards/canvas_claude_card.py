@@ -170,6 +170,12 @@ class CanvasClaudeCard(TerminalCard):
         self.api_base_url = api_base_url
         self.profile = profile
         self.canvas_name = canvas_name
+        # Epic #254 child 6 (#261): set by ``from_descriptor`` so ``start()``
+        # takes the attach-only path (no MCP seed, no tmux new-session) on
+        # boot hydration. Default ``False`` preserves the original
+        # create-and-seed behaviour for direct instantiations and the
+        # ``/api/canvas-claude/create`` endpoint.
+        self._hydrated: bool = False
 
         # Build the MCP config JSON after super().__init__ so self.id is
         # available (BaseCard generates a uuid if card_id was None).
@@ -387,7 +393,7 @@ class CanvasClaudeCard(TerminalCard):
             )
             logger.info("CanvasClaudeCard: creating new tmux session {}", TMUX_SESSION_NAME)
 
-    async def start(self) -> None:
+    async def start(self, **kwargs) -> None:
         """Sync mcp_server.py, write MCP config, resolve tmux state, then start the PTY.
 
         On the *new-session* path we also seed the claude settings file so the
@@ -397,7 +403,18 @@ class CanvasClaudeCard(TerminalCard):
         with — mutating the files on disk would not retroactively fix a broken
         subprocess and could mislead the next fresh-session boot if the file is
         later consulted.
+
+        Epic #254 child 6 (#261): when the card was reconstructed via
+        ``from_descriptor`` (``self._hydrated`` is True), this method delegates
+        to ``attach()`` — an attach-only path that requires the tmux session to
+        already exist and never seeds a new one. ``kwargs`` (``retry_delays``,
+        ``on_error_state``) are accepted for compatibility with
+        ``hydrate_canvas_into_registry`` and forwarded to ``attach``.
         """
+        if self._hydrated:
+            await self.attach(**kwargs)
+            return
+
         loop = _asyncio.get_running_loop()
         await loop.run_in_executor(None, self._sync_mcp_server)
         await loop.run_in_executor(None, self._ensure_tmux_session)
@@ -417,7 +434,71 @@ class CanvasClaudeCard(TerminalCard):
             self._effective_container,
         )
 
-        await super().start()
+        # Forward kwargs (retry_delays, on_error_state) so the
+        # hydrate_canvas_into_registry retry / error_state contract still
+        # applies if a fresh-create path is ever invoked through hydration.
+        await super().start(**kwargs)
+
+    async def attach(self, on_error_state: "object" = None, **_kwargs) -> None:
+        """Attach to an existing tmux session without creating a new one.
+
+        Epic #254 child 6 (#261): the boot-hydration entry point. The
+        invariants:
+
+        - **No MCP seed.** The already-running claude process inside the tmux
+          session has whatever config snapshot it booted with — re-seeding
+          would not retroactively fix it.
+        - **No ``tmux new-session``.** If the named tmux session does not exist
+          we land in ``error_state`` rather than silently spawning a new one;
+          the user investigates / clicks retry (which goes through the full
+          ``/api/canvas-claude/create`` create path).
+        - **No ``docker cp`` of mcp_server.py.** Skipped on attach for the same
+          reason as MCP seed: the running subprocess does not re-read the file.
+
+        ``on_error_state`` mirrors ``TerminalCard.start`` — invoked with
+        ``self`` once ``error_state`` is populated so the caller (the
+        ``hydrate_canvas_into_registry`` helper) can broadcast a
+        ``card_updated`` event. ``_kwargs`` swallows ``retry_delays`` (no
+        retries on attach — either the session exists or it doesn't).
+        """
+        loop = _asyncio.get_running_loop()
+        session_present = await loop.run_in_executor(None, self._has_tmux_session)
+        if not session_present:
+            # Session is gone — record error_state and signal the caller.
+            self.error_state = {
+                "kind": "tmux_session_missing",
+                "container": self._effective_container,
+                "tmux_session": TMUX_SESSION_NAME,
+            }
+            logger.warning(
+                "CanvasClaudeCard.attach: tmux session {} missing in container {} — landing in error_state",
+                TMUX_SESSION_NAME,
+                self._effective_container,
+            )
+            if on_error_state is not None:
+                try:
+                    result = on_error_state(self)
+                    if _asyncio.iscoroutine(result):
+                        await result
+                except Exception:
+                    logger.exception("CanvasClaudeCard.attach: on_error_state callback failed")
+            return
+
+        # Session is alive — set the cmd to the attach variant and run the
+        # PTY-allocation half of TerminalCard.start. We skip the
+        # TerminalCard.start retry loop on attach because there is no
+        # transient error class it would help with: docker exec attach to a
+        # tmux session is either immediately available or the session is gone.
+        docker_bin = _DOCKER
+        self.cmd = f"{docker_bin} exec -it {self._effective_container} tmux attach-session -t {TMUX_SESSION_NAME}"
+        logger.info(
+            "CanvasClaudeCard.attach: attaching to existing tmux session {} in container {}",
+            TMUX_SESSION_NAME,
+            self._effective_container,
+        )
+        # Bypass the retry loop with explicit retry_delays=() so a single
+        # PTY-creation failure is surfaced rather than retried for ~130 s.
+        await super().start(retry_delays=())
 
     # ── Session helpers ────────────────────────────────────────────────
 
@@ -436,3 +517,52 @@ class CanvasClaudeCard(TerminalCard):
         """Send /clear to the claude PTY to wipe conversation history."""
         if self._session is not None and self._session.alive:
             self._session.pty.write("/clear\n")
+
+    # ── Hydration ──────────────────────────────────────────────────────
+
+    @classmethod
+    def from_descriptor(cls, data: dict, session_manager=None, **_kwargs) -> "CanvasClaudeCard":
+        """Reconstruct a CanvasClaudeCard from a canvas-JSON snapshot entry.
+
+        Epic #254 child 6 (#261): the hydration entry point called by
+        ``hydrate_canvas_into_registry`` at server startup. Mirrors
+        ``TerminalCard.from_descriptor`` but specialised for canvas-claude:
+
+        - Accepts the descriptor keys emitted by ``to_descriptor`` —
+          ``card_id`` / ``session_id``, ``container``, ``profile``,
+          ``canvas_name``, geometry (``x``/``y``/``w``/``h``/``z_order``),
+          ``starred``.
+        - Sets ``self._hydrated = True`` so the subsequent ``start()`` call
+          dispatches to ``attach()`` (no MCP seed, no tmux new-session) —
+          per Scenario 1's invariant that hydration never creates a new
+          tmux session.
+
+        Note that the ``session_id`` from the snapshot is **not** propagated
+        to the underlying PTY — at boot the previous PTY is dead (the python
+        process restarted), so a fresh ``Session`` is allocated by ``attach``
+        and ``self.id`` is realigned to the new ``session_id`` inside
+        ``TerminalCard.start``. The card's persistent identity is the tmux
+        session ``canvas-claude`` itself, not the per-PTY id.
+        """
+        if session_manager is None:
+            raise TypeError("CanvasClaudeCard.from_descriptor requires session_manager=")
+        layout = {
+            k: data[k]
+            for k in ("x", "y", "w", "h", "z_order")
+            if isinstance(data.get(k), int) and not isinstance(data.get(k), bool)
+        }
+        card = cls(
+            session_manager=session_manager,
+            hub=data.get("hub") or None,
+            container=data.get("container") or None,
+            card_id=data.get("card_id") or data.get("session_id"),
+            layout=layout or None,
+            profile=data.get("profile") or None,
+            canvas_name=data.get("canvas_name") or None,
+        )
+        # Server-owned fields that ``to_descriptor`` emits via the
+        # TerminalCard base class. Mirror TerminalCard.from_descriptor.
+        card.starred = bool(data.get("starred", False))
+        # Activate the attach-only branch in ``start()``.
+        card._hydrated = True
+        return card

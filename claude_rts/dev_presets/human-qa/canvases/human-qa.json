@@ -21,7 +21,8 @@
       "x": 900,
       "y": 50,
       "w": 520,
-      "h": 520
+      "h": 520,
+      "card_id": "782791c3-2250-581a-8ff5-196724ef1fbb"
     },
     {
       "type": "widget",
@@ -30,10 +31,12 @@
       "x": 50,
       "y": 620,
       "w": 620,
-      "h": 380
+      "h": 380,
+      "card_id": "c9158ce9-5ce4-528e-91bb-fb394b1790ba"
     },
     {
       "type": "canvas_claude",
+      "card_id": "human-qa-cc",
       "starred": true,
       "x": 900,
       "y": 640,

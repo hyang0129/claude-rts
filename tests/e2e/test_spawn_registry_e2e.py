@@ -598,7 +598,7 @@ class TestSpawnFromSerializedMixedCanvas:
         )
 
         clear_canvas(page)
-        page.evaluate("() => switchCanvas('mixed-restore-clean')")
+        page.evaluate("async () => { await switchCanvas('mixed-restore-clean'); }")
         # Wait for the 2-card clean canvas to finish restoring.  Condition-based
         # on cards.length so we don't sleep past the slowest observed spawn.
         page.wait_for_function(

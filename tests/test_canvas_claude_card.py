@@ -479,3 +479,223 @@ def test_canvas_claude_card_mcp_args_include_spawner_id(monkeypatch):
     # The value must match the card's own id
     assert mcp_args[idx + 1] == card.id
     mgr.stop_all()
+
+
+# ── Hydration tests (epic #254 child 6, issue #261) ────────────────────────
+
+
+async def test_canvas_claude_from_descriptor_builds_card(monkeypatch):
+    """from_descriptor reconstructs the card with hydrated flag, no PTY started."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    data = {
+        "type": "canvas_claude",
+        "card_id": "cc-hydrated-1",
+        "container": "my-container",
+        "profile": "alice",
+        "canvas_name": "my-canvas",
+        "starred": True,
+        "x": 10,
+        "y": 20,
+        "w": 800,
+        "h": 600,
+    }
+    card = CanvasClaudeCard.from_descriptor(data, session_manager=mgr)
+    assert card.session is None  # PTY not started
+    assert card._hydrated is True
+    assert card.profile == "alice"
+    assert card.canvas_name == "my-canvas"
+    assert card._effective_container == "my-container"
+    assert card.starred is True
+    assert card.x == 10 and card.y == 20 and card.w == 800 and card.h == 600
+    mgr.stop_all()
+
+
+async def test_canvas_claude_from_descriptor_requires_session_manager():
+    """from_descriptor without session_manager raises TypeError (mirrors TerminalCard)."""
+    with pytest.raises(TypeError):
+        CanvasClaudeCard.from_descriptor({"type": "canvas_claude"})
+
+
+async def test_canvas_claude_to_descriptor_emits_card_id(monkeypatch):
+    """to_descriptor emits card_id (Scenario 5 falsifiability check)."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    mgr = SessionManager()
+    card = CanvasClaudeCard(session_manager=mgr, container="c", card_id="cc-fixture-id", canvas_name="x")
+    desc = card.to_descriptor()
+    assert "card_id" in desc
+    assert desc["card_id"] == "cc-fixture-id"
+    mgr.stop_all()
+
+
+async def test_canvas_claude_attach_without_existing_tmux_sets_error_state(monkeypatch):
+    """attach() lands the card in error_state when tmux session is missing (Scenario 4)."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    # tmux has-session returns rc=1 (no session)
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", _mock_subprocess_run_no_tmux)
+    mgr = SessionManager()
+    card = CanvasClaudeCard.from_descriptor(
+        {"type": "canvas_claude", "container": "missing-container", "card_id": "cc-2"},
+        session_manager=mgr,
+    )
+    callbacks = []
+
+    def _on_error(c):
+        callbacks.append(c.error_state)
+
+    await card.start(on_error_state=_on_error)
+    assert card.session is None  # no PTY allocated
+    assert card.error_state is not None
+    assert card.error_state["kind"] == "tmux_session_missing"
+    assert card.error_state["container"] == "missing-container"
+    assert card.error_state["tmux_session"] == TMUX_SESSION_NAME
+    assert callbacks == [card.error_state]
+    mgr.stop_all()
+
+
+async def test_canvas_claude_attach_with_existing_tmux_starts_pty(monkeypatch):
+    """attach() with a live tmux session sets the attach cmd and allocates a PTY (Scenario 1)."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    # tmux has-session returns rc=0 (session exists)
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", _mock_subprocess_run)
+    mgr = SessionManager()
+    card = CanvasClaudeCard.from_descriptor(
+        {"type": "canvas_claude", "container": "live-container", "card_id": "cc-3"},
+        session_manager=mgr,
+    )
+    await card.start()
+    assert card.error_state is None
+    assert card.session is not None
+    assert "tmux attach-session" in card.cmd
+    assert TMUX_SESSION_NAME in card.cmd
+    await card.stop()
+    mgr.stop_all()
+
+
+async def test_canvas_claude_attach_does_not_seed_settings(monkeypatch):
+    """Hydration attach path never calls _seed_claude_settings (Scenario 1 invariant)."""
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", _mock_subprocess_run)
+    seed_calls = {"n": 0}
+
+    def counting_seed(self):
+        seed_calls["n"] += 1
+
+    monkeypatch.setattr(CanvasClaudeCard, "_seed_claude_settings", counting_seed)
+    mgr = SessionManager()
+    card = CanvasClaudeCard.from_descriptor(
+        {"type": "canvas_claude", "container": "live-container"},
+        session_manager=mgr,
+    )
+    await card.start()
+    assert seed_calls["n"] == 0
+    await card.stop()
+    mgr.stop_all()
+
+
+async def test_canvas_claude_attach_does_not_create_new_tmux_session(monkeypatch):
+    """Hydration must never call ``tmux new-session`` even when the session is missing.
+
+    Falsifiability check for Scenario 1's invariant: a hydrated card with a
+    missing tmux session lands in error_state — it must NOT silently create a
+    fresh session.
+    """
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    calls: list[list[str]] = []
+
+    def track_run(cmd_list, **kw):
+        calls.append(list(cmd_list))
+        # has-session → rc=1 (no session); any other tmux call would be an
+        # invariant violation.
+        return type("R", (), {"returncode": 1, "stderr": b""})()
+
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", track_run)
+    mgr = SessionManager()
+    card = CanvasClaudeCard.from_descriptor(
+        {"type": "canvas_claude", "container": "ghost"},
+        session_manager=mgr,
+    )
+    await card.start()
+    new_session_calls = [c for c in calls if "new-session" in c]
+    assert new_session_calls == []
+    mgr.stop_all()
+
+
+def test_preset_canvas_claude_entries_have_card_id():
+    """Every canvas_claude entry in dev_presets/*/canvases/*.json carries a stable card_id."""
+    import json as _json
+    import pathlib as _pathlib
+
+    preset_root = _pathlib.Path(__file__).resolve().parents[1] / "claude_rts" / "dev_presets"
+    missing: list[str] = []
+    for canvas_file in preset_root.glob("*/canvases/*.json"):
+        data = _json.loads(canvas_file.read_text())
+        for idx, card in enumerate(data.get("cards", [])):
+            if card.get("type") == "canvas_claude" and not card.get("card_id"):
+                missing.append(f"{canvas_file}: idx={idx}")
+    assert not missing, "canvas_claude entries without card_id:\n" + "\n".join(missing)
+
+
+async def test_hydrate_canvas_claude_into_registry(tmp_path, monkeypatch):
+    """hydrate_canvas_into_registry registers a canvas_claude entry into CardRegistry.
+
+    Covers Scenario 1: a canvas JSON containing a canvas_claude entry causes a
+    CanvasClaudeCard to exist in CardRegistry after hydration runs, attaching
+    to the existing tmux session without creating a new one.
+    """
+    import json as _json
+
+    from claude_rts import config as _config
+    from claude_rts.cards.card_registry import CardRegistry as _CR
+    from claude_rts.server import create_app as _create_app
+
+    monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+    # tmux has-session → rc=0 (alive). All other subprocess calls also succeed.
+    monkeypatch.setattr("claude_rts.cards.canvas_claude_card._subprocess.run", _mock_subprocess_run)
+
+    app_config = _config.load(tmp_path / ".sc")
+    app_config.canvases_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = {
+        "name": "cc-canvas",
+        "canvas_size": [3840, 2160],
+        "cards": [
+            {
+                "type": "canvas_claude",
+                "card_id": "cc-hydrated",
+                "container": "supreme-claudemander-util",
+                "profile": "main",
+                "canvas_name": "cc-canvas",
+                "starred": True,
+                "x": 100,
+                "y": 100,
+                "w": 960,
+                "h": 640,
+            }
+        ],
+    }
+    (app_config.canvases_dir / "cc-canvas.json").write_text(_json.dumps(snapshot))
+
+    app = _create_app(app_config, test_mode=True, skip_canvas_schema_check=True)
+    app["_hydrate_retry_delays"] = [0]
+
+    import asyncio as _asyncio
+
+    for hook in app.on_startup:
+        await hook(app)
+    try:
+        await _asyncio.sleep(0.1)  # let background start() task run attach()
+        registry: _CR = app["card_registry"]
+        all_cards = registry.cards_on_canvas("cc-canvas")
+        cc_cards = [c for c in all_cards if isinstance(c, CanvasClaudeCard)]
+        assert len(cc_cards) == 1
+        cc = cc_cards[0]
+        assert cc._hydrated is True
+        assert cc.error_state is None
+        assert cc.session is not None  # PTY allocated by attach()
+        assert "tmux attach-session" in cc.cmd
+    finally:
+        for hook in app.on_shutdown:
+            try:
+                await hook(app)
+            except Exception:
+                pass
