@@ -742,6 +742,14 @@ async def test_clean_boot_no_deprecation_warning(tmp_path, monkeypatch):
     import loguru
 
     monkeypatch.setattr("claude_rts.sessions.PtyProcess", MockPty)
+
+    # discover_profiles shells out to `docker exec`; stub it so the test runs
+    # without Docker (CI runners and local dev environments without the util
+    # container would otherwise log an ERROR that taints the warning check).
+    async def _no_profiles(_app_config):
+        return []
+
+    monkeypatch.setattr("claude_rts.server.discover_profiles", _no_profiles)
     app_config = config.load(tmp_path / ".sc")
     app_config.canvases_dir.mkdir(parents=True, exist_ok=True)
     snapshot = {

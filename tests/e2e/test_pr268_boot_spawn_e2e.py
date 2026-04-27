@@ -240,11 +240,7 @@ def test_canvas_switch_no_session_new_for_registered_cards(backend_port, dev_con
             # Switch from canvas-a (default) to canvas-b. Both canvases are hydrated
             # at boot under keep_resident — no /ws/session/new should open.
             pg.evaluate(
-                "async () => {"
-                "  if (typeof switchCanvas === 'function') {"
-                "    await switchCanvas('canvas-b');"
-                "  }"
-                "}"
+                "async () => {  if (typeof switchCanvas === 'function') {    await switchCanvas('canvas-b');  }}"
             )
             time.sleep(0.5)  # brief wait for any WS opens to be captured
 
@@ -353,9 +349,7 @@ def test_user_spawn_creates_dormant_card(backend_server, backend_port):
 
         # (2) Give any spurious /ws/session/new time to manifest before asserting.
         time.sleep(0.5)
-        assert not session_new_urls, (
-            f"Expected NO /ws/session/new during dormant spawn, got: {session_new_urls}"
-        )
+        assert not session_new_urls, f"Expected NO /ws/session/new during dormant spawn, got: {session_new_urls}"
 
         # (3) The new card is dormant: starred === false AND DOM has the
         # dormant placeholder ("Dormant — unstarred" label rendered by
@@ -366,14 +360,12 @@ def test_user_spawn_creates_dormant_card(backend_server, backend_port):
         last_card_id = pg.evaluate("() => cards[cards.length - 1].id")
         dormant_text = pg.evaluate(
             "(cardId) => { "
-            "const el = document.querySelector(`[data-card-id=\"${cardId}\"]`); "
+            'const el = document.querySelector(`[data-card-id="${cardId}"]`); '
             "return el ? el.innerText : null; }",
             last_card_id,
         )
         assert dormant_text is not None, f"Card DOM not found for id={last_card_id}"
-        assert "Dormant" in dormant_text, (
-            f"Expected dormant placeholder in card DOM, got: {dormant_text!r}"
-        )
+        assert "Dormant" in dormant_text, f"Expected dormant placeholder in card DOM, got: {dormant_text!r}"
 
         pg.close()
         browser.close()
