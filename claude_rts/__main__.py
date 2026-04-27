@@ -52,8 +52,27 @@ def _check_electron_installed():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="supreme-claudemander terminal canvas")
+    parser = argparse.ArgumentParser(
+        description="supreme-claudemander terminal canvas",
+        # Allow 'qa next' subcommand without breaking bare 'python -m claude_rts'
+    )
     parser.add_argument("--version", action="version", version=f"supreme-claudemander {_get_version()}")
+
+    subparsers = parser.add_subparsers(dest="subcommand")
+
+    # ── 'qa' subcommand ─────────────────────────────────────────────────────
+    qa_parser = subparsers.add_parser("qa", help="QA scenario runner commands")
+    qa_subparsers = qa_parser.add_subparsers(dest="qa_action")
+    qa_subparsers.add_parser(
+        "next",
+        help=(
+            "Run the next unverified QA scenario. Launches the app, drives Playwright "
+            "to the gate state, reads y/n/s from the human, and records the verdict. "
+            "Set HEADED=0 to run headless (default: headed)."
+        ),
+    )
+
+    # ── Server arguments (only apply when no subcommand is given) ───────────
     parser.add_argument("--port", type=int, default=3000, help="Server port (default: 3000)")
     parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
     parser.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
@@ -78,6 +97,17 @@ def main():
         ),
     )
     args = parser.parse_args()
+
+    # ── Dispatch qa subcommand before any server setup ───────────────────────
+    if args.subcommand == "qa":
+        if args.qa_action == "next":
+            from .qa_runner import run_next
+
+            run_next()
+            return
+        else:
+            qa_parser.print_help()
+            sys.exit(1)
 
     import os
 
