@@ -317,7 +317,7 @@ def _print_gate(gate) -> None:  # gate: HumanGate
 # ---------------------------------------------------------------------------
 
 
-def _run_scenario_with_playwright(scenario_instance, port: int) -> "HumanGate":  # noqa: F821
+def _run_scenario_with_playwright(scenario_instance, port: int) -> "tuple[HumanGate, str]":  # noqa: F821
     """Launch Playwright, navigate to the app, and run the scenario setup.
 
     Returns the ``HumanGate`` from ``run_setup()``.
