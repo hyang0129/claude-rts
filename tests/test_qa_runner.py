@@ -4,13 +4,18 @@ These tests mock Playwright and subprocess so they run without a browser or
 running server.  They verify:
 
 - Scenario discovery and ordering (alphabetical)
-- Verdict filtering (discharged = yes/no only; skip re-queues)
-- Verdict JSONL append
-- GitHub comment posting (y/n posts; skip does not)
-- Repo slug derivation (https + ssh remotes + fallback)
 - Scenario class loading (valid, missing Scenario class, exec error)
+- GitHub comment posting (success, gh failure, gh missing)
+- Repo slug derivation (https + ssh remotes + fallback)
+- list_scenarios() output
+- run_scenario() not-found exits 1 with available IDs
+- run_scenario() success saves gate cache and exits 0
+- post_verdict() valid verdicts post structured GitHub comments
+- post_verdict() invalid verdict exits 1
+- post_verdict() gh failure exits 1
+- post_verdict() includes notes when provided
+- Gate cache round-trip (_save_gate_cache / _load_gate_cache)
 - HumanGate and QAScenario protocol
-- run_next() exits 0 with "no unverified scenarios" when all discharged
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ import textwrap
 import unittest.mock as mock
 
 import pytest
+
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -35,16 +41,6 @@ def tmp_scenarios_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "_SCENARIOS_DIR", tmp_path / "qa_scenarios")
     (tmp_path / "qa_scenarios").mkdir()
     return tmp_path / "qa_scenarios"
-
-
-@pytest.fixture()
-def tmp_verdicts(tmp_path, monkeypatch):
-    """Redirect _VERDICTS_FILE to a temp file."""
-    import claude_rts.qa_runner as runner
-
-    verdicts_path = tmp_path / "qa-verdicts.jsonl"
-    monkeypatch.setattr(runner, "_VERDICTS_FILE", verdicts_path)
-    return verdicts_path
 
 
 def _write_scenario_file(
@@ -73,19 +69,6 @@ def _write_scenario_file(
         encoding="utf-8",
     )
     return path
-
-
-def _write_verdict(verdicts_path: pathlib.Path, scenario_id: str, verdict: str) -> None:
-    """Append a verdict record to the verdicts file."""
-    record = {
-        "scenario_id": scenario_id,
-        "commit_sha": "abc1234",
-        "verdict": verdict,
-        "timestamp": "2026-01-01T00:00:00+00:00",
-        "question": "Test question?",
-    }
-    with verdicts_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -186,86 +169,6 @@ def test_load_scenario_class_exec_error(tmp_scenarios_dir):
 
 
 # ---------------------------------------------------------------------------
-# Verdict loading and filtering
-# ---------------------------------------------------------------------------
-
-
-def test_load_verdicts_empty(tmp_verdicts):
-    import claude_rts.qa_runner as runner
-
-    assert runner._load_verdicts() == []
-
-
-def test_load_verdicts_records(tmp_verdicts):
-    import claude_rts.qa_runner as runner
-
-    _write_verdict(tmp_verdicts, "s1", "yes")
-    _write_verdict(tmp_verdicts, "s2", "no")
-    _write_verdict(tmp_verdicts, "s3", "skip")
-
-    records = runner._load_verdicts()
-    assert len(records) == 3
-
-
-def test_discharged_scenario_ids_yes_and_no(tmp_verdicts):
-    import claude_rts.qa_runner as runner
-
-    _write_verdict(tmp_verdicts, "s1", "yes")
-    _write_verdict(tmp_verdicts, "s2", "no")
-
-    discharged = runner._discharged_scenario_ids(runner._load_verdicts())
-    assert discharged == {"s1", "s2"}
-
-
-def test_skip_does_not_discharge(tmp_verdicts):
-    import claude_rts.qa_runner as runner
-
-    _write_verdict(tmp_verdicts, "s1", "skip")
-    discharged = runner._discharged_scenario_ids(runner._load_verdicts())
-    assert discharged == set()
-
-
-def test_skip_then_yes_discharges(tmp_verdicts):
-    import claude_rts.qa_runner as runner
-
-    _write_verdict(tmp_verdicts, "s1", "skip")
-    _write_verdict(tmp_verdicts, "s1", "yes")
-    discharged = runner._discharged_scenario_ids(runner._load_verdicts())
-    assert "s1" in discharged
-
-
-# ---------------------------------------------------------------------------
-# Verdict append
-# ---------------------------------------------------------------------------
-
-
-def test_append_verdict_creates_file(tmp_verdicts):
-    import claude_rts.qa_runner as runner
-
-    assert not tmp_verdicts.exists()
-    runner._append_verdict(
-        {"scenario_id": "s1", "verdict": "yes", "commit_sha": "abc", "timestamp": "t", "question": "q"}
-    )
-    assert tmp_verdicts.exists()
-    records = runner._load_verdicts()
-    assert len(records) == 1
-    assert records[0]["scenario_id"] == "s1"
-
-
-def test_append_verdict_appends(tmp_verdicts):
-    import claude_rts.qa_runner as runner
-
-    runner._append_verdict(
-        {"scenario_id": "s1", "verdict": "yes", "commit_sha": "abc", "timestamp": "t", "question": "q"}
-    )
-    runner._append_verdict(
-        {"scenario_id": "s2", "verdict": "no", "commit_sha": "def", "timestamp": "t", "question": "q"}
-    )
-    records = runner._load_verdicts()
-    assert len(records) == 2
-
-
-# ---------------------------------------------------------------------------
 # GitHub comment posting
 # ---------------------------------------------------------------------------
 
@@ -346,32 +249,354 @@ def test_derive_repo_slug_fallback(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# run_next() — no scenarios
+# Gate cache
 # ---------------------------------------------------------------------------
 
 
-def test_run_next_no_scenarios(tmp_scenarios_dir, tmp_verdicts):
+def test_gate_cache_round_trip(tmp_path, monkeypatch):
+    import claude_rts.qa_runner as runner
+    from claude_rts.qa_scenario import HumanGate
+
+    monkeypatch.setattr(runner, "_gate_cache_path", lambda sid: tmp_path / f"qa-gate-{sid}.json")
+
+    gate = HumanGate(scenario_id="s1", question="q?", expected="e")
+    runner._save_gate_cache("s1", gate)
+
+    loaded = runner._load_gate_cache("s1")
+    assert loaded is not None
+    assert loaded.scenario_id == "s1"
+    assert loaded.question == "q?"
+    assert loaded.expected == "e"
+
+
+def test_gate_cache_missing_returns_none(tmp_path, monkeypatch):
+    import claude_rts.qa_runner as runner
+
+    monkeypatch.setattr(runner, "_gate_cache_path", lambda sid: tmp_path / f"qa-gate-{sid}.json")
+    assert runner._load_gate_cache("nonexistent") is None
+
+
+# ---------------------------------------------------------------------------
+# list_scenarios()
+# ---------------------------------------------------------------------------
+
+
+def test_list_scenarios_empty(tmp_scenarios_dir):
     import claude_rts.qa_runner as runner
 
     with pytest.raises(SystemExit) as exc_info:
-        runner.run_next()
+        runner.list_scenarios()
     assert exc_info.value.code == 0
 
 
-# ---------------------------------------------------------------------------
-# run_next() — all discharged
-# ---------------------------------------------------------------------------
-
-
-def test_run_next_all_discharged(tmp_scenarios_dir, tmp_verdicts):
+def test_list_scenarios_prints_ids(tmp_scenarios_dir, capsys):
     import claude_rts.qa_runner as runner
 
-    _write_scenario_file(tmp_scenarios_dir, "syn-001.py", "syn-001")
-    _write_verdict(tmp_verdicts, "syn-001", "yes")
+    _write_scenario_file(tmp_scenarios_dir, "syn-001-alpha.py", "syn-001-alpha", debt_issue=100)
+    _write_scenario_file(tmp_scenarios_dir, "syn-002-beta.py", "syn-002-beta", debt_issue=200)
+
+    with pytest.raises(SystemExit):
+        runner.list_scenarios()
+
+    out = capsys.readouterr().out
+    assert "syn-001-alpha" in out
+    assert "syn-002-beta" in out
+    assert "#100" in out
+    assert "#200" in out
+
+
+# ---------------------------------------------------------------------------
+# run_scenario() — not found
+# ---------------------------------------------------------------------------
+
+
+def test_run_scenario_not_found_exits_1(tmp_scenarios_dir):
+    import claude_rts.qa_runner as runner
+
+    _write_scenario_file(tmp_scenarios_dir, "syn-001-real.py", "syn-001-real")
 
     with pytest.raises(SystemExit) as exc_info:
-        runner.run_next()
+        runner.run_scenario("does-not-exist")
+    assert exc_info.value.code == 1
+
+
+def test_run_scenario_not_found_lists_available(tmp_scenarios_dir, capsys):
+    import claude_rts.qa_runner as runner
+
+    _write_scenario_file(tmp_scenarios_dir, "syn-001-real.py", "syn-001-real")
+
+    with pytest.raises(SystemExit):
+        runner.run_scenario("does-not-exist")
+
+    err = capsys.readouterr().err
+    assert "syn-001-real" in err
+
+
+# ---------------------------------------------------------------------------
+# run_scenario() — success saves gate cache and exits 0
+# ---------------------------------------------------------------------------
+
+
+def test_run_scenario_success_exits_0(tmp_scenarios_dir, tmp_path, monkeypatch):
+    """Successful run saves gate cache and exits 0."""
+    import claude_rts.qa_runner as runner
+    from claude_rts.qa_scenario import HumanGate
+
+    _write_scenario_file(tmp_scenarios_dir, "syn-001-ok.py", "syn-001-ok", debt_issue=221)
+
+    monkeypatch.setattr(runner, "_start_server", lambda *a: (mock.Mock(), mock.Mock(), mock.Mock()))
+    monkeypatch.setattr(runner, "_wait_for_server", lambda *a, **kw: True)
+    monkeypatch.setattr(runner, "_stop_server", lambda *a: None)
+    monkeypatch.setattr(runner, "_gate_cache_path", lambda sid: tmp_path / f"qa-gate-{sid}.json")
+
+    gate = HumanGate(scenario_id="syn-001-ok", question="Does it look right?", expected="Yes.")
+    shot = str(tmp_path / "screenshot.png")
+    monkeypatch.setattr(runner, "_run_scenario_with_playwright", lambda inst, port: (gate, shot))
+
+    with pytest.raises(SystemExit) as exc_info:
+        runner.run_scenario("syn-001-ok")
+
     assert exc_info.value.code == 0
+
+
+def test_run_scenario_saves_gate_cache(tmp_scenarios_dir, tmp_path, monkeypatch, capsys):
+    """Gate question and expected are saved to the cache file."""
+    import claude_rts.qa_runner as runner
+    from claude_rts.qa_scenario import HumanGate
+
+    _write_scenario_file(tmp_scenarios_dir, "syn-001-cache.py", "syn-001-cache", debt_issue=221)
+
+    monkeypatch.setattr(runner, "_start_server", lambda *a: (mock.Mock(), mock.Mock(), mock.Mock()))
+    monkeypatch.setattr(runner, "_wait_for_server", lambda *a, **kw: True)
+    monkeypatch.setattr(runner, "_stop_server", lambda *a: None)
+
+    cache_path = tmp_path / "qa-gate-syn-001-cache.json"
+    monkeypatch.setattr(runner, "_gate_cache_path", lambda sid: cache_path)
+
+    gate = HumanGate(scenario_id="syn-001-cache", question="Visible?", expected="Yes visible.")
+    shot = str(tmp_path / "shot.png")
+    monkeypatch.setattr(runner, "_run_scenario_with_playwright", lambda inst, port: (gate, shot))
+
+    with pytest.raises(SystemExit):
+        runner.run_scenario("syn-001-cache")
+
+    assert cache_path.exists()
+    data = json.loads(cache_path.read_text())
+    assert data["question"] == "Visible?"
+    assert data["expected"] == "Yes visible."
+
+
+def test_run_scenario_prints_screenshot_path(tmp_scenarios_dir, tmp_path, monkeypatch, capsys):
+    """Screenshot path is printed to stdout."""
+    import claude_rts.qa_runner as runner
+    from claude_rts.qa_scenario import HumanGate
+
+    _write_scenario_file(tmp_scenarios_dir, "syn-001-shot.py", "syn-001-shot", debt_issue=221)
+
+    monkeypatch.setattr(runner, "_start_server", lambda *a: (mock.Mock(), mock.Mock(), mock.Mock()))
+    monkeypatch.setattr(runner, "_wait_for_server", lambda *a, **kw: True)
+    monkeypatch.setattr(runner, "_stop_server", lambda *a: None)
+    monkeypatch.setattr(runner, "_gate_cache_path", lambda sid: tmp_path / f"qa-gate-{sid}.json")
+
+    gate = HumanGate(scenario_id="syn-001-shot", question="q?", expected="e")
+    shot = "/tmp/qa-screenshot-syn-001-shot.png"
+    monkeypatch.setattr(runner, "_run_scenario_with_playwright", lambda inst, port: (gate, shot))
+
+    with pytest.raises(SystemExit):
+        runner.run_scenario("syn-001-shot")
+
+    out = capsys.readouterr().out
+    assert shot in out
+
+
+def test_run_scenario_server_fail_exits_1(tmp_scenarios_dir, monkeypatch):
+    """If server doesn't start, exit 1."""
+    import claude_rts.qa_runner as runner
+
+    _write_scenario_file(tmp_scenarios_dir, "syn-001-sfail.py", "syn-001-sfail")
+
+    monkeypatch.setattr(runner, "_start_server", lambda *a: (mock.Mock(), mock.Mock(), mock.Mock()))
+    monkeypatch.setattr(runner, "_wait_for_server", lambda *a, **kw: False)
+    monkeypatch.setattr(runner, "_stop_server", lambda *a: None)
+
+    with pytest.raises(SystemExit) as exc_info:
+        runner.run_scenario("syn-001-sfail")
+
+    assert exc_info.value.code == 1
+
+
+# ---------------------------------------------------------------------------
+# post_verdict() — valid verdicts
+# ---------------------------------------------------------------------------
+
+
+def test_post_verdict_pass_posts_comment(tmp_scenarios_dir, tmp_path, monkeypatch):
+    """pass verdict posts PASS comment and exits 0."""
+    import claude_rts.qa_runner as runner
+    from claude_rts.qa_scenario import HumanGate
+
+    _write_scenario_file(tmp_scenarios_dir, "syn-001-v.py", "syn-001-v", debt_issue=221)
+
+    comment_calls = []
+    monkeypatch.setattr(runner, "_post_github_comment", lambda r, i, b: comment_calls.append((r, i, b)) or True)
+    monkeypatch.setattr(runner, "_derive_repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(runner, "_current_commit_sha", lambda: "abc1234")
+
+    gate = HumanGate(scenario_id="syn-001-v", question="Is it right?", expected="Yes.")
+    monkeypatch.setattr(runner, "_gate_cache_path", lambda sid: tmp_path / f"qa-gate-{sid}.json")
+    runner._save_gate_cache("syn-001-v", gate)
+
+    with pytest.raises(SystemExit) as exc_info:
+        runner.post_verdict("syn-001-v", "pass")
+
+    assert exc_info.value.code == 0
+    assert len(comment_calls) == 1
+    repo, issue, body = comment_calls[0]
+    assert issue == 221
+    assert "PASS" in body
+    assert "syn-001-v" in body
+    assert "abc1234" in body
+
+
+def test_post_verdict_fail_posts_fail_comment(tmp_scenarios_dir, tmp_path, monkeypatch):
+    """fail verdict posts FAIL comment."""
+    import claude_rts.qa_runner as runner
+
+    _write_scenario_file(tmp_scenarios_dir, "syn-001-f.py", "syn-001-f", debt_issue=221)
+
+    bodies = []
+    monkeypatch.setattr(runner, "_post_github_comment", lambda r, i, b: bodies.append(b) or True)
+    monkeypatch.setattr(runner, "_derive_repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(runner, "_current_commit_sha", lambda: "abc1234")
+    monkeypatch.setattr(runner, "_gate_cache_path", lambda sid: tmp_path / f"no-cache-{sid}.json")
+
+    with pytest.raises(SystemExit) as exc_info:
+        runner.post_verdict("syn-001-f", "fail")
+
+    assert exc_info.value.code == 0
+    assert "FAIL" in bodies[0]
+
+
+def test_post_verdict_inconclusive(tmp_scenarios_dir, tmp_path, monkeypatch):
+    """inconclusive verdict posts INCONCLUSIVE comment."""
+    import claude_rts.qa_runner as runner
+
+    _write_scenario_file(tmp_scenarios_dir, "syn-001-i.py", "syn-001-i", debt_issue=221)
+
+    bodies = []
+    monkeypatch.setattr(runner, "_post_github_comment", lambda r, i, b: bodies.append(b) or True)
+    monkeypatch.setattr(runner, "_derive_repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(runner, "_current_commit_sha", lambda: "abc1234")
+    monkeypatch.setattr(runner, "_gate_cache_path", lambda sid: tmp_path / f"no-cache-{sid}.json")
+
+    with pytest.raises(SystemExit) as exc_info:
+        runner.post_verdict("syn-001-i", "inconclusive")
+
+    assert exc_info.value.code == 0
+    assert "INCONCLUSIVE" in bodies[0]
+
+
+def test_post_verdict_blocked(tmp_scenarios_dir, tmp_path, monkeypatch):
+    """blocked verdict posts BLOCKED comment."""
+    import claude_rts.qa_runner as runner
+
+    _write_scenario_file(tmp_scenarios_dir, "syn-001-b.py", "syn-001-b", debt_issue=221)
+
+    bodies = []
+    monkeypatch.setattr(runner, "_post_github_comment", lambda r, i, b: bodies.append(b) or True)
+    monkeypatch.setattr(runner, "_derive_repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(runner, "_current_commit_sha", lambda: "abc1234")
+    monkeypatch.setattr(runner, "_gate_cache_path", lambda sid: tmp_path / f"no-cache-{sid}.json")
+
+    with pytest.raises(SystemExit) as exc_info:
+        runner.post_verdict("syn-001-b", "blocked")
+
+    assert exc_info.value.code == 0
+    assert "BLOCKED" in bodies[0]
+
+
+def test_post_verdict_includes_notes(tmp_scenarios_dir, tmp_path, monkeypatch):
+    """Notes are included in the posted comment body."""
+    import claude_rts.qa_runner as runner
+
+    _write_scenario_file(tmp_scenarios_dir, "syn-001-n.py", "syn-001-n", debt_issue=221)
+
+    bodies = []
+    monkeypatch.setattr(runner, "_post_github_comment", lambda r, i, b: bodies.append(b) or True)
+    monkeypatch.setattr(runner, "_derive_repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(runner, "_current_commit_sha", lambda: "abc1234")
+    monkeypatch.setattr(runner, "_gate_cache_path", lambda sid: tmp_path / f"no-cache-{sid}.json")
+
+    with pytest.raises(SystemExit):
+        runner.post_verdict("syn-001-n", "pass", notes="Widget label looks correct to me")
+
+    assert "Widget label looks correct to me" in bodies[0]
+
+
+def test_post_verdict_invalid_verdict_exits_1(tmp_scenarios_dir, monkeypatch):
+    """Unknown verdict string exits 1 without posting."""
+    import claude_rts.qa_runner as runner
+
+    _write_scenario_file(tmp_scenarios_dir, "syn-001-inv.py", "syn-001-inv")
+
+    calls = []
+    monkeypatch.setattr(runner, "_post_github_comment", lambda *a: calls.append(a) or True)
+
+    with pytest.raises(SystemExit) as exc_info:
+        runner.post_verdict("syn-001-inv", "maybe")
+
+    assert exc_info.value.code == 1
+    assert calls == []
+
+
+def test_post_verdict_not_found_exits_1(tmp_scenarios_dir, monkeypatch):
+    """Unknown scenario ID exits 1."""
+    import claude_rts.qa_runner as runner
+
+    with pytest.raises(SystemExit) as exc_info:
+        runner.post_verdict("does-not-exist", "pass")
+
+    assert exc_info.value.code == 1
+
+
+def test_post_verdict_gh_failure_exits_1(tmp_scenarios_dir, tmp_path, monkeypatch):
+    """If gh comment fails, exit 1."""
+    import claude_rts.qa_runner as runner
+
+    _write_scenario_file(tmp_scenarios_dir, "syn-001-ghf.py", "syn-001-ghf", debt_issue=221)
+
+    monkeypatch.setattr(runner, "_post_github_comment", lambda *a: False)
+    monkeypatch.setattr(runner, "_derive_repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(runner, "_current_commit_sha", lambda: "abc1234")
+    monkeypatch.setattr(runner, "_gate_cache_path", lambda sid: tmp_path / f"no-cache-{sid}.json")
+
+    with pytest.raises(SystemExit) as exc_info:
+        runner.post_verdict("syn-001-ghf", "pass")
+
+    assert exc_info.value.code == 1
+
+
+def test_post_verdict_includes_gate_question_when_cache_present(tmp_scenarios_dir, tmp_path, monkeypatch):
+    """Gate question and expected appear in the comment when cache is available."""
+    import claude_rts.qa_runner as runner
+    from claude_rts.qa_scenario import HumanGate
+
+    _write_scenario_file(tmp_scenarios_dir, "syn-001-gq.py", "syn-001-gq", debt_issue=221)
+
+    bodies = []
+    monkeypatch.setattr(runner, "_post_github_comment", lambda r, i, b: bodies.append(b) or True)
+    monkeypatch.setattr(runner, "_derive_repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(runner, "_current_commit_sha", lambda: "abc1234")
+
+    gate = HumanGate(scenario_id="syn-001-gq", question="Is the label correct?", expected="Label reads X.")
+    monkeypatch.setattr(runner, "_gate_cache_path", lambda sid: tmp_path / f"qa-gate-{sid}.json")
+    runner._save_gate_cache("syn-001-gq", gate)
+
+    with pytest.raises(SystemExit):
+        runner.post_verdict("syn-001-gq", "pass")
+
+    assert "Is the label correct?" in bodies[0]
+    assert "Label reads X." in bodies[0]
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +617,7 @@ def test_synthetic_scenario_loads():
     assert cls.preset == "default"
 
 
-def test_synthetic_scenario_run_setup_returns_human_gate(monkeypatch):
+def test_synthetic_scenario_run_setup_returns_human_gate():
     """run_setup should return a HumanGate when given a mock page."""
     import claude_rts.qa_runner as runner
     from claude_rts.qa_scenario import HumanGate
@@ -401,7 +626,6 @@ def test_synthetic_scenario_run_setup_returns_human_gate(monkeypatch):
     cls = runner._load_scenario_class(path)
     assert cls is not None
 
-    # Build a minimal mock Playwright page.
     mock_page = mock.Mock()
     mock_page.evaluate.return_value = {"ok": True, "card_id": "card-abc"}
 

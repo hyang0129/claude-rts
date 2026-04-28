@@ -1,32 +1,22 @@
-"""QA runner — ``python -m claude_rts qa next``.
+"""QA runner — ``python -m claude_rts qa run <scenario-id>`` / ``qa list`` / ``qa verdict``.
 
-Discovers authored scenarios in ``qa_scenarios/``, filters out already-verdicted
-ones, launches the app, drives Playwright to the human gate, reads y/n/s, and
-records the verdict locally and as a GitHub comment on the linked debt issue.
+The CLI is a dumb runner: it accepts a scenario ID, drives Playwright to the
+human gate state, takes a screenshot, and exits.  Verdict posting is a separate
+command so the agent can assess the screenshot first and record the human's
+judgment after.
 
-Verdict storage
----------------
-``~/.supreme-claudemander/qa-verdicts.jsonl`` — one JSON record per line:
-
-    {"scenario_id": "syn-001-...", "commit_sha": "abc1234", "verdict": "yes",
-     "timestamp": "2026-04-27T16:00:00Z", "question": "Does the terminal appear?"}
-
-A scenario is considered "discharged" when it has a record with
-``verdict in {"yes", "no"}`` for **any** commit SHA.  Skipped (``"skip"``) verdicts
-are stored for audit/ordering but do not discharge the item — the scenario
-re-appears on the next ``qa next`` invocation.
-
-Ordering
---------
-Scenarios are sorted alphabetically by filename.  The naming convention
-``<prefix>-<NNN>-<slug>.py`` naturally encodes priority order.
+GitHub issue comments are the only verdict record.  An agent reads the debt
+issue to determine which scenarios are unverified, then calls
+``python -m claude_rts qa run <id>`` for each one, reads the screenshot, and
+calls ``python -m claude_rts qa verdict <id> <verdict>`` after the human
+confirms.  See ``docs/qa-scenarios.md`` for the full agent workflow.
 
 Browser mode
 ------------
-``qa next`` launches a headed (visible) browser by default so the human can see
-the app state at the gate.  Override with the ``HEADED`` environment variable:
-  ``HEADED=0 python -m claude_rts qa next``   → headless (useful for wiring tests)
-  ``HEADED=1 python -m claude_rts qa next``   → headed (default)
+Headless by default — the screenshot is the output artifact.
+Override with the ``HEADED`` environment variable to watch via noVNC:
+  ``HEADED=1 python -m claude_rts qa run <id>``   → headed (visible in noVNC)
+  ``HEADED=0 python -m claude_rts qa run <id>``   → headless (default)
 """
 
 from __future__ import annotations
@@ -41,23 +31,26 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    pass
 
 # ---------------------------------------------------------------------------
 # Constants / paths
 # ---------------------------------------------------------------------------
 
-_VERDICTS_FILE = pathlib.Path.home() / ".supreme-claudemander" / "qa-verdicts.jsonl"
 _SCENARIOS_DIR = pathlib.Path(__file__).resolve().parent.parent / "qa_scenarios"
 
 _FALLBACK_REPO = "hyang0129/supreme-claudemander"
 
-# Port used by the qa next backend — distinct from the default 3000 so it
+# Port used by the qa runner backend — distinct from the default 3000 so it
 # does not collide with a running production server.
 _QA_PORT = 3097
+
+_VERDICT_OPTIONS = ("pass", "fail", "inconclusive", "blocked")
+_VERDICT_LABELS = {
+    "pass": "PASS ✓",
+    "fail": "FAIL ✗",
+    "inconclusive": "INCONCLUSIVE ?",
+    "blocked": "BLOCKED ⊘",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -66,11 +59,7 @@ _QA_PORT = 3097
 
 
 def _derive_repo_slug() -> str:
-    """Derive the GitHub repo slug from the git remote origin URL.
-
-    Falls back to ``hyang0129/supreme-claudemander`` with a warning if the
-    remote URL cannot be parsed.
-    """
+    """Derive the GitHub repo slug from the git remote origin URL."""
     try:
         result = subprocess.run(
             ["git", "remote", "get-url", "origin"],
@@ -79,11 +68,9 @@ def _derive_repo_slug() -> str:
             timeout=5,
         )
         url = result.stdout.strip()
-        # HTTPS: https://github.com/owner/repo.git
         m = re.match(r"https?://github\.com/([^/]+/[^/]+?)(?:\.git)?$", url)
         if m:
             return m.group(1)
-        # SSH: git@github.com:owner/repo.git
         m = re.match(r"git@github\.com:([^/]+/[^/]+?)(?:\.git)?$", url)
         if m:
             return m.group(1)
@@ -111,34 +98,6 @@ def _current_commit_sha() -> str:
         return "unknown"
 
 
-def _load_verdicts() -> list[dict]:
-    """Load all verdict records from the verdicts JSONL file."""
-    if not _VERDICTS_FILE.exists():
-        return []
-    records = []
-    with _VERDICTS_FILE.open(encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line:
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
-    return records
-
-
-def _discharged_scenario_ids(verdicts: list[dict]) -> set[str]:
-    """Return the set of scenario IDs that have been discharged (yes or no verdict)."""
-    return {r["scenario_id"] for r in verdicts if r.get("verdict") in {"yes", "no"}}
-
-
-def _append_verdict(record: dict) -> None:
-    """Append a single verdict record to the verdicts JSONL file."""
-    _VERDICTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with _VERDICTS_FILE.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record) + "\n")
-
-
 def _post_github_comment(repo: str, issue_number: int, body: str) -> bool:
     """Post a comment on the given GitHub issue using the gh CLI.
 
@@ -153,20 +112,61 @@ def _post_github_comment(repo: str, issue_number: int, body: str) -> bool:
         )
         if result.returncode != 0:
             print(
-                f"[qa] Warning: gh issue comment failed (exit {result.returncode}): {result.stderr.strip()}",
+                f"[qa] gh issue comment failed (exit {result.returncode}): {result.stderr.strip()}",
                 file=sys.stderr,
             )
             return False
         return True
     except FileNotFoundError:
         print(
-            "[qa] Warning: 'gh' CLI not found — verdict comment not posted to GitHub.",
+            "[qa] 'gh' CLI not found — install it from https://cli.github.com/",
             file=sys.stderr,
         )
         return False
     except Exception as exc:
-        print(f"[qa] Warning: gh issue comment error: {exc}", file=sys.stderr)
+        print(f"[qa] gh issue comment error: {exc}", file=sys.stderr)
         return False
+
+
+# ---------------------------------------------------------------------------
+# Gate cache — persists gate question/expected between `qa run` and `qa verdict`
+# ---------------------------------------------------------------------------
+
+
+def _gate_cache_path(scenario_id: str) -> pathlib.Path:
+    return pathlib.Path(tempfile.gettempdir()) / f"qa-gate-{scenario_id}.json"
+
+
+def _save_gate_cache(scenario_id: str, gate) -> None:
+    data = {
+        "scenario_id": gate.scenario_id,
+        "question": gate.question,
+        "expected": gate.expected,
+    }
+    _gate_cache_path(scenario_id).write_text(json.dumps(data), encoding="utf-8")
+
+
+def _load_gate_cache(scenario_id: str):
+    """Return a HumanGate loaded from the cache, or None if not found."""
+    from claude_rts.qa_scenario import HumanGate
+
+    path = _gate_cache_path(scenario_id)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return HumanGate(**data)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Screenshot path — deterministic so caller can reference it
+# ---------------------------------------------------------------------------
+
+
+def _screenshot_path(scenario_id: str) -> pathlib.Path:
+    return pathlib.Path(tempfile.gettempdir()) / f"qa-screenshot-{scenario_id}.png"
 
 
 # ---------------------------------------------------------------------------
@@ -184,8 +184,7 @@ def _discover_scenarios() -> list[pathlib.Path]:
 def _load_scenario_class(path: pathlib.Path):
     """Import a scenario file and return its ``Scenario`` class.
 
-    The file must define a class named ``Scenario`` that implements
-    ``QAScenario``.  Returns ``None`` with a warning if loading fails.
+    Returns ``None`` with a warning if loading fails.
     """
     spec = importlib.util.spec_from_file_location(f"qa_scenario_{path.stem}", path)
     if spec is None or spec.loader is None:
@@ -202,6 +201,26 @@ def _load_scenario_class(path: pathlib.Path):
         print(f"[qa] Warning: {path} has no 'Scenario' class — skipping", file=sys.stderr)
         return None
     return cls
+
+
+def _find_scenario_class(scenario_id: str):
+    """Find and load the scenario class matching ``scenario_id``.
+
+    Returns ``(cls, available_ids)`` where ``cls`` is ``None`` if not found.
+    """
+    paths = _discover_scenarios()
+    available = []
+    for path in paths:
+        cls = _load_scenario_class(path)
+        if cls is None:
+            continue
+        sid = getattr(cls, "scenario_id", None)
+        if sid is None:
+            continue
+        available.append(sid)
+        if sid == scenario_id:
+            return cls, available
+    return None, available
 
 
 # ---------------------------------------------------------------------------
@@ -228,11 +247,7 @@ def _wait_for_server(port: int, timeout: float = 30.0) -> bool:
 def _start_server(
     preset: str, port: int
 ) -> tuple[subprocess.Popen, tempfile.NamedTemporaryFile, tempfile.NamedTemporaryFile]:  # type: ignore[type-arg]
-    """Start the backend server with the given dev-config preset.
-
-    Returns ``(proc, stdout_file, stderr_file)``.  Caller must terminate the
-    process and clean up the temp files.
-    """
+    """Start the backend server with the given dev-config preset."""
     stdout_file = tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False, prefix="qa-stdout-")
     stderr_file = tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False, prefix="qa-stderr-")
     env = os.environ.copy()
@@ -274,53 +289,14 @@ def _stop_server(
 
 
 # ---------------------------------------------------------------------------
-# Gate I/O
-# ---------------------------------------------------------------------------
-
-
-def _read_single_keystroke() -> str:
-    """Read a single keystroke from stdin without requiring Enter.
-
-    Falls back to ``input()`` if the terminal is not a TTY (e.g. tests).
-    """
-    if not sys.stdin.isatty():
-        line = sys.stdin.readline().strip().lower()
-        return line[0] if line else ""
-
-    import tty
-    import termios
-
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-    return ch.lower()
-
-
-def _print_gate(gate) -> None:  # gate: HumanGate
-    """Print the human gate prompt to stdout."""
-    print("\n" + "=" * 70)
-    print("HUMAN JUDGMENT GATE")
-    print("=" * 70)
-    print(f"\nQuestion: {gate.question}")
-    print(f"Expected: {gate.expected}")
-    print("\nAnswer: [y]es  [n]o  [s]kip")
-    print("(Press a single key — no Enter needed)")
-    sys.stdout.flush()
-
-
-# ---------------------------------------------------------------------------
 # Playwright runner
 # ---------------------------------------------------------------------------
 
 
 def _run_scenario_with_playwright(scenario_instance, port: int) -> "tuple[HumanGate, str]":  # noqa: F821
-    """Launch Playwright, navigate to the app, and run the scenario setup.
+    """Launch Playwright, navigate to the app, run the scenario setup, and take a screenshot.
 
-    Returns the ``HumanGate`` from ``run_setup()``.
+    Returns ``(gate, screenshot_path)`` where ``screenshot_path`` is the saved PNG.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -332,7 +308,9 @@ def _run_scenario_with_playwright(scenario_instance, port: int) -> "tuple[HumanG
         )
         sys.exit(1)
 
-    headed = os.environ.get("HEADED", "1").lower() not in ("0", "false")
+    headed = os.environ.get("HEADED", "0").lower() not in ("0", "false")
+    sid = getattr(scenario_instance, "scenario_id", "unknown")
+    shot_path = str(_screenshot_path(sid))
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=not headed)
@@ -347,60 +325,74 @@ def _run_scenario_with_playwright(scenario_instance, port: int) -> "tuple[HumanG
 
         gate = scenario_instance.run_setup(page)
 
-        # Keep the browser open so the human can see the state.
-        # The gate prompt is printed AFTER setup completes.
-        _print_gate(gate)
-
-        ch = _read_single_keystroke()
-        print(f"\nYou answered: {ch!r}")
-        sys.stdout.flush()
-
+        page.screenshot(path=shot_path, full_page=False)
         browser.close()
 
-    return gate, ch
+    return gate, shot_path
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Public entry points
 # ---------------------------------------------------------------------------
 
 
-def run_next() -> None:
-    """Execute the next unverified scenario.
+def list_scenarios() -> None:
+    """Print all discovered scenario IDs and their linked debt issues.
 
-    Called by ``python -m claude_rts qa next``.
+    Called by ``python -m claude_rts qa list``.
     """
-    scenario_paths = _discover_scenarios()
-    if not scenario_paths:
-        print("[qa] No scenarios found in qa_scenarios/. Nothing to run.")
+    paths = _discover_scenarios()
+    if not paths:
+        print("[qa] No scenarios found in qa_scenarios/.")
         sys.exit(0)
 
-    verdicts = _load_verdicts()
-    discharged = _discharged_scenario_ids(verdicts)
-
-    # Find the first unverified scenario (alphabetical order, skip discharged).
-    next_path = None
-    next_cls = None
-    for path in scenario_paths:
+    rows = []
+    for path in paths:
         cls = _load_scenario_class(path)
         if cls is None:
             continue
         sid = getattr(cls, "scenario_id", None)
         if sid is None:
-            print(f"[qa] Warning: {path} Scenario missing scenario_id — skipping", file=sys.stderr)
             continue
-        if sid not in discharged:
-            next_path = path
-            next_cls = cls
-            break
+        issue = getattr(cls, "debt_issue", "?")
+        preset = getattr(cls, "preset", "default")
+        rows.append((sid, issue, preset))
 
-    if next_path is None:
-        print("[qa] No unverified scenarios. All scenarios have been discharged. Exiting.")
+    if not rows:
+        print("[qa] No valid scenarios found.")
         sys.exit(0)
 
-    preset = getattr(next_cls, "preset", "default")
-    debt_issue = getattr(next_cls, "debt_issue", None)
-    scenario_id = next_cls.scenario_id
+    print(f"{'SCENARIO ID':<45} {'DEBT ISSUE':<12} PRESET")
+    print("-" * 70)
+    for sid, issue, preset in rows:
+        print(f"{sid:<45} #{issue:<11} {preset}")
+    sys.exit(0)
+
+
+def run_scenario(scenario_id: str) -> None:
+    """Drive Playwright to the gate state and save a screenshot.
+
+    Prints the gate question, expected state, and screenshot path to stdout.
+    Does NOT post a verdict comment — use ``qa verdict`` for that after
+    assessing the screenshot.
+
+    Called by ``python -m claude_rts qa run <scenario-id>``.
+
+    Exits 0 on success.
+    Exits 1 if the scenario is not found or the server fails to start.
+    """
+    cls, available = _find_scenario_class(scenario_id)
+
+    if cls is None:
+        print(f"[qa] ERROR: scenario '{scenario_id}' not found.", file=sys.stderr)
+        if available:
+            print(f"[qa] Available scenarios: {', '.join(available)}", file=sys.stderr)
+        else:
+            print("[qa] No scenarios found in qa_scenarios/.", file=sys.stderr)
+        sys.exit(1)
+
+    preset = getattr(cls, "preset", "default")
+    debt_issue = getattr(cls, "debt_issue", None)
 
     print(f"[qa] Running scenario: {scenario_id}")
     print(f"[qa] Preset: {preset}   Debt issue: #{debt_issue}")
@@ -415,49 +407,94 @@ def run_next() -> None:
 
         print(f"[qa] Server ready at http://localhost:{_QA_PORT}")
 
-        scenario_instance = next_cls()
-        gate, ch = _run_scenario_with_playwright(scenario_instance, _QA_PORT)
+        scenario_instance = cls()
+        gate, shot_path = _run_scenario_with_playwright(scenario_instance, _QA_PORT)
 
     finally:
         _stop_server(proc, stdout_file, stderr_file)
 
-    # Map keystroke to verdict
-    verdict_map = {"y": "yes", "n": "no", "s": "skip"}
-    verdict = verdict_map.get(ch)
-    if verdict is None:
-        print(f"[qa] Unrecognised key '{ch}' — treating as skip.")
-        verdict = "skip"
+    _save_gate_cache(scenario_id, gate)
+
+    print("\n" + "=" * 70)
+    print("QA GATE STATE REACHED")
+    print("=" * 70)
+    print(f"\nScenario:    {scenario_id}")
+    print(f"Question:    {gate.question}")
+    print(f"Expected:    {gate.expected}")
+    print(f"Screenshot:  {shot_path}")
+    print(
+        f"\nAssess the screenshot, then record a verdict:\n"
+        f"  python -m claude_rts qa verdict {scenario_id} <pass|fail|inconclusive|blocked>"
+        f' [--notes "..."]'
+    )
+    sys.exit(0)
+
+
+def post_verdict(scenario_id: str, verdict: str, notes: str = "") -> None:
+    """Post a verdict comment to the linked GitHub debt issue.
+
+    ``verdict`` must be one of: pass, fail, inconclusive, blocked.
+    ``notes`` is an optional free-form string appended to the comment.
+
+    Called by ``python -m claude_rts qa verdict <scenario-id> <verdict>``.
+
+    Exits 0 on success.
+    Exits 1 if the scenario is not found, verdict is invalid, or gh fails.
+    """
+    if verdict not in _VERDICT_OPTIONS:
+        print(
+            f"[qa] ERROR: verdict must be one of: {', '.join(_VERDICT_OPTIONS)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    cls, available = _find_scenario_class(scenario_id)
+
+    if cls is None:
+        print(f"[qa] ERROR: scenario '{scenario_id}' not found.", file=sys.stderr)
+        if available:
+            print(f"[qa] Available scenarios: {', '.join(available)}", file=sys.stderr)
+        sys.exit(1)
+
+    debt_issue = getattr(cls, "debt_issue", None)
+    if debt_issue is None:
+        print("[qa] ERROR: scenario has no debt_issue — cannot post verdict comment.", file=sys.stderr)
+        sys.exit(1)
+
+    gate = _load_gate_cache(scenario_id)
 
     commit_sha = _current_commit_sha()
     timestamp = datetime.now(timezone.utc).isoformat()
+    verdict_label = _VERDICT_LABELS[verdict]
 
-    record = {
-        "scenario_id": scenario_id,
-        "commit_sha": commit_sha,
-        "verdict": verdict,
-        "timestamp": timestamp,
-        "question": gate.question,
-    }
-    _append_verdict(record)
-    print(f"[qa] Verdict '{verdict}' saved to {_VERDICTS_FILE}")
+    lines = [
+        f"## QA Verdict: {verdict_label}",
+        "",
+        f"**Scenario:** `{scenario_id}`",
+    ]
+    if gate is not None:
+        lines += [
+            f"**Question:** {gate.question}",
+            f"**Expected:** {gate.expected}",
+        ]
+    lines += [
+        f"**Verdict:** {verdict}",
+    ]
+    if notes:
+        lines.append(f"**Notes:** {notes}")
+    lines += [
+        f"**Commit:** `{commit_sha}`",
+        f"**Timestamp:** {timestamp}",
+        "",
+        f"*Recorded by `python -m claude_rts qa verdict {scenario_id} {verdict}`*",
+    ]
+    body = "\n".join(lines)
 
-    if verdict in {"yes", "no"} and debt_issue is not None:
-        repo = _derive_repo_slug()
-        verdict_label = "PASS ✓" if verdict == "yes" else "FAIL ✗"
-        body = (
-            f"## QA Verdict: {verdict_label}\n\n"
-            f"**Scenario:** `{scenario_id}`\n"
-            f"**Question:** {gate.question}\n"
-            f"**Expected:** {gate.expected}\n"
-            f"**Verdict:** {verdict}\n"
-            f"**Commit:** `{commit_sha}`\n"
-            f"**Timestamp:** {timestamp}\n\n"
-            f"*Recorded by `python -m claude_rts qa next`*"
-        )
-        ok = _post_github_comment(repo, debt_issue, body)
-        if ok:
-            print(f"[qa] Verdict comment posted to {repo}#{debt_issue}")
-        else:
-            print(f"[qa] Warning: could not post verdict comment to {repo}#{debt_issue}", file=sys.stderr)
-    elif verdict == "skip":
-        print("[qa] Skipped — no GitHub comment posted. Scenario will re-appear next run.")
+    repo = _derive_repo_slug()
+    ok = _post_github_comment(repo, debt_issue, body)
+    if not ok:
+        print(f"[qa] ERROR: could not post verdict comment to {repo}#{debt_issue}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[qa] Verdict '{verdict}' posted to {repo}#{debt_issue}")
+    sys.exit(0)

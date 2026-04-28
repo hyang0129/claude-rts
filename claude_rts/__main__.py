@@ -63,13 +63,41 @@ def main():
     # ── 'qa' subcommand ─────────────────────────────────────────────────────
     qa_parser = subparsers.add_parser("qa", help="QA scenario runner commands")
     qa_subparsers = qa_parser.add_subparsers(dest="qa_action")
-    qa_subparsers.add_parser(
-        "next",
+
+    qa_run_parser = qa_subparsers.add_parser(
+        "run",
         help=(
-            "Run the next unverified QA scenario. Launches the app, drives Playwright "
-            "to the gate state, reads y/n/s from the human, and records the verdict. "
-            "Set HEADED=0 to run headless (default: headed)."
+            "Drive a named QA scenario to the gate state and capture a screenshot. "
+            "Headless by default; set HEADED=1 to watch via noVNC. "
+            "Use 'qa verdict <id> <verdict>' afterward to post the verdict to GitHub."
         ),
+    )
+    qa_run_parser.add_argument("scenario_id", help="Scenario ID to run (see: qa list)")
+
+    qa_subparsers.add_parser(
+        "list",
+        help="List all available QA scenario IDs and their linked debt issue numbers.",
+    )
+
+    qa_verdict_parser = qa_subparsers.add_parser(
+        "verdict",
+        help=(
+            "Post a verdict comment to the linked GitHub debt issue. "
+            "Run 'qa run <id>' first to drive the app to the gate state and capture a screenshot, "
+            "then call this command after assessing the screenshot."
+        ),
+    )
+    qa_verdict_parser.add_argument("scenario_id", help="Scenario ID (see: qa list)")
+    qa_verdict_parser.add_argument(
+        "verdict",
+        choices=["pass", "fail", "inconclusive", "blocked"],
+        help="Verdict to record",
+    )
+    qa_verdict_parser.add_argument(
+        "--notes",
+        default="",
+        metavar="TEXT",
+        help="Optional free-form notes appended to the verdict comment",
     )
 
     # ── Server arguments (only apply when no subcommand is given) ───────────
@@ -100,10 +128,20 @@ def main():
 
     # ── Dispatch qa subcommand before any server setup ───────────────────────
     if args.subcommand == "qa":
-        if args.qa_action == "next":
-            from .qa_runner import run_next
+        if args.qa_action == "run":
+            from .qa_runner import run_scenario
 
-            run_next()
+            run_scenario(args.scenario_id)
+            return
+        elif args.qa_action == "list":
+            from .qa_runner import list_scenarios
+
+            list_scenarios()
+            return
+        elif args.qa_action == "verdict":
+            from .qa_runner import post_verdict
+
+            post_verdict(args.scenario_id, args.verdict, notes=args.notes)
             return
         else:
             qa_parser.print_help()
