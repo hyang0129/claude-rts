@@ -8,7 +8,7 @@
   },
   "initializeCommand": ".devcontainer\\initialize.cmd",
   "postCreateCommand": ".devcontainer/post-create.sh",
-  "postStartCommand": "sudo -n chmod 666 /var/run/docker.sock 2>/dev/null || true; .devcontainer/start-cpu-poller.sh",
+  "postStartCommand": "sudo -n chmod 666 /var/run/docker.sock 2>/dev/null || true; .devcontainer/start-cpu-poller.sh; .devcontainer/start-novnc.sh",
   "remoteUser": "vscode",
   "mounts": [
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind,consistency=cached",
@@ -18,12 +18,14 @@
 
   "containerEnv": {
     "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",
-    "GH_TOKEN": "${localEnv:GH_TOKEN}"
+    "GH_TOKEN": "${localEnv:GH_TOKEN}",
+    "DISPLAY": ":99"
   },
 
-  "forwardPorts": [3000],
+  "forwardPorts": [3000, 6081],
   "portsAttributes": {
-    "3000": { "label": "supreme-claudemander", "onAutoForward": "openBrowser" }
+    "3000": { "label": "supreme-claudemander", "onAutoForward": "openBrowser" },
+    "6081": { "label": "noVNC", "onAutoForward": "ignore" }
   },
 
   "runArgs": [

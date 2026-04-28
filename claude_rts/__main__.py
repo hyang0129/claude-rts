@@ -52,8 +52,55 @@ def _check_electron_installed():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="supreme-claudemander terminal canvas")
+    parser = argparse.ArgumentParser(
+        description="supreme-claudemander terminal canvas",
+        # Allow 'qa next' subcommand without breaking bare 'python -m claude_rts'
+    )
     parser.add_argument("--version", action="version", version=f"supreme-claudemander {_get_version()}")
+
+    subparsers = parser.add_subparsers(dest="subcommand")
+
+    # ── 'qa' subcommand ─────────────────────────────────────────────────────
+    qa_parser = subparsers.add_parser("qa", help="QA scenario runner commands")
+    qa_subparsers = qa_parser.add_subparsers(dest="qa_action")
+
+    qa_run_parser = qa_subparsers.add_parser(
+        "run",
+        help=(
+            "Drive a named QA scenario to the gate state and capture a screenshot. "
+            "Headless by default; set HEADED=1 to watch via noVNC. "
+            "Use 'qa verdict <id> <verdict>' afterward to post the verdict to GitHub."
+        ),
+    )
+    qa_run_parser.add_argument("scenario_id", help="Scenario ID to run (see: qa list)")
+
+    qa_subparsers.add_parser(
+        "list",
+        help="List all available QA scenario IDs and their linked debt issue numbers.",
+    )
+
+    qa_verdict_parser = qa_subparsers.add_parser(
+        "verdict",
+        help=(
+            "Post a verdict comment to the linked GitHub debt issue. "
+            "Run 'qa run <id>' first to drive the app to the gate state and capture a screenshot, "
+            "then call this command after assessing the screenshot."
+        ),
+    )
+    qa_verdict_parser.add_argument("scenario_id", help="Scenario ID (see: qa list)")
+    qa_verdict_parser.add_argument(
+        "verdict",
+        choices=["pass", "fail", "inconclusive", "blocked"],
+        help="Verdict to record",
+    )
+    qa_verdict_parser.add_argument(
+        "--notes",
+        default="",
+        metavar="TEXT",
+        help="Optional free-form notes appended to the verdict comment",
+    )
+
+    # ── Server arguments (only apply when no subcommand is given) ───────────
     parser.add_argument("--port", type=int, default=3000, help="Server port (default: 3000)")
     parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
     parser.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
@@ -78,6 +125,27 @@ def main():
         ),
     )
     args = parser.parse_args()
+
+    # ── Dispatch qa subcommand before any server setup ───────────────────────
+    if args.subcommand == "qa":
+        if args.qa_action == "run":
+            from .qa_runner import run_scenario
+
+            run_scenario(args.scenario_id)
+            return
+        elif args.qa_action == "list":
+            from .qa_runner import list_scenarios
+
+            list_scenarios()
+            return
+        elif args.qa_action == "verdict":
+            from .qa_runner import post_verdict
+
+            post_verdict(args.scenario_id, args.verdict, notes=args.notes)
+            return
+        else:
+            qa_parser.print_help()
+            sys.exit(1)
 
     import os
 
