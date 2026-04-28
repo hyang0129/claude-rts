@@ -41,6 +41,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libxkbcommon0 \
     libxrandr2
 
+# noVNC display stack (Xvfb virtual framebuffer + x11vnc + websockify/noVNC web client)
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get -y install --no-install-recommends \
+    xvfb \
+    x11vnc \
+    novnc \
+    xauth \
+    libxtst6
+
 RUN npm install -g @anthropic-ai/claude-code
 
 # Create vscode user; grant passwordless chmod for fixing the Docker socket group at runtime
